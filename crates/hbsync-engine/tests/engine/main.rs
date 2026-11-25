@@ -23,6 +23,19 @@ use common::{Client, conflicted, gone_unheard, node_named, server};
 
 type R = Result<(), Box<dyn std::error::Error>>;
 
+/// Every file of `server`'s drive at its version, marked live or in Recently deleted: the
+/// same before and after means nothing was written there (no change, removal, restore or
+/// delete for good).
+fn drive_versions(server: &Arc<Mutex<hbsync_remote::fake::FakeServer>>) -> Vec<(bool, RemoteRef)> {
+    let server = server.lock().expect("server");
+    let live = server.live().map(|h| (true, h.at()));
+    let mut all: Vec<(bool, RemoteRef)> = live
+        .chain(server.removed().map(|h| (false, h.at())))
+        .collect();
+    all.sort_by_key(|(live, r)| (r.file_id, *live));
+    all
+}
+
 fn ignoring(rules: &'static str) -> impl Fn(&mut hbsync_engine::EngineConfig) {
     move |cfg| {
         cfg.folder.filter = std::sync::Arc::new(

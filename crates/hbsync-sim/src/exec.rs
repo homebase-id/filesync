@@ -631,10 +631,10 @@ impl Sim {
         };
         let plan = reconcile_with_known(&input, &opts, masking, known);
         // A member that writes plans only what it may (§13): a change of a node it may change,
-        // where the drive has it, or its move between two folders it may change; a node made
-        // in such a folder (or in one the plan makes there); a node it may change removed, a
-        // folder only with all it reads in it. Nothing at the top, and no name another node
-        // of the drive holds, as it reads it.
+        // where the drive has it, or its move between two folders it may change (or into one
+        // the plan makes there); a node made in such a folder (or in one the plan makes
+        // there); a node it may change removed, a folder only with all it reads in it.
+        // Nothing at the top, and no name another node of the drive holds, as it reads it.
         if client.writes {
             // (Not onto its own name spelled otherwise: what holds that with it did before.)
             let taken = |node: NodeId, parent: NodeId, name: &str| {
@@ -652,8 +652,11 @@ impl Sim {
                 Op::RemoteUpdate {
                     node, parent, name, ..
                 } => {
+                    // (Into a folder this plan makes in one it may add to: shared as that one
+                    // is, once made, which it is before the move runs.)
                     let moves = |r: &NodeState| {
-                        r.parent != *parent && !(adds_to(parent) && adds_to(&r.parent))
+                        let to = adds_to(parent) || made.contains(parent);
+                        r.parent != *parent && !(to && adds_to(&r.parent))
                     };
                     !input.writable.contains(node)
                         || input.remote.get(*node).is_none_or(moves)
@@ -2100,12 +2103,14 @@ impl Sim {
                 Some(server) if server.remote.version != expected => Skip, // changed meanwhile
                 // Removed to Recently deleted now, or already gone: done either way.
                 _ => {
-                    let now = self.on_drive(node);
+                    // (As a member reads it now, or as the whole drive has it: the place a
+                    // member reads changes with its folder's share, which is no move.)
+                    let now = [self.on_drive(node), self.on_whole_drive(node)];
                     // Rightly so where a user deleted it as it is now, or a folder's removal had
                     // taken it along when the plan was made: anything else the engine removes no
                     // user wanted gone.
                     let version = self.server.live.get(&node).map(|n| n.remote.version);
-                    let rightly = now.as_ref().is_some_and(|now| {
+                    let rightly = now.iter().flatten().any(|now| {
                         self.ledger.deleted_by_user(node, now)
                             || self.ledger.removed_by_lost_commit(c, node, now)
                     }) || version
