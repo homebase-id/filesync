@@ -1743,11 +1743,10 @@ rules hold too:
   sharer and the Homebase adapter share a new item with its folder's rows):
   - what is new here in such a folder is added there, a new folder with what is in it: a
     folder is made before what is in it, in the same run where its create is answered at
-    once (a write still on its way there, as Homebase's can be, leaves what is in it for
-    a later plan, once the feed brought the folder's row; meanwhile the guard's refusal
-    of it reads "the folder is read-only", which is the wrong word for it: to be put
-    right with writes on their way); new at the top (no folder of
-    the drive's) or in a folder shared for reading, it moves out, as before;
+    once (a create still on its way there, below, leaves what is in it for a later plan,
+    once the feed brought the folder's row: told that its folder is on its way, not
+    refused); new at the top (no folder of the drive's) or in a folder shared for
+    reading, it moves out, as before;
   - what is added under a name another item holds there goes under the first free
     numbered name, as a clash's loser does on an identity's own drive (§6.3);
   - the executor's last guard makes a node only in a folder the store says may be
@@ -1835,9 +1834,36 @@ rules hold too:
   this device ignores (§10) follows the drive: an ignore rule here removes nothing there.
   Simulator: `a_writing_member_writes_only_what_it_may_and_converges`, the same in pages
   that crash, and on the engine's planning path; scripted cases in
-  `regressions/writing_member.rs`. No folder writes yet (nothing turns it on): the daemon
-  turns it on with the permission to send to other identities, once a write still on its
-  way no longer stops the whole share (the next step).
+  `regressions/writing_member.rs`.
+
+  **A write on its way waits alone.** A member's write goes through its own server, which
+  hands it to the owner's: it can be on its way there for a while (their server busy or
+  down), and the adapter says so of that write (`RemoteError::OnItsWay`, asked again in a
+  minute; not the whole share's wait for someone, which stops the share: not connected,
+  their key not opened yet, a send this identity's server couldn't queue).
+  - The operation is left for a later plan, as it is, and the run goes on: what the owner
+    changed comes down in the same sync, and the other writes go up. Asked again as it
+    was, the write is answered from what was sent (landed, or still on its way): nothing
+    is sent twice. Their server is asked once a sync for it, not once a round, and the
+    sync, ending with work left, isn't tried again before the minute is over.
+  - Another write of the same item meanwhile (edited again) is another write: it waits
+    behind the first (the member's server stages one write of an item at a time), and
+    once the first has landed it meets that version: the second edit is then kept as an
+    edit made on both sides is (a conflict copy where its folder may be added to, moved
+    out elsewhere). A copy of one's own edit, and nothing lost: to be spared by
+    remembering what was sent (not done).
+  - After three writes on their way in a row, none taken between them, the run's other
+    writes to that drive are held, unsent: their server isn't taking any, and each would
+    cost the wait for its answer (and a file its upload) to learn the same.
+  - What is to go into a folder whose own create or move is on its way waits for it: the
+    store has no row of that folder to ask yet. Told so, left for the next plan with
+    it, and not refused as going into a folder that is read-only.
+  - A write the owner's server doesn't take in the end (their file changed meanwhile,
+    the share turned to reading) is told as such when it is asked again, and the item
+    planned from what is there: the owner's change wins, as against any stale write.
+
+  No folder writes yet (nothing turns it on): the daemon turns it on with the permission
+  to send to other identities (the next step).
   So a folder synced from another identity's drive is read-only (above), whatever its items
   say. A share's state DB from before it was kept reads its
   feed from its beginning once (a re-read, §8b), each row taking what its header says.
