@@ -1026,8 +1026,8 @@ impl Engine {
         // Another identity's share that isn't written to: whether anything in it is shared
         // for editing (the product asks its owner to let it write then). One query of the
         // mirror, at an engine's first sync and after each that planned something.
-        let folder = &self.cfg.folder;
-        if folder.read_only.is_some() && !folder.writes && self.drive.shared() {
+        // (Another identity's drive is only ever synced read-only: [`Engine::new`].)
+        if self.drive.shared() && !self.cfg.folder.writes {
             if self.editable.is_none() || report.rounds > 0 {
                 self.editable = Some(self.db.read(|s| s.any_writable())?);
             }
