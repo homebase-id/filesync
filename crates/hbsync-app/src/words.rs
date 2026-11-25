@@ -314,6 +314,35 @@ pub fn last_name(path: &str) -> &str {
 pub const NO_PUT_BACK: &str = "This folder is read-only: what it holds back can't be put back \
                                on Homebase, only deleted here or left held";
 
+/// What the app may do with the permissions `lacks` names, once the owner gives them: for
+/// "{APP_NAME} may now …", "let {APP_NAME} …", "the permission to …". (None: nothing.)
+pub fn permitted(lacks: hbsync_homebase::app::Lacks) -> &'static str {
+    match (lacks.reads, lacks.sends) {
+        (true, true) => "read what others share with you, and change what they share for editing",
+        (true, false) => "read what others share with you",
+        (false, true) => "change what others share with you for editing",
+        (false, false) => "do what it does already",
+    }
+}
+
+/// The owner said no to the permissions `lacks` names ([`permitted`]), and what that leaves
+/// as it is.
+pub fn not_permitted(lacks: hbsync_homebase::app::Lacks) -> String {
+    let permission = match lacks.reads && lacks.sends {
+        true => "permissions",
+        false => "permission",
+    };
+    let so = match lacks.reads {
+        true => "What others share with you isn't synced.",
+        false => "What others share with you stays read-only.",
+    };
+    format!(
+        "{} wasn't given the {permission} to {}. {so}",
+        crate::APP_NAME,
+        permitted(lacks)
+    )
+}
+
 /// The same of a folder that writes to what is shared with the account, where nothing held
 /// is its own delete: what its owner removed, or no longer shares, isn't this identity's to
 /// put back.

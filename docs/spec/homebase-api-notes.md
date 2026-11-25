@@ -108,7 +108,7 @@ Use the unified **V2** API under `/api/v2`, as chat-kmp does **[verified]**
   (`AssertRegistrationMayGrantDrivesAsync` at install, where the owner console has made the
   drive, owned by the app, just before; `AssertAppMayGrantDrivesAsync` for `circles/create`,
   **[verified]**). The chat app's Drive asks for the drive and declares the circle the same
-  way (it asks for no permission key at install, this client for 305), and shares only at an
+  way (it asks for no permission key at install, this client for 305 and 210), and shares only at an
   access the circle grants. An install made by this client before 2026-11-20 holds Read and
   Write and has a circle with Read (or none, from before circles were declared: this
   client's `circles/create` at setup is refused then, as the app holds less than the circle
@@ -129,8 +129,18 @@ Use the unified **V2** API under `/api/v2`, as chat-kmp does **[verified]**
   code).
   The security context lists them per permission group (`permissionContext.permissionGroups[]
   .permissionSet.keys`). Filesync asks for `UseTransitRead` (305) since shared-folder sync, for
-  the identity's `/api/v2/peer/...` routes; an install from before lacks it until the owner
-  approves the update. Any transit key also gives the app the identity's connection key (ICR
+  the identity's `/api/v2/peer/...` routes, and for `UseTransitWrite` (210) since it changes
+  what others share for editing ("Writing to what others share"): `p=305,210` at
+  registration (that the page reads two keys so: **[verified]** odin-js
+  `permissionParamToPermissionSet`; the consent with both: **[inferred]**, not seen live
+  yet). An install from before it asked for one lacks that one until the owner approves
+  the update, which asks for the keys lacking alone (`p=210` for one that reads already). 210 is
+  the server's one key for sending to other identities: with it an app may also send to
+  any drive of another identity that their circles let this identity write to, read such
+  a drive's public key and what became of a send, and relay live to peers, which sets up
+  a call (**[verified]** odin-core `PermissionContext.AssertCanUsePeer(PeerAccess.Write)`,
+  `PeerDriveQueryService`, `LiveRelayService.AssertMayRelay`); the owner's consent page
+  names the key as the server does. Any transit key also gives the app the identity's connection key (ICR
   key) and ReadWrite on the transient temp drive (`AppRegistrationService.GrantInputsAsync`,
   `HasRequestedTransit`). Holding a key also lists the app's drive grants on a server up to
   v0.1.974 (#2047: the group's permission set is no longer null; **[inferred]** from code).
@@ -756,8 +766,8 @@ server answers the rest, to a token their server made for this identity's connec
 
 ## Writing to what others share
 What a change to another identity's share uses (`drive/shared/writes.rs`), where they shared
-it for editing. Used where the app holds the permission below, which it doesn't ask for
-yet: until it does, a share is read-only in the product. **[verified]** live means seen on the dev server (odin-core
+it for editing. Used where the app holds the permission below; an install from before the app
+asked for it syncs a share read-only until its owner approves. **[verified]** live means seen on the dev server (odin-core
 3ace44b69, 2026-11-23), a member writing to a share made with "Edit" in the Homebase app.
 - **Only through this identity's own server.** Their server takes no write from a member
   directly (**[verified]**: no such route; its peer token reads). This identity's server
@@ -774,8 +784,9 @@ yet: until it does, a share is read-only in the product. **[verified]** live mea
   refused has uploaded its bytes for nothing. A share's folder goes by the same answer
   (`Remote::writes`, `docs/spec/daemon.md`): it writes to what is shared for editing only
   while the app holds 210, and is read-only as a whole otherwise (it asks again once an
-  hour at most; where the user asked for a sync, once the last answer is two seconds old). The app doesn't ask for it
-  at registration yet.
+  hour at most; where the user asked for a sync, once the last answer is two seconds old). The app asks for it
+  at registration; an install from before that gets it when its owner approves
+  (`hbsync approve`; "Permission keys").
 - **Whether it may.** Their server asks drive `Write` and, for a file there already, a live
   share row with `Write` on it (**[verified]** odin-core
   `DriveStorageServiceBase.AssertMemberMayWriteAsync`, `DriveAclAuthorizationService

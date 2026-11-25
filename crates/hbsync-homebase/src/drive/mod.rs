@@ -280,11 +280,20 @@ impl KeyState {
     }
 }
 
-/// Whether the app may read what others share with this identity now (the permission an
-/// install from before it asked for it lacks until the owner approves: [`app::update_url`]):
-/// one read of the login's security context.
-pub fn reads_shared(client: &Client) -> Result<bool, HomebaseError> {
-    holds(client, app::USE_TRANSIT_READ)
+/// Which of the permissions the app asks for it lacks now (to read what others share with
+/// this identity, to change what they share for editing: an install from before it asked
+/// for one lacks that one until the owner approves, [`app::update_url`]): one read of the
+/// login's security context.
+pub fn lacks(client: &Client) -> Result<app::Lacks, HomebaseError> {
+    Ok(lacks_in(&security_context(client)?))
+}
+
+/// [`lacks`], of a security context read.
+fn lacks_in(context: &serde_json::Value) -> app::Lacks {
+    app::Lacks {
+        reads: !holds_key(context, app::USE_TRANSIT_READ),
+        sends: !holds_key(context, app::USE_TRANSIT_WRITE),
+    }
 }
 
 /// Whether the app holds permission `key` now: one read of the login's security context.
@@ -1745,8 +1754,21 @@ mod tests {
             { "permissionSet": { "keys": [305, 210] } },
         ] } });
         assert!(holds_key(&context, app::USE_TRANSIT_READ));
+        assert!(holds_key(&context, app::USE_TRANSIT_WRITE));
         assert!(!holds_key(&context, 50));
         assert!(!holds_key(&json!({}), app::USE_TRANSIT_READ));
+        // Which of the two the app asks for it lacks: none here; the one to send, of an
+        // install from before it asked for that; both, of one from before either.
+        assert!(lacks_in(&context).none());
+        let reads = json!({ "permissionContext": { "permissionGroups": [
+            { "permissionSet": { "keys": [305] } },
+        ] } });
+        let only_sends = app::Lacks {
+            reads: false,
+            sends: true,
+        };
+        assert_eq!(lacks_in(&reads), only_sends);
+        assert_eq!(lacks_in(&json!({})), app::Lacks::ALL);
     }
 
     /// An error answer of the identity itself.

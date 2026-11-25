@@ -61,10 +61,10 @@ enum Command {
         #[command(flatten)]
         approve: Approve,
     },
-    /// Lets Filesync read what others share with you: your Homebase asks you to approve it
-    /// in the browser. Needed once, where Filesync was installed on your identity before it
-    /// asked for this (`hbsync status` says it needs your approval); then what others share
-    /// with you syncs.
+    /// Lets Filesync read what others share with you, and change what they share with you
+    /// for editing: your Homebase asks you to approve it in the browser. Needed once, where
+    /// Filesync was installed on your identity before it asked for these (`hbsync status`
+    /// says where it needs your approval); only what it lacks is asked for.
     #[command(name = "approve")]
     ApproveSharing {
         /// The identity [default: the one set up].
@@ -420,20 +420,8 @@ fn run(command: Command) -> Res<ExitCode> {
             let identity = config.identity(identity.as_deref())?;
             let typed = approve.typed();
             let mut owner = approve.owner(typed.as_ref());
-            match setup::approve(&paths, &identity, &mut owner)? {
-                setup::Approved::Already => println!(
-                    "{APP_NAME} may already read what others share with you on {identity}."
-                ),
-                setup::Approved::Given => {
-                    println!(
-                        "Approved on {identity}: {APP_NAME} may now read what others share \
-                         with you."
-                    )
-                }
-                setup::Approved::Declined => {
-                    return Err("Not approved: what others share with you isn't synced.".into());
-                }
-            }
+            let said = setup::approve(&paths, &identity, &mut owner)?.said(&identity);
+            println!("{}", said.map_err(|no| format!("Not approved: {no}"))?);
         }
         Command::Add {
             what,

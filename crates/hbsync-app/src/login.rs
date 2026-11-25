@@ -11,7 +11,7 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use hbsync_homebase::app::Update;
+use hbsync_homebase::app::{Lacks, Update};
 use hbsync_homebase::{Credentials, HomebaseError, Pending};
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 
@@ -255,16 +255,17 @@ pub(crate) fn begin_restore(identity: &str) -> Result<Asked, HomebaseError> {
     begin_update(identity, Update::Drive)
 }
 
-/// Starts asking the owner of `identity` to let the app read what others share with them
-/// ([`Update::Permission`]: an install from before it asked for that).
-pub(crate) fn begin_approval(identity: &str) -> Result<Asked, HomebaseError> {
-    begin_update(identity, Update::Permission)
+/// Starts asking the owner of `identity` for the permissions the app `lacks`: to read what
+/// others share with them, to change what they share for editing ([`Update::Permission`]:
+/// an install from before it asked for one).
+pub(crate) fn begin_approval(identity: &str, lacks: Lacks) -> Result<Asked, HomebaseError> {
+    begin_update(identity, Update::Permission(lacks))
 }
 
 fn begin_update(identity: &str, what: Update) -> Result<Asked, HomebaseError> {
     let at = match what {
         Update::Drive => DRIVE_PATH,
-        Update::Permission => APPROVAL_PATH,
+        Update::Permission(_) => APPROVAL_PATH,
     };
     // A random part in the path: the answer carries nothing else only the owner app knows.
     let path = format!("{at}/{}", uuid::Uuid::new_v4().simple());
@@ -310,13 +311,15 @@ impl Asked {
         let (query, browser) = self.back.wait(timeout, cancel, paste, |_| true)?;
         // Given comes back without a status; cancelled (or anything else) with one.
         let given = !query.contains_key("status");
+        let said;
         let outcome = match (self.what, given) {
             (Update::Drive, true) => Ok("goes on setting up"),
             (Update::Drive, false) => Err(format!("{APP_NAME} didn't get its drive back.")),
-            (Update::Permission, true) => Ok("may now read what others share with you"),
-            (Update::Permission, false) => Err(format!(
-                "{APP_NAME} wasn't given the permission to read what others share with you."
-            )),
+            (Update::Permission(lacks), true) => {
+                said = format!("may now {}", crate::words::permitted(lacks));
+                Ok(said.as_str())
+            }
+            (Update::Permission(lacks), false) => Err(crate::words::not_permitted(lacks)),
         };
         self.back.answer(browser, outcome);
         Ok(given)
@@ -533,12 +536,12 @@ mod tests {
     #[test]
     fn approving_what_others_share_waits_for_the_owner() -> R {
         for (query, given) in [("", true), ("?status=canceled", false)] {
-            let ask = begin_approval("anna.example.com")?;
+            let ask = begin_approval("anna.example.com", Lacks::ALL)?;
             assert!(
                 ask.url()
                     .starts_with("https://anna.example.com/owner/appupdate?")
             );
-            assert!(ask.url().contains("p=305") && !ask.url().contains("&d="));
+            assert!(ask.url().contains("p=305%2C210") && !ask.url().contains("&d="));
             let back = return_url(ask.url())?;
             assert!(back.contains("/approval-callback/"), "{back}");
             let browser = std::thread::spawn(move || come_back(&back, query));
@@ -546,7 +549,7 @@ mod tests {
             assert_eq!(answer, given);
             let page = browser.join().map_err(|_| "browser")??;
             let said = if given {
-                "may now read what others share with you"
+                "may now read what others share with you, and change what they share for editing"
             } else {
                 "wasn't given the permission"
             };

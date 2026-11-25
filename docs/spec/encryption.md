@@ -275,8 +275,11 @@ odin-core's `SelectiveShareKeyVectorTests` **[verified]**):
   holds `UseTransitRead`, which comes with the identity's connection key (homebase-api-notes,
   "Permission keys"): a Filesync device token also reaches, through the identity's own server,
   what the identity's connections share with it. So does every app with a transit permission
-  (chat-kmp's asks for 305, **[verified]** `PermissionTypes.kt`). Logging the device out, or
-  removing the app, ends it.
+  (chat-kmp's asks for 305, **[verified]** `PermissionTypes.kt`). With `UseTransitWrite`,
+  which the app asks for to change what others share for editing, such a token can also
+  send through the identity's server: write to what other identities' circles let this
+  identity write on their drives, and relay live to its connections (homebase-api-notes,
+  "Permission keys"). Logging the device out, or removing the app, ends it.
 
 ## Cost
 Measured on an i7-8700K (AES-NI, no VAES), against a Homebase on the same machine
