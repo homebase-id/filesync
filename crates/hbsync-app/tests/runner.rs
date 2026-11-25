@@ -2320,6 +2320,50 @@ fn a_share_waits_where_its_login_isnt_what_is_refused() -> R {
     Ok(())
 }
 
+/// A share that writes to what is shared with it for editing holds its own deletes (they are
+/// removals at the sharer's), and puts them back when asked: they come back here, and
+/// nothing is removed there.
+#[test]
+fn a_share_that_writes_puts_back_its_own_held_deletes() -> R {
+    use hbsync_remote::contract::Shares;
+    let server = server();
+    let a = Device::start(&server, "a")?;
+    let names: Vec<String> = (0..60).map(|i| format!("f{i:02}.txt")).collect();
+    for (i, name) in names.iter().enumerate() {
+        a.write(name, &i.to_string())?;
+    }
+    wait_until("all 60 are up", || live_names(&server).len() == 60)?;
+    a.wait_idle()?;
+    for name in &names {
+        let id = header_named(&server, name).ok_or("on the drive")?.file_id;
+        a.remote.share_to_edit(id)?;
+    }
+    let member = FakeRemote::member(server.clone()).writing();
+    let b = Device::start_on(member, "b", |cfg| {
+        cfg.sharer = Some("sharer.example".into());
+        cfg.read_only = Some(cfg.folder.with_file_name("moved out"));
+        cfg.writes = true;
+    })?;
+    wait_until("b has what is shared", || b.has("f59.txt"))?;
+    b.wait_idle()?;
+    assert!(b.status().writes);
+
+    for name in &names {
+        std::fs::remove_file(b.root.join(name))?;
+    }
+    b.handle.send(Command::SyncNow);
+    wait_until("its own deletes are held", || {
+        b.status().held_deletes.is_some_and(|h| h.here == 60)
+    })?;
+    let held = b.status().held_deletes.ok_or("held")?;
+    b.handle.answer(HeldAnswer::PutBack, &held.token)?;
+    wait_until("they are back", || b.has("f07.txt") && b.has("f59.txt"))?;
+    b.wait_idle()?;
+    assert_eq!(b.status().held_deletes, None);
+    assert_eq!(live_names(&server).len(), 60, "nothing removed there");
+    Ok(())
+}
+
 /// What another identity shares, all of it no longer shared at once, is held here as a wipe
 /// is anywhere. It can be deleted here or left held; putting it back would write to their
 /// drive, and is refused as it is asked (sync semantics §13), the deletes held on.

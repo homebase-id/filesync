@@ -68,7 +68,14 @@ pub(super) fn notes(
 /// Where what changed in a read-only folder moved out to (sync semantics §13), worded: each
 /// time it moves (an event, never told only once as a lasting note is), by where it went, the
 /// first few named.
-pub(super) fn moved_out_notes(report: &SyncReport) -> Vec<String> {
+///
+/// `writes_to`: the folder writes to what `writes_to` shares with the account for editing,
+/// so what moved out is what couldn't go to them (shared for reading, or not at all): said
+/// so, as the folder isn't read-only as a whole.
+pub(super) fn moved_out_notes(
+    report: &SyncReport,
+    writes_to: Option<&crate::Identity>,
+) -> Vec<String> {
     let mut notes = Vec::new();
     // Each by the name it went out as, where not its own (taken there).
     let mut moved: Vec<(String, String)> = (report.moved_out.iter())
@@ -87,10 +94,18 @@ pub(super) fn moved_out_notes(report: &SyncReport) -> Vec<String> {
     for group in moved.chunk_by(|a, b| a.0 == b.0) {
         let into = &group[0].0;
         let paths: Vec<String> = group.iter().map(|(_, path)| path.clone()).collect();
-        notes.push(format!(
-            "{}: moved to {into}, as this folder is read-only (what changes here isn't synced)",
-            listed(&paths)
-        ));
+        notes.push(match writes_to {
+            Some(sharer) => format!(
+                "{}: moved to {into}, as {sharer} shares it with you for reading only, or \
+                 not at all (it isn't synced)",
+                listed(&paths)
+            ),
+            None => format!(
+                "{}: moved to {into}, as this folder is read-only (what changes here isn't \
+                 synced)",
+                listed(&paths)
+            ),
+        });
     }
     notes
 }

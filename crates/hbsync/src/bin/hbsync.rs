@@ -765,13 +765,16 @@ fn answer_held(paths: &Paths, yes: bool, answer: HeldAnswer) -> Res<()> {
     let held: Vec<_> = status
         .folders
         .into_iter()
-        .filter_map(|f| Some((f.path, f.sharer, f.state == State::Paused, f.held_deletes?)))
+        .filter_map(|f| {
+            let paused = f.state == State::Paused;
+            Some((f.path, f.sharer, f.writes, paused, f.held_deletes?))
+        })
         .collect();
     if held.is_empty() {
         println!("No deletions to review.");
         return Ok(());
     }
-    for (path, sharer, paused, held) in held {
+    for (path, sharer, writes, paused, held) in held {
         println!("{}:", path.display());
         let (delete, put_back) = ("`hbsync confirm-deletes`", "`hbsync put-back`");
         for line in words::held_deletes(&held, sharer.as_ref(), delete, put_back) {
@@ -787,8 +790,10 @@ fn answer_held(paths: &Paths, yes: bool, answer: HeldAnswer) -> Res<()> {
             HeldAnswer::Delete => "Delete them?",
             HeldAnswer::PutBack => "Put them back?",
         };
-        // What another identity shares can't be put back: said above, not asked.
-        let unasked = answer == HeldAnswer::PutBack && sharer.is_some();
+        // What another identity removed can't be put back: said above, not asked. (Its own
+        // deletes, where the folder writes there, can.)
+        let own = writes && held.here > 0;
+        let unasked = answer == HeldAnswer::PutBack && sharer.is_some() && !own;
         if unasked || (!yes && !ask_yes(question)?) {
             println!("Nothing done; they are still to review.");
             continue;
@@ -869,8 +874,13 @@ fn print_status(status: &DaemonStatus) {
 fn print_folder(s: &FolderStatus) {
     println!("{APP_NAME}: {}", words::status_line(s, words::now()));
     let who = s.what();
-    // What another identity shares comes one way (sync semantics §13).
-    let arrow = if s.sharer.is_some() { "->" } else { "<->" };
+    // What another identity shares comes one way (sync semantics §13), unless the folder
+    // writes to what is shared for editing.
+    let arrow = if s.sharer.is_some() && !s.writes {
+        "->"
+    } else {
+        "<->"
+    };
     println!("  {who} {arrow} {}", s.path.display());
     // The status line has the progress, the pause, the next try and a failure's problem.
     // (As it does who a share waits for.)

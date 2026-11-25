@@ -129,6 +129,10 @@ pub struct RunnerConfig {
     /// moves out to this folder (outside `folder`, on its volume; made where missing).
     /// `None`: it syncs both ways.
     pub read_only: Option<PathBuf>,
+    /// Such a folder writes to what is shared with the account for editing (the engine's
+    /// `FolderCtx::writes`): shown, and its own held deletes can be put back. Nothing sets
+    /// it yet.
+    pub writes: bool,
     /// The folder at the top that holds what other identities share with the account (sync
     /// semantics §10) is made under this name where none is there, as the folder opens (or
     /// under the first free of `<name>-2`, …). `None`: none is made (one that is there is
@@ -197,6 +201,7 @@ impl RunnerConfig {
             kind: crate::RootKind::Main,
             sharer: None,
             read_only: None,
+            writes: false,
             shares: None,
             device: device.to_owned(),
             mass_delete: MassDelete::default(),
@@ -412,9 +417,11 @@ impl Handle {
     /// paused, once syncing resumes), for exactly the deletes it named: any held since stay
     /// held, shown again.
     ///
-    /// A read-only folder (what another identity shares) never puts back: refused here, so
-    /// the user is told as they ask, not by a note after the next sync.
+    /// What another identity shares is never put back on their drive: refused here, so the
+    /// user is told as they ask, not by a note after the next sync. A folder that writes
+    /// there puts back its own deletes (they come back here; nothing is written there).
     pub fn answer(&self, answer: HeldAnswer, token: &str) -> Result<(), String> {
+        let writes = lock(&self.status).writes;
         {
             let mut held = lock(&self.held);
             if held.nodes.is_empty() || held.token != token {
@@ -425,8 +432,14 @@ impl Handle {
                 );
             }
             // (After the token: an answer to deletes held elsewhere before is told so.)
-            if answer == HeldAnswer::PutBack && self.drive.shared() {
-                return Err(crate::words::NO_PUT_BACK.into());
+            // What another identity removed can't be put back. A folder that writes there
+            // holds its own deletes too: those can.
+            let own = held.shown.as_ref().is_some_and(|shown| shown.here > 0);
+            if answer == HeldAnswer::PutBack && self.drive.shared() && !(writes && own) {
+                return Err(match writes {
+                    true => crate::words::NO_PUT_BACK_THEIRS.into(),
+                    false => crate::words::NO_PUT_BACK.into(),
+                });
             }
             if held.answered {
                 return Err(
@@ -608,6 +621,7 @@ impl Runner {
         let mut status = FolderStatus::new(&cfg.identity, &cfg.folder);
         status.kind = cfg.kind;
         status.sharer.clone_from(&cfg.sharer);
+        status.writes = cfg.read_only.is_some() && cfg.writes;
         status.paused_until = cfg.paused.and_then(|p| p.until);
         let status = Arc::new(Mutex::new(status));
         let held = Arc::new(Mutex::new(Held::default()));
@@ -831,6 +845,7 @@ impl Runner {
             );
         }
         cfg.folder.read_only.clone_from(&self.cfg.read_only);
+        cfg.folder.writes = self.cfg.read_only.is_some() && self.cfg.writes;
         if let Some(tweak) = self.cfg.tweak {
             tweak(&mut cfg);
         }
@@ -1650,7 +1665,9 @@ impl Runner {
         engine: &mut Engine,
         report: &SyncReport,
     ) -> Result<Vec<String>, StateError> {
-        self.tell(report::moved_out_notes(report));
+        let writes_to = self.cfg.sharer.as_ref().filter(|_| self.cfg.writes);
+        let moved_out = report::moved_out_notes(report, writes_to);
+        self.tell(moved_out);
         let skips = self.stalled.told(&report.skipped, Instant::now());
         report::notes(engine, report, &skips)
     }

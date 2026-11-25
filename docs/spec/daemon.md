@@ -564,6 +564,20 @@ included (service managers restart it then).
   another identity's, and only then: one that doesn't isn't started (a share never passes
   for the account's own folder; `hbsync status` shows a share with `->`, and it is never
   the folder shown first).
+  A share that writes to what is shared with the account for editing (`RunnerConfig::writes`,
+  the status's `writes`; sync semantics §13, "What may be changed is told per item"; nothing
+  sets it yet) is read-only for the rest of what it holds, and says so differently:
+  `hbsync status` shows it with `<->`; what moves out is told as that item's ("report.txt:
+  moved to …, as tom.example shares it with you for reading only, or not at all (it isn't
+  synced)"); and it holds its own deletes too, which are removals at the sharer's ("2 items
+  that tom.example shares with you were deleted on this computer. Delete removes them for
+  tom.example too: their Recently deleted keeps them, and only tom.example can restore them
+  from there. Put them back brings them back to this computer.", then "The rest was removed
+  by tom.example, …" for what the sharer removed). Its own are put back when asked (they
+  come down again; nothing is written there), with **Put them back** on the tray's page
+  where any are held; with none of its own held, a put back is refused as before ("These
+  were removed by their owner, or are no longer shared with you: they can't be put back on
+  Homebase, only deleted here or left held").
 - **What another identity shares** (the account's `shares`, `AccountParts`: none in the
   product until the identity's share markers are read) is synced by a runner of its own on
   the account's thread, read-only, on that identity's drive and its DB

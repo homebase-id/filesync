@@ -6,8 +6,8 @@ use hbsync_app::{HeldAnswer, State};
 use super::*;
 
 /// The page to review `held`, the deletes held in `status`'s folder, its answers posted to
-/// `url`. What another identity shares is read-only: deleted here or left held, with no
-/// button to put it back.
+/// `url`. What another identity removed from what they share is deleted here or left held,
+/// with no button to put it back; a folder that writes there has one for its own deletes.
 fn held_page(status: &FolderStatus, held: &HeldDeletes, url: &str) -> String {
     let sharer = status.sharer.as_ref();
     let what: String = words::held_deletes(held, sharer, "Delete", "Put them back")
@@ -25,8 +25,8 @@ fn held_page(status: &FolderStatus, held: &HeldDeletes, url: &str) -> String {
         ""
     };
     let put_back = match sharer {
-        Some(_) => "",
-        None => " <button name=answer value=put_back>Put them back</button>",
+        Some(_) if !(status.writes && held.here > 0) => "",
+        _ => " <button name=answer value=put_back>Put them back</button>",
     };
     format!(
         "<h1>{} deletions to review</h1>\
