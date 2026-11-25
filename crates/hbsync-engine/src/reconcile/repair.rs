@@ -759,8 +759,12 @@ impl Reconciler<'_> {
         let Some(copy) = self.forks.get(&node).copied() else {
             return;
         };
+        // What was told of the copy goes too (its name taken where it was to be made: it
+        // isn't renamed, it isn't made).
         let copied = |c: &Conflict| matches!(c, Conflict::EditEdit { node: n, .. } if *n == node);
-        self.plan.conflicts.retain(|c| !copied(c));
+        self.plan
+            .conflicts
+            .retain(|c| !copied(c) && c.node() != copy);
         let mut folder = self.merged.get(copy).map(|s| s.parent);
         self.drop_fork(node);
         // A folder gone there that was brought back for the copy alone goes again, with those
@@ -820,20 +824,19 @@ impl Reconciler<'_> {
             return false;
         }
         for n in self.merged.subtree(node) {
-            // On an identity's own drive nothing moves out: its conflict copy isn't made
-            // while it is left out (edited on both sides: judged again once the name is
-            // free), and where it is put back here it may keep its folders
-            // ([`Reconciler::keep_for_what_is_out`]).
-            if !self.masking.read_only {
-                self.unfork(n);
-                // A conflict copy left out with the folder it is to be made in, its original
-                // elsewhere (the drive moved that one out): the original waits with it.
-                if let Some(original) = self.forked_into(n) {
-                    self.fork_waits(original);
-                }
-                if self.input.local.contains(n) {
-                    self.out_here.insert(n);
-                }
+            // Its conflict copy isn't made while it is left out (edited on both sides: judged
+            // again once the name is free): half of one, sent with no item here to send, is
+            // planned at every sync (a member's of an item it may change, too).
+            self.unfork(n);
+            // A conflict copy left out with the folder it is to be made in, its original
+            // elsewhere (the drive moved that one out): the original waits with it.
+            if let Some(original) = self.forked_into(n) {
+                self.fork_waits(original);
+            }
+            // On an identity's own drive nothing moves out: where it is put back here it may
+            // keep its folders ([`Reconciler::keep_for_what_is_out`]).
+            if !self.masking.read_only && self.input.local.contains(n) {
+                self.out_here.insert(n);
             }
             // What changed here still moves out (its name aside): a folder deleted here takes
             // it along otherwise.

@@ -233,6 +233,37 @@ fn a_move_between_folders_shared_for_editing_reaches_the_drive() {
     assert!(sim.moved_out(2).is_empty());
 }
 
+/// A file shared for editing that its owner moves into a folder of theirs the member isn't
+/// shared: for the member it is at its top now, where another of its name is, so it is left
+/// out there and stays where the member has it. Edited on both sides besides, its conflict
+/// copy isn't made while it is left out: the member plans nothing for it (it planned the
+/// copy up at every sync, never made), keeps its edit where it is, and nothing moves out.
+#[test]
+fn a_file_left_out_for_its_name_makes_no_conflict_copy_meanwhile() {
+    let mut sim = owned(&["a", "b", "b/a"]);
+    let theirs = sim.item(0, "b/a").expect("b/a");
+    let b = sim.item(0, "b").expect("b");
+    let parent = sim.pick(0, b, true).expect("b's pick");
+    sim.run(&[act(0, Action::CreateFolder { parent, name: 5 })]);
+    let d = sim.item(0, "b/d").expect("b/d");
+    let (node, parent) = (
+        sim.pick(0, theirs, false).expect("its pick"),
+        sim.pick(0, d, true).expect("b/d's pick"),
+    );
+    let name = 0;
+    sim.run(&[act(0, Action::Move { node, parent, name })]);
+    let file = sim.file_pick(0, theirs).expect("a file");
+    sim.run(&[act(0, Action::Edit { file })]);
+    edit(&mut sim, "b/a");
+    settle(&mut sim);
+    assert_eq!(sim.server_paths(), ["a", "b", "b/d", "b/d/a"]);
+    assert_eq!(sim.local_paths(2), ["a", "b", "b/a"]);
+    assert!(sim.planned(2).is_empty(), "{:?}", sim.planned(2));
+    assert!(sim.moved_out(2).is_empty(), "{:?}", sim.moved_out(2));
+    assert_ne!(sim.local_hash(2, theirs), sim.drive_hash(theirs));
+    assert_eq!(sim.local_hash(0, theirs), sim.drive_hash(theirs));
+}
+
 /// The member's sync: planned and run till its plan is done (what waits is left for the
 /// next).
 fn sync_member(sim: &mut Sim) {
