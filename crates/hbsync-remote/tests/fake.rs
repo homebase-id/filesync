@@ -179,6 +179,10 @@ fn a_new_file_sent_again_whose_share_was_taken_back_is_refused() -> R {
     };
     sharer.set_removed(&[target], true)?;
 
+    // A client that remembers its send is told the same once the share is gone: what it
+    // remembered landed, and is no longer theirs to read.
+    let refused = create_file(&member, &unshared, b"1");
+    assert!(matches!(refused, Err(RemoteError::Fatal(_))), "{refused:?}");
     let again = member.sharing_token();
     for bytes in [&b"1"[..], b"2"] {
         let refused = create_file(&again, &unshared, bytes);

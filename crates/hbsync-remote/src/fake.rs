@@ -1487,9 +1487,10 @@ impl FakeRemote {
         let ask = Ask::Create(node.clone());
         let shared_as = {
             let mut outbox = self.outbox();
-            // One that landed and is gone since (its owner deleted it): the adapter finds
-            // no node of theirs, and sends it again.
-            if self.server().file_id_of(node.node).is_none() {
+            // One that landed and is gone since (its owner deleted it, or took its share
+            // back): the adapter finds no node of theirs, and sends it again.
+            let theirs = self.server().file_id_of(node.node);
+            if theirs.is_none_or(|file_id| !self.server().shared_live(file_id)) {
                 outbox.landed.remove(&node.node);
             }
             let bytes = (
