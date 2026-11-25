@@ -126,7 +126,7 @@ Use the unified **V2** API under `/api/v2`, as chat-kmp does **[verified]**
   `/owner/appupdate` with `p`, which adds them to the ones it has, a key it holds a second time
   too, shown to the owner as more access (`ExtendAppPermissions.tsx`): ask only for what it
   lacks. Device tokens gain them without signing in again (`AppRegistrationService`, from its
-  code).
+  code; **[verified]** live 2026-11-25: a running daemon wrote with the token it had).
   The security context lists them per permission group (`permissionContext.permissionGroups[]
   .permissionSet.keys`). Filesync asks for `UseTransitRead` (305) since shared-folder sync, for
   the identity's `/api/v2/peer/...` routes, and for `UseTransitWrite` (210) since it changes
@@ -134,7 +134,10 @@ Use the unified **V2** API under `/api/v2`, as chat-kmp does **[verified]**
   registration (that the page reads two keys so: **[verified]** odin-js
   `permissionParamToPermissionSet`; the consent with both: **[inferred]**, not seen live
   yet). An install from before it asked for one lacks that one until the owner approves
-  the update, which asks for the keys lacking alone (`p=210` for one that reads already). 210 is
+  the update, which asks for the keys lacking alone (`p=210` for one that reads already:
+  **[verified]** live 2026-11-25, odin-core b79aefa99. The page says "Update existing app",
+  that the app "has requested extra access on your identity", and under its details
+  `UseTransitWrite`; its buttons are Allow and Cancel). 210 is
   the server's one key for sending to other identities: with it an app may also send to
   any drive of another identity that their circles let this identity write to, read such
   a drive's public key and what became of a send, and relay live to peers, which sets up
@@ -884,6 +887,30 @@ asked for it syncs a share read-only until its owner approves. **[verified]** li
   retried. Measured live, the whole write with the socket connected: 20 to 40 ms for a
   header, 60 to 120 ms with bytes or for a new file; without a socket, the first wait and one
   read more.
+- **What a member's write costs.** Measured live 2026-11-25 (odin-core b79aefa99, a daemon
+  on each side, both servers on one computer, requests counted in the server's log and
+  bytes on the loopback interface):
+  - *Requests, the member's.* A change to a file: one header read from their server (the
+    file's key, its version, whether it is shared for editing: read before every send, so
+    10 files changed at once are 10 reads and 10 sends) and one `PATCH` to its own server.
+    A new file: one `POST` to its own server and two reads of the node from theirs (the
+    word that it landed carries no file id); their drive's public key is asked for once a
+    run.
+    A removal: as a change. Its own server sends each on with one request to theirs.
+  - *The echo.* Their server tells the member's own write on its socket like any other
+    (no `excludeOwnWrites` on a peer connection): one feed read of the share for a burst
+    of writes, not one a write (10 files: 1).
+  - *Bytes.* A new file of 1 MiB: 2.03 MiB in all (the member to its own server, that one
+    to theirs), a change of 1 MiB the same; an own upload of 1 MiB: 1.01 MiB. The member's
+    own connection carries the bytes once. A change of a file of 86 bytes: 31 kB in all,
+    the echo's feed read with it.
+  - *Time.* On the sharer's disk 2.4 to 3.0 s after the member saved the file, as the
+    other way round (the receiving daemon reads the feed 2 s after it is told, `hold_back`);
+    the member's sync with its sends took 60 ms (a rename) to 880 ms (10 files with bytes).
+  - *Idle.* With both sockets connected neither daemon made a request in 60 s.
+  - *Both edit one file at the same moment.* The member's send is refused for its version
+    (their server answers its server 400), the member keeps its bytes as a conflict copy
+    and sends that as a new file: both sides held both files 5.4 s after.
 - **A new file that is there already.** A node found on their drive where a new one was
   sent is that send's only by its `globalTransitId`. With another's, an earlier send of the
   node landed (one from before a restart, or one this run stopped waiting for), and their

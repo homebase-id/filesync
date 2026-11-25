@@ -569,7 +569,9 @@ included (service managers restart it then).
   registration, and by `hbsync approve` for an install from before that). Its runner asks its drive (`Remote::writes`) as the
   folder opens and as each sync is due, and opens the folder again where the answer changed:
   - **Given the permission**, what is shared for editing is written to from the next sync
-    on, and files that may be changed become writable on disk.
+    on, and files that may be changed become writable on disk. (**[verified]** live
+    2026-11-25: an install from before the app asked synced its share read-only and said
+    so; its running daemon opened the share again, writing, 0.14 s after the owner's Allow.)
   - **Taken away**, the folder is read-only as a whole again, and a change waiting there
     moves out. Homebase tells this by refusing a send: that write is told as refused (as are
     the others of that sync, before they send anything), and the sync after it opens the
