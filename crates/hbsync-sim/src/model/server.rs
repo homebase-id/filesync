@@ -275,11 +275,24 @@ impl Server {
     /// Puts `state` on the server as another device would, as a new file: shared as the
     /// folder it goes into is ([`Server::share_as_its_folder`]).
     pub(crate) fn put(&mut self, node: NodeId, state: NodeState) -> RemoteRef {
+        self.put_as(node, state, None)
+    }
+
+    /// Puts `state` on the server at a new version: as a new file, shared as the folder it
+    /// goes into is, or (`file`) as the file it was, which keeps the shares it has.
+    pub(crate) fn put_as(
+        &mut self,
+        node: NodeId,
+        state: NodeState,
+        file: Option<RemoteFileId>,
+    ) -> RemoteRef {
         let remote = RemoteRef {
-            file_id: RemoteFileId(self.uuid()),
+            file_id: file.unwrap_or_else(|| RemoteFileId(self.uuid())),
             version: VersionTag(self.uuid()),
         };
-        self.share_as_its_folder(remote.file_id, state.parent);
+        if file.is_none() {
+            self.share_as_its_folder(remote.file_id, state.parent);
+        }
         self.ever.insert(node);
         self.live.insert(node, ServerNode { state, remote });
         remote
@@ -289,7 +302,7 @@ impl Server {
     /// editing: every client of the owner's gives what it adds its folder's shares, with the
     /// write (the Homebase adapter's `HomebaseRemote::shares_of_new`; the fake's
     /// `FakeServer::shared_as`).
-    pub(crate) fn share_as_its_folder(&mut self, file: RemoteFileId, parent: NodeId) {
+    fn share_as_its_folder(&mut self, file: RemoteFileId, parent: NodeId) {
         let Some(folder) = self.live.get(&parent).map(|n| n.remote.file_id) else {
             return;
         };

@@ -201,48 +201,6 @@ pub(crate) struct QueryBatchResponse {
     pub query_time: i64,
 }
 
-/// What a feed row says of a folder's shares ([`Fed`]): none for a row that isn't a folder's,
-/// or doesn't read. Both shapes: a minimal row names its fields itself, a header under
-/// `fileMetadata`.
-pub(crate) fn fed(row: &str) -> Option<Fed> {
-    #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    struct Said {
-        unique_id: Option<Uuid>,
-        file_type: Option<i32>,
-        version_tag: Option<Uuid>,
-        updated: Option<i64>,
-        version_updated: Option<i64>,
-        #[serde(default)]
-        app_data: Option<Box<Said>>,
-        #[serde(default)]
-        file_metadata: Option<Box<Said>>,
-    }
-    let row: Said = serde_json::from_str(row).ok()?;
-    let (times, node) = match row.file_metadata {
-        Some(meta) => {
-            let node = meta.app_data.as_deref().map(|a| (a.unique_id, a.file_type));
-            (
-                (meta.version_tag, meta.updated, meta.version_updated),
-                node?,
-            )
-        }
-        None => (
-            (row.version_tag, row.updated, row.version_updated),
-            (row.unique_id, row.file_type),
-        ),
-    };
-    let (version, updated, version_updated) = times;
-    if node.1 != Some(FILE_TYPE_FOLDER) {
-        return None;
-    }
-    Some(Fed {
-        node: NodeId(node.0?),
-        version: version?,
-        as_written: updated.is_some() && updated == version_updated,
-    })
-}
-
 /// The file a feed row is about, if its `fileId` reads (a row that doesn't read as a node).
 pub fn file_id_of(row: &str) -> Option<Uuid> {
     #[derive(Deserialize)]
@@ -359,7 +317,7 @@ pub(crate) fn cursor_time(cursor: &str) -> Option<i64> {
 }
 
 /// One row of a minimal `query-batch` page (odin-core #1967 `QueryBatchFileRef`, **[verified]**):
-/// the fields the client reads; the others (created, uniqueId, …) are skipped.
+/// the fields the client reads; the others (created, …) are skipped.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FileRef {
@@ -370,6 +328,9 @@ pub struct FileRef {
     pub archival_status: i32,
     /// The parent node, as the header's: omitted when empty.
     pub group_id: Option<Uuid>,
+    /// The node, as the header's `uniqueId`.
+    #[serde(default)]
+    pub unique_id: Option<Uuid>,
     /// Unix ms, as the header's `updated` (read as that one is); `None` if the row doesn't
     /// say.
     #[serde(default)]
@@ -384,6 +345,13 @@ pub struct FileRef {
 }
 
 impl FileRef {
+    /// What the row says of its folder's shares ([`Fed`]): none for a row that isn't a
+    /// folder's.
+    pub(crate) fn fed(&self) -> Option<Fed> {
+        let node = (self.unique_id).filter(|_| self.file_type == Some(FILE_TYPE_FOLDER));
+        Fed::of(node, self.version_tag, self.updated, self.version_updated)
+    }
+
     /// Whether the row is another app's file, not a sync node (its type says so).
     pub(crate) fn not_a_node(&self) -> bool {
         self.file_type.is_some_and(|t| !node_type(t))
@@ -651,6 +619,14 @@ where
 }
 
 impl FileHeader {
+    /// What the header says of its folder's shares ([`Fed`]), as its slim row does
+    /// ([`FileRef::fed`]): none for one that isn't a folder's.
+    pub(crate) fn fed(&self) -> Option<Fed> {
+        let (meta, app) = (&self.file_metadata, &self.file_metadata.app_data);
+        let node = (app.unique_id).filter(|_| app.file_type == FILE_TYPE_FOLDER);
+        Fed::of(node, meta.version_tag, meta.updated, meta.version_updated)
+    }
+
     /// The file key and header IV, opened with `keys`. Every node is encrypted.
     pub(crate) fn key(&self, keys: Keys<'_>) -> Result<KeyHeader, HomebaseError> {
         if !self.file_metadata.is_encrypted {
@@ -889,8 +865,7 @@ pub(crate) fn metadata(
     // the group, on the server).
     let mut plain = descriptor(meta, version, key, key_header, "owner", false);
     if let Some(shared) = shared {
-        plain["shares"] = json!(shared.shares);
-        plain["globalTransitId"] = json!(shared.global_transit_id);
+        shared.sent_with(&mut plain);
     }
     aes_cbc_encrypt(keys.shared, transfer_iv, plain.to_string().as_bytes())
 }
@@ -901,6 +876,14 @@ pub(crate) fn metadata(
 pub(crate) struct NewShares {
     pub global_transit_id: Uuid,
     pub shares: Vec<Value>,
+}
+
+impl NewShares {
+    /// Named in a new file's descriptor `plain`.
+    fn sent_with(&self, plain: &mut Value) {
+        plain["shares"] = json!(self.shares);
+        plain["globalTransitId"] = json!(self.global_transit_id);
+    }
 }
 
 /// The identity's transient temp drive (its alias and its type): where its server stages
@@ -985,12 +968,10 @@ pub(crate) fn deposit(
     transfer_iv: &[u8; 16],
     key: &KeyHeader,
     key_header: Value,
-    global_transit_id: Uuid,
-    shares: Vec<Value>,
+    shares: &NewShares,
 ) -> Vec<u8> {
     let mut plain = descriptor(meta, None, key, key_header, "owner", true);
-    plain["shares"] = json!(shares);
-    plain["globalTransitId"] = json!(global_transit_id);
+    shares.sent_with(&mut plain);
     aes_cbc_encrypt(shared_secret, transfer_iv, plain.to_string().as_bytes())
 }
 
@@ -1705,15 +1686,11 @@ mod tests {
         };
         let gtid = Uuid::new_v4();
         let key_header = json!({ "type": "sealed" });
-        let sealed = deposit(
-            &meta,
-            &SS,
-            &transfer_iv,
-            &kh,
-            key_header.clone(),
-            gtid,
-            vec![share.clone()],
-        );
+        let shares = NewShares {
+            global_transit_id: gtid,
+            shares: vec![share.clone()],
+        };
+        let sealed = deposit(&meta, &SS, &transfer_iv, &kh, key_header.clone(), &shares);
         let plain: Value = serde_json::from_slice(&aes_cbc_decrypt(&SS, &transfer_iv, &sealed)?)?;
         assert_eq!(plain["encryptedKeyHeader"], key_header);
         assert_eq!(plain["globalTransitId"], json!(gtid));
@@ -1769,53 +1746,42 @@ mod tests {
         Ok(())
     }
 
-    /// What a feed row says of a folder's shares, from both shapes: a folder as it was
+    /// What a feed row says of a folder's shares, slim and whole alike: a folder as it was
     /// written, one changed since (a share given or withdrawn moves `updated` alone), and
     /// nothing for a file's row or one that doesn't name its node.
     #[test]
     fn a_feed_row_says_whether_a_folder_is_as_it_was_written() -> R {
         const NODE: &str = "33333333-3333-3333-3333-333333333333";
         const VERSION: &str = "22222222-2222-2222-2222-222222222222";
-        let slim = |file_type: i32, updated: i64, node: Option<&str>| {
-            json!({
+        let slim = |file_type: i32, updated: Option<i64>, node: Option<&str>| {
+            let row = json!({
                 "fileId": "11111111-1111-1111-1111-111111111111", "fileState": "active",
                 "fileType": file_type, "versionTag": VERSION, "uniqueId": node,
                 "updated": updated, "versionUpdated": 9,
-            })
-            .to_string()
+            });
+            serde_json::from_value::<FileRef>(row).map(|row| row.fed())
         };
-        let whole = |file_type: i32, updated: i64| {
-            json!({
+        let whole = |file_type: i32, updated: Option<i64>, node: Option<&str>| {
+            let row = json!({
                 "fileId": "11111111-1111-1111-1111-111111111111", "fileState": "active",
                 "fileMetadata": {
                     "versionTag": VERSION, "updated": updated, "versionUpdated": 9,
-                    "appData": { "uniqueId": NODE, "fileType": file_type, "content": "x" },
+                    "appData": { "uniqueId": node, "fileType": file_type, "content": "x" },
                 },
-            })
-            .to_string()
+            });
+            serde_json::from_value::<FileHeader>(row).map(|row| row.fed())
         };
-        let said = |row: String| fed(&row).map(|f| (f.node.0, f.version, f.as_written));
         let (node, version): (Uuid, Uuid) = (NODE.parse()?, VERSION.parse()?);
-        for row in [
-            slim(FILE_TYPE_FOLDER, 9, Some(NODE)),
-            whole(FILE_TYPE_FOLDER, 9),
-        ] {
-            assert_eq!(said(row), Some((node, version, true)));
+        let said = |fed: Option<Fed>| fed.map(|f| (f.node.0, f.version, f.as_written));
+        for (updated, as_written) in [(Some(9), true), (Some(12), false), (None, false)] {
+            let folder = Some((node, version, as_written));
+            assert_eq!(said(slim(FILE_TYPE_FOLDER, updated, Some(NODE))?), folder);
+            assert_eq!(said(whole(FILE_TYPE_FOLDER, updated, Some(NODE))?), folder);
         }
-        for row in [
-            slim(FILE_TYPE_FOLDER, 12, Some(NODE)),
-            whole(FILE_TYPE_FOLDER, 12),
-        ] {
-            assert_eq!(said(row), Some((node, version, false)));
-        }
-        assert_eq!(said(slim(FILE_TYPE_FILE, 12, Some(NODE))), None);
-        assert_eq!(said(whole(FILE_TYPE_FILE, 12)), None);
-        assert_eq!(said(slim(FILE_TYPE_FOLDER, 12, None)), None);
-        assert_eq!(said("not a row".to_owned()), None);
-        // One that doesn't say when it changed isn't taken as unchanged.
-        let untimed =
-            json!({ "fileType": FILE_TYPE_FOLDER, "versionTag": VERSION, "uniqueId": NODE });
-        assert_eq!(said(untimed.to_string()), Some((node, version, false)));
+        assert_eq!(said(slim(FILE_TYPE_FILE, Some(12), Some(NODE))?), None);
+        assert_eq!(said(whole(FILE_TYPE_FILE, Some(12), Some(NODE))?), None);
+        assert_eq!(said(slim(FILE_TYPE_FOLDER, Some(12), None)?), None);
+        assert_eq!(said(whole(FILE_TYPE_FOLDER, Some(12), None)?), None);
         Ok(())
     }
 

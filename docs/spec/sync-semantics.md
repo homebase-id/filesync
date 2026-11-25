@@ -2098,7 +2098,7 @@ it tomorrow. So a computer of the owner's shares what it adds itself:
   circle's key not read or not opening): the file stays here and is tried again. Sent
   without it, nothing would share it later.
 - **By what this computer last heard.** How a folder is shared is read when something is
-  first added to it, and gone by until the server says the folder changed (10 minutes at
-  most without that word). So a file added within seconds of a share's withdrawal may go up
-  shared all the same, and one added within seconds of a folder first being shared may go
-  up unshared.
+  first added to it, and gone by until the server says the folder changed: while the
+  notifications stay connected, their word of it; else the feed's, 10 minutes at most. So
+  a file added within seconds of a share's withdrawal may go up shared all the same, and
+  one added within seconds of a folder first being shared may go up unshared.

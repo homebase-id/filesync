@@ -649,8 +649,10 @@ impl FakeServer {
     /// at the top, or in a folder that isn't shared.
     fn shared_as(&self, parent: NodeId) -> Option<Share> {
         let folder = self.file_id_of(parent)?;
-        let share = *self.shares.get(&folder)?;
-        (share.live && share.until.is_none_or(|until| until > self.clock_ms)).then_some(share)
+        (self
+            .shared_live(folder)
+            .then(|| self.shares.get(&folder).copied()))
+        .flatten()
     }
 
     /// The member's share of the folder `parent`, where it may add to it: a folder of the

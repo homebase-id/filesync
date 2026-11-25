@@ -14,18 +14,17 @@ use std::time::{Duration, Instant};
 use hbsync_types::{NodeId, RemoteFileId, RemoteRef};
 use uuid::Uuid;
 
-use crate::drive::share_keys::CircleKey;
 use crate::drive::wire::ShareRow;
 
-/// How long what was read of a folder's shares is gone by. The notifications tell of a change
-/// within seconds ([`Folders::heard`]), the feed of what they missed ([`Folders::fed`]); this
-/// bounds it where neither is read (the notifications down while requests still pass), at
-/// one small read per folder added to in that time.
+/// How long what was learnt of a folder's shares is gone by where the notifications weren't
+/// connected all the while since ([`Folders::known`]): the feed, read every few minutes
+/// then and as they connect, tells of a change ([`Folders::fed`]); this bounds the time
+/// before it does, at one small read per folder added to in that time.
 const KEPT: Duration = Duration::from_secs(600);
 
-/// More folders than this known: the ones read longer ago than [`KEPT`] are dropped as the
-/// next is learnt (they would be read again anyway).
-const MANY: usize = 4096;
+/// More folders than this known: the ones learnt longer ago than [`KEPT`] are dropped as the
+/// next is learnt (about 150 bytes each; one dropped is read again if added to).
+const MANY: usize = 65_536;
 
 /// A share that ends within this isn't given to a new file: the server refuses a share whose
 /// end has passed, and with it the upload carrying it (**[verified]** odin-core
@@ -78,6 +77,9 @@ struct Known {
     version: Uuid,
     shares: Shares,
     read: Instant,
+    /// The notifications' connection that was up as this was learnt
+    /// ([`State::listening`]).
+    listening: Option<u64>,
 }
 
 #[derive(Debug, Default)]
@@ -87,9 +89,12 @@ struct State {
     folders: HashMap<NodeId, Known>,
     /// The known folders by their files ([`Known::file_id`]).
     by_file: HashMap<Uuid, NodeId>,
-    /// The circles' keys, each read once: a circle's key is set once and stays
-    /// (**[verified]** odin-core `CircleShareKeyAlreadySet`).
-    circles: HashMap<Uuid, Arc<CircleKey>>,
+    /// The notifications' connections so far, and the one that is up now, if one is
+    /// ([`Folders::listening`]).
+    connects: u64,
+    listening: Option<u64>,
+    /// As many folders known has the old ones dropped ([`MANY`], then twice what was left).
+    full: usize,
 }
 
 impl State {
@@ -102,8 +107,7 @@ impl State {
     }
 }
 
-/// The folders of this identity's drive whose shares this computer has read, and the keys of
-/// the circles they are shared with.
+/// The folders of this identity's drive whose shares this computer knows.
 #[derive(Debug, Default)]
 pub(crate) struct Folders(Mutex<State>);
 
@@ -118,16 +122,46 @@ pub(crate) struct Fed {
     pub as_written: bool,
 }
 
+impl Fed {
+    /// What a folder's row says: its node, its version, when it changed last and when its
+    /// version was written (Unix ms). A row that doesn't say when isn't taken as unchanged.
+    pub(crate) fn of(
+        node: Option<Uuid>,
+        version: Uuid,
+        updated: Option<i64>,
+        version_updated: Option<i64>,
+    ) -> Option<Fed> {
+        Some(Fed {
+            node: NodeId(node?),
+            version,
+            as_written: updated.is_some() && updated == version_updated,
+        })
+    }
+}
+
 impl Folders {
     fn state(&self) -> MutexGuard<'_, State> {
         self.0.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// `folder`'s shares, if read within [`KEPT`] and nothing was said of it since.
+    /// `folder`'s shares, if nothing was said of it since they were learnt: for as long as
+    /// the notifications have been connected all the while (a change of the folder is
+    /// announced within seconds, [`Folders::heard`]), else for [`KEPT`].
     pub(crate) fn known(&self, folder: NodeId) -> Option<Shares> {
         let state = self.state();
         let known = state.folders.get(&folder)?;
-        (known.read.elapsed() < KEPT).then(|| Arc::clone(&known.shares))
+        let heard = known.listening.is_some() && known.listening == state.listening;
+        (heard || known.read.elapsed() < KEPT).then(|| Arc::clone(&known.shares))
+    }
+
+    /// The notifications connected (`true`: what was missed meanwhile, the feed tells), or
+    /// their connection broke.
+    pub(crate) fn listening(&self, connected: bool) {
+        let mut state = self.state();
+        state.listening = connected.then(|| {
+            state.connects += 1;
+            state.connects
+        });
     }
 
     /// Where a read of a folder's shares begins: what [`Folders::learnt`] is given back.
@@ -149,18 +183,22 @@ impl Folders {
         if reading.is_some_and(|reading| reading != state.changes) {
             return;
         }
-        if state.folders.len() >= MANY {
+        if state.folders.len() >= state.full.max(MANY) {
             let State {
                 folders, by_file, ..
             } = &mut *state;
-            folders.retain(|_, known| known.read.elapsed() < KEPT);
+            let now = Instant::now();
+            folders.retain(|_, known| now.duration_since(known.read) < KEPT);
             by_file.retain(|_, folder| folders.contains_key(folder));
+            // (Where few were old, not at every folder learnt from here on.)
+            state.full = state.folders.len() * 2;
         }
         let known = Known {
             file_id: at.file_id.0,
             version: at.version.0,
             shares,
             read: Instant::now(),
+            listening: state.listening,
         };
         if let Some(before) = state.folders.insert(folder, known) {
             state.by_file.remove(&before.file_id);
@@ -168,15 +206,27 @@ impl Folders {
         state.by_file.insert(at.file_id.0, folder);
     }
 
+    /// This computer wrote `folder`, known or not, to the version `at`: its shares are as
+    /// they were (a write keeps them), and its own write coming back in the feed is no news.
+    pub(crate) fn rewritten(&self, folder: NodeId, at: RemoteRef) {
+        let mut state = self.state();
+        if let Some(known) = state.folders.get_mut(&folder)
+            && known.file_id == at.file_id.0
+        {
+            known.version = at.version.0;
+        }
+    }
+
     /// Nothing is known of `folder` any more.
     pub(crate) fn forget(&self, folder: NodeId) {
         self.state().forget(folder);
     }
 
-    /// The notifications named `file`: if it is a known folder, it is read again when next
-    /// added to. They announce what others did (this computer's own writes aren't announced
-    /// to it), and a share given or withdrawn is announced as a change that keeps the
-    /// folder's version (**[verified]** live 2026-11-25): any word of a known folder counts.
+    /// The notifications named `file`, or the feed has a row of it that doesn't read: if it
+    /// is a known folder, it is read again when next added to. The notifications announce
+    /// what others did (this computer's own writes aren't announced to it), and a share
+    /// given or withdrawn is announced as a change that keeps the folder's version
+    /// (**[verified]** live 2026-11-25): any word of a known folder counts.
     pub(crate) fn heard(&self, file: RemoteFileId) {
         let mut state = self.state();
         if let Some(folder) = state.by_file.get(&file.0).copied() {
@@ -184,37 +234,20 @@ impl Folders {
         }
     }
 
-    /// The feed's rows: a folder that isn't as it was read (another version, or changed since
-    /// its version was written, as a share given or withdrawn changes it) is read again when
-    /// next added to. This computer's own write of a folder comes back as it was made, and
-    /// stays known.
-    pub(crate) fn fed(&self, rows: impl Iterator<Item = Fed>) {
+    /// A feed row of a folder: one that isn't as it was learnt (another version, or changed
+    /// since its version was written, as a share given or withdrawn changes it) is read
+    /// again when next added to. This computer's own write of a folder comes back as it was
+    /// made, and stays known.
+    pub(crate) fn fed(&self, row: Fed) {
         let mut state = self.state();
-        if state.folders.is_empty() {
-            return;
+        let same = |known: &Known| row.as_written && known.version == row.version;
+        if state
+            .folders
+            .get(&row.node)
+            .is_some_and(|known| !same(known))
+        {
+            state.forget(row.node);
         }
-        for row in rows {
-            let same = |known: &Known| row.as_written && known.version == row.version;
-            if state
-                .folders
-                .get(&row.node)
-                .is_some_and(|known| !same(known))
-            {
-                state.forget(row.node);
-            }
-        }
-    }
-
-    /// `circle`'s key, if read before.
-    pub(crate) fn circle(&self, circle: Uuid) -> Option<Arc<CircleKey>> {
-        self.state().circles.get(&circle).cloned()
-    }
-
-    /// `circle`'s key, read.
-    pub(crate) fn keep(&self, circle: Uuid, key: CircleKey) -> Arc<CircleKey> {
-        let key = Arc::new(key);
-        self.state().circles.insert(circle, Arc::clone(&key));
-        key
     }
 }
 
@@ -262,14 +295,55 @@ mod tests {
         assert_eq!(folders.known(b).map(|s| s.len()), Some(0));
 
         // Its own write coming back, and another folder's row, change nothing.
-        folders.fed([fed(a, 10, true), fed(NodeId(Uuid::from_u128(3)), 30, false)].into_iter());
+        folders.fed(fed(a, 10, true));
+        folders.fed(fed(NodeId(Uuid::from_u128(3)), 30, false));
         assert!(folders.known(a).is_some() && folders.known(b).is_some());
 
         // A share given or withdrawn moves `updated` alone; a write gives another version.
-        folders.fed([fed(a, 10, false)].into_iter());
+        folders.fed(fed(a, 10, false));
         assert_eq!(folders.known(a), None);
-        folders.fed([fed(b, 21, true)].into_iter());
+        folders.fed(fed(b, 21, true));
         assert_eq!(folders.known(b), None);
+
+        // This computer's own write of a known folder: its new version coming back is no news.
+        folders.learnt(None, b, at(200, 20), Arc::from([]));
+        folders.rewritten(b, at(200, 23));
+        folders.fed(fed(b, 23, true));
+        assert!(folders.known(b).is_some());
+        folders.rewritten(a, at(100, 11));
+        assert_eq!(folders.known(a), None, "not known: nothing to keep");
+    }
+
+    /// Learnt while the notifications are connected, a folder stays known for as long as
+    /// they are; learnt before, or once they broke, for [`KEPT`].
+    #[test]
+    fn what_was_learnt_while_listening_is_kept_while_listening() {
+        let Some(long_ago) = Instant::now().checked_sub(KEPT + Duration::from_secs(1)) else {
+            return;
+        };
+        let folders = Folders::default();
+        let (a, b) = (NodeId(Uuid::from_u128(1)), NodeId(Uuid::from_u128(2)));
+        let age = |folders: &Folders| {
+            for known in folders.state().folders.values_mut() {
+                known.read = long_ago;
+            }
+        };
+        folders.learnt(None, a, at(100, 10), Arc::from([]));
+        folders.listening(true);
+        folders.learnt(None, b, at(200, 20), Arc::from([]));
+        age(&folders);
+        assert!(folders.known(a).is_none(), "learnt before they connected");
+        assert!(folders.known(b).is_some(), "connected all the while");
+        folders.listening(false);
+        assert!(folders.known(b).is_none(), "the connection broke");
+        folders.listening(true);
+        assert!(
+            folders.known(b).is_none(),
+            "another connection: something was missed"
+        );
+        folders.learnt(None, b, at(200, 20), Arc::from([]));
+        age(&folders);
+        assert!(folders.known(b).is_some());
     }
 
     #[test]
@@ -299,7 +373,7 @@ mod tests {
         let (a, b) = (NodeId(Uuid::from_u128(1)), NodeId(Uuid::from_u128(2)));
         folders.learnt(None, b, at(200, 20), Arc::from([]));
         let reading = folders.reading();
-        folders.fed([fed(b, 20, false)].into_iter());
+        folders.fed(fed(b, 20, false));
         folders.learnt(Some(reading), a, at(100, 10), Arc::from([share(7, None)]));
         assert_eq!(folders.known(a), None, "read before the feed's word");
         folders.learnt(Some(folders.reading()), a, at(100, 10), Arc::from([]));
@@ -326,6 +400,7 @@ mod tests {
         folders.learnt(None, node(MANY), at(MANY as u128 + 1, 1), Arc::from([]));
         let state = folders.state();
         assert_eq!((state.folders.len(), state.by_file.len()), (1, 1));
+        assert_eq!(state.full, 0, "few left: as many as before fill it again");
     }
 
     #[test]

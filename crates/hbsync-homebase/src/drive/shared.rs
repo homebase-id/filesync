@@ -415,7 +415,7 @@ impl Remote for PeerRemote {
         self.with_token(|client| {
             let ask = |b: &serde_json::Value| self.query_batch(client, b);
             let (page, cursor) = feed_page(ask, cursor, limit, wire::Shape::Minimal)?;
-            refs_page(page, cursor)
+            refs_page(page, cursor, |_| {})
         })
     }
 

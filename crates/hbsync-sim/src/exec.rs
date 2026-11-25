@@ -20,8 +20,8 @@ use hbsync_local::layout::parked_name;
 use hbsync_platform::{Os, executable_on_disk, holds_executable, synced_executable};
 use hbsync_state::{Answer, FolderKind, RemovedRow, StateDb, StateError};
 use hbsync_types::{
-    ContentHash, ContentState, DESKTOPS_NAME, FileContent, NodeId, NodeKind, NodeState,
-    RemoteFileId, RemoteRef, Role, Tags, VersionTag,
+    ContentHash, ContentState, DESKTOPS_NAME, FileContent, NodeId, NodeKind, NodeState, RemoteRef,
+    Role, Tags, VersionTag,
 };
 
 use crate::Sim;
@@ -2056,23 +2056,15 @@ impl Sim {
                     content,
                     tags,
                 };
-                let remote = RemoteRef {
-                    file_id: file_id.unwrap_or_else(|| RemoteFileId(self.server.uuid())),
-                    version: VersionTag(self.server.uuid()),
-                };
                 // Back on the drive: from Recently deleted, or made again after the purge.
                 self.server.removed.remove(&node);
                 self.restored_on_drive(node);
-                self.server.ever.insert(node);
                 let state = NodeState {
                     parent: coords.to_drive(state.parent),
                     ..state
                 };
-                // A new file is shared as its folder is; one put back keeps its own shares.
-                if file_id.is_none() {
-                    (self.server).share_as_its_folder(remote.file_id, state.parent);
-                }
-                self.server.live.insert(node, ServerNode { state, remote });
+                // (A new file is shared as its folder is; one put back keeps its own shares.)
+                self.server.put_as(node, state, file_id);
                 self.record_remote(c, node);
                 Done
             }

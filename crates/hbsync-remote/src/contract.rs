@@ -350,7 +350,7 @@ impl<'a> Bench<'a> {
             end: Mutex::new(start.clone()),
             start,
         };
-        let at = bench.create_unshared(&scratch, None)?;
+        let at = bench.create_as_added(&scratch, None)?;
         // A scratch folder that can't be shared is deleted again: nothing left on the drive.
         if let Err(e) = bench.share(at.file_id) {
             if let Err(left) = bench.cleanup() {
@@ -435,15 +435,15 @@ impl<'a> Bench<'a> {
 
     /// A create, remembered for cleanup; on a shared bench, shared.
     pub fn create(&self, meta: &NodeMeta, data: Option<&[u8]>) -> Result<RemoteRef, RemoteError> {
-        let at = self.create_unshared(meta, data)?;
+        let at = self.create_as_added(meta, data)?;
         self.share(at.file_id)?;
         Ok(at)
     }
 
-    /// A create, remembered for cleanup, not shared by the bench: shared all the same where
-    /// it goes into a shared folder, as the sharer's client shares what it adds like the
-    /// folder it adds to ([`the_sharer_adds_to_a_shared_folder`]).
-    fn create_unshared(
+    /// A create, remembered for cleanup, shared only as the sharer's client shares what it
+    /// adds: like the folder it goes into ([`the_sharer_adds_to_a_shared_folder`]), so not at
+    /// all at the top or in a folder that isn't shared.
+    fn create_as_added(
         &self,
         meta: &NodeMeta,
         data: Option<&[u8]>,
@@ -1434,9 +1434,9 @@ fn the_sharer_adds_to_a_shared_folder(b: &Bench) -> Outcome {
     let dir = folder("a new folder", b.scratch);
     let inner = file("inner", dir.node, b"2");
     let at = [
-        b.create_unshared(&added, Some(b"1"))?,
-        b.create_unshared(&dir, None)?,
-        b.create_unshared(&inner, Some(b"2"))?,
+        b.create_as_added(&added, Some(b"1"))?,
+        b.create_as_added(&dir, None)?,
+        b.create_as_added(&inner, Some(b"2"))?,
     ];
     let ids: Vec<RemoteFileId> = at.iter().map(|at| at.file_id).collect();
     let feed = b.changes_to(&cursor, &ids)?;
@@ -1456,7 +1456,7 @@ fn the_sharer_adds_to_a_shared_folder(b: &Bench) -> Outcome {
     ensure!(b.read(at[2].file_id, None)? == b"2", "payload");
 
     shares(b)?.withdraw(at[1].file_id)?;
-    let late = b.create_unshared(&file("late", dir.node, b"3"), Some(b"3"))?;
+    let late = b.create_as_added(&file("late", dir.node, b"3"), Some(b"3"))?;
     ensure_err!(member.header(late.file_id), RemoteError::Fatal(_));
     Ok(())
 }
@@ -1467,7 +1467,7 @@ fn a_child_of_a_folder_not_shared(b: &Bench) -> Outcome {
     let cursor = b.cursor_now()?;
     // At the top: in the scratch folder it would be shared as that is.
     let dir = folder(&unshared_name("not shared"), NodeId::ROOT);
-    let dir_ref = b.create_unshared(&dir, None)?;
+    let dir_ref = b.create_as_added(&dir, None)?;
     let f = file("shared", dir.node, b"in it");
     let w = b.create(&f, Some(b"in it"))?;
     let feed = b.changes_to(&cursor, &[dir_ref.file_id, w.file_id])?;
@@ -1486,7 +1486,7 @@ fn what_isnt_shared_is_refused(b: &Bench) -> Outcome {
     let cursor = b.cursor_now()?;
     // At the top: in the scratch folder it would be shared as that is.
     let private = file(&unshared_name("private"), NodeId::ROOT, b"mine");
-    let w = b.create_unshared(&private, Some(b"mine"))?;
+    let w = b.create_as_added(&private, Some(b"mine"))?;
     ensure!(
         b.changes_to(&cursor, &[w.file_id])?.is_empty(),
         "a file not shared is in the feed"
@@ -1618,7 +1618,7 @@ fn a_member_holds_only_what_is_shared(b: &Bench) -> Outcome {
     // Made while its folder isn't shared (in a shared one it would be shared as that is):
     // a folder shared later doesn't share what is in it.
     shares(b)?.withdraw(dir_at.file_id)?;
-    let private = b.create_unshared(&file("private", dir.node, b"1"), Some(b"1"))?;
+    let private = b.create_as_added(&file("private", dir.node, b"1"), Some(b"1"))?;
     b.share(dir_at.file_id)?;
     let w = b.create(&file("w", other.node, b"2"), Some(b"2"))?;
     shares(b)?.withdraw(w.file_id)?;

@@ -989,17 +989,20 @@ shares a folder writes the rows of what is in it then (**[verified]** chat-kmp
   one there, and everything added to a folder this computer made itself: nothing (a new
   folder with a folder and four files in it went up in its six uploads; **[verified]**
   live). At the top of the drive, and on a drive that isn't private, nothing is asked.
-- **How long what was read is gone by.** Until something says the folder changed, at most
-  10 minutes. A share given or withdrawn keeps the folder's version and moves its `updated`
-  alone; it is announced to the owner's other devices as a change of the folder at the
-  version it has. This client takes such a notice without reading the feed (a version it
-  knows), so the notice itself drops what was read of that folder; a feed row of the
-  folder at another version, or with `updated` past `versionUpdated`, does too (what the
-  notifications missed). **[verified]** live: a folder's share withdrawn by another device,
-  and a file added there 3 s later went up with no share, after one new read. A login's
-  own writes aren't announced to it (`excludeOwnWrites`): a share written with this
-  computer's own token isn't heard here (seen live; nothing of this client writes one, but
-  with a new node).
+- **How long what was read is gone by.** Until something says the folder changed: for as
+  long as the notifications have been connected all the while since, else 10 minutes at
+  most (the feed is read every 5 minutes while they are down, and as they connect). A share
+  given or withdrawn keeps the folder's version and moves its `updated` alone; it is
+  announced to the owner's other devices as a change of the folder at the version it has.
+  This client takes such a notice without reading the feed (a version it knows), so the
+  notice itself drops what was read of that folder; a feed row of the folder at another
+  version, or with `updated` past `versionUpdated`, does too (what the notifications
+  missed). **[verified]** live: a folder's share withdrawn by another device, and a file
+  added there 3 s later went up with no share, after one new read. A login's own writes
+  aren't announced to it (`excludeOwnWrites`): a share written with this computer's own
+  token isn't heard here (seen live; nothing of this client writes one, but with a new
+  node). Of the uploads that go into one folder at once, one reads and the others wait for
+  it.
 - **Limits.**
   - A node this computer **moves** into a shared folder, or out of one, keeps the rows it
     has: moved in, it reaches no member; moved out, it stays shared. Rows can't ride on an
@@ -1008,7 +1011,9 @@ shares a folder writes the rows of what is in it then (**[verified]** chat-kmp
   - A node added in the seconds between a share's change and its notice goes up as the
     folder was shared before: one added just after a withdrawal stays shared, one added
     just after a folder is first shared isn't (the app that shared wrote the rows of what
-    was there then). With the notifications down, for up to 10 minutes.
+    was there then). With the notifications down, until the feed is next read, 10 minutes
+    at most; a notice the server never sent would not be made up for while they stay
+    connected (as for any other change it didn't announce).
   - The folder's other circles get no row for what a **member** adds ("Writing to what
     others share").
   - A share that can't be given (the folder's shares or a circle's key not read, a key that

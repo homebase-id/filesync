@@ -159,8 +159,10 @@ impl Notifier {
     /// Connects to `client`'s identity and subscribes to `drive`, reconnecting as needed;
     /// events go to `events` until it is closed or the notifier dropped. Writes made with
     /// `client`'s own token aren't announced (`excludeOwnWrites`). An error: its thread
-    /// couldn't start (then never connected: the caller reads the drive on a timer).
-    pub fn spawn(
+    /// couldn't start (then never connected: the caller reads the drive on a timer). Made
+    /// through the drive's remote, which listens too
+    /// ([`crate::drive::HomebaseRemote::notifier`]).
+    pub(crate) fn spawn(
         client: Client,
         drive: TargetDrive,
         events: impl Into<Events>,

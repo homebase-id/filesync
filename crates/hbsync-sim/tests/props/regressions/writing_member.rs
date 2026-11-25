@@ -4,7 +4,7 @@
 
 use hbsync_sim::{Action, Event, Sim};
 
-use super::{act, settle, share, top};
+use super::{act, add_to, settle, share, top};
 
 /// The owner turns the share of `path` to editing (or back to reading).
 fn turn(sim: &mut Sim, path: &str) {
@@ -42,17 +42,22 @@ fn edit(sim: &mut Sim, path: &str) {
     sim.run(&[act(2, Action::Edit { file })]);
 }
 
+/// Client `c`'s pick of its folder `folder` (`""`: the top), as its folders are now.
+fn folder_pick(sim: &Sim, c: usize, folder: &str) -> usize {
+    match folder {
+        "" => top(sim, c),
+        folder => {
+            let folder = sim.item(c, folder).expect("the folder");
+            sim.pick(c, folder, true).expect("the folder's pick")
+        }
+    }
+}
+
 /// The member moves its item at `path` into `folder` (`""`: the top) as the name `name` picks.
 fn rename(sim: &mut Sim, path: &str, folder: &str, name: usize) {
     let node = sim.item(2, path).expect("on the member's device");
     let node = sim.pick(2, node, false).expect("its pick");
-    let parent = match folder {
-        "" => top(sim, 2),
-        folder => {
-            let folder = sim.item(2, folder).expect("the folder");
-            sim.pick(2, folder, true).expect("the folder's pick")
-        }
-    };
+    let parent = folder_pick(sim, 2, folder);
     sim.run(&[act(2, Action::Move { node, parent, name })]);
 }
 
@@ -168,13 +173,7 @@ fn a_rename_onto_a_taken_name_is_undone() {
 
 /// The member makes its file named by `name` in `folder` (`""`: the top).
 fn make(sim: &mut Sim, folder: &str, name: usize) {
-    let parent = match folder {
-        "" => top(sim, 2),
-        folder => {
-            let folder = sim.item(2, folder).expect("the folder");
-            sim.pick(2, folder, true).expect("the folder's pick")
-        }
-    };
+    let parent = folder_pick(sim, 2, folder);
     sim.run(&[act(2, Action::CreateFile { parent, name })]);
 }
 
@@ -211,31 +210,14 @@ fn what_is_made_in_a_folder_shared_for_editing_reaches_the_drive() {
 /// does what is made in a folder whose share was withdrawn.
 #[test]
 fn what_the_owner_makes_in_a_shared_folder_reaches_the_member() {
-    use Action::{CreateFile, CreateFolder};
     let mut sim = owned(&["b"]);
     assert_eq!(sim.local_paths(2), ["b"]);
-    // (A pick is good for the folders its device has then: one made, they are picked again.)
-    let within = |sim: &Sim, path: &str| match path {
-        "" => top(sim, 0),
-        path => {
-            let folder = sim.item(0, path).expect("the folder");
-            sim.pick(0, folder, true).expect("the folder's pick")
-        }
-    };
-    let made = [
-        ("b", 3, false),
-        ("b", 5, true),
-        ("b/d", 0, false),
-        ("", 3, false),
-    ];
-    for (folder, name, is_folder) in made {
-        let parent = within(&sim, folder);
-        let make = match is_folder {
-            true => CreateFolder { parent, name },
-            false => CreateFile { parent, name },
-        };
-        sim.run(&[act(0, make)]);
-    }
+    add_to(&mut sim, 0, "b", 3);
+    let parent = folder_pick(&sim, 0, "b");
+    sim.run(&[act(0, Action::CreateFolder { parent, name: 5 })]);
+    add_to(&mut sim, 0, "b/d", 0);
+    let parent = folder_pick(&sim, 0, "");
+    sim.run(&[act(0, Action::CreateFile { parent, name: 3 })]);
     settle(&mut sim);
     assert_eq!(
         sim.server_paths(),
@@ -251,8 +233,7 @@ fn what_the_owner_makes_in_a_shared_folder_reaches_the_member() {
     // The share of `b/d` withdrawn: what its owner makes there now isn't shared.
     share(&mut sim, "b/d");
     settle(&mut sim);
-    let parent = within(&sim, "b/d");
-    sim.run(&[act(0, CreateFile { parent, name: 3 })]);
+    add_to(&mut sim, 0, "b/d", 3);
     settle(&mut sim);
     assert!(sim.server_paths().iter().any(|p| p == "b/d/c.txt"));
     let members = sim.local_paths(2);
