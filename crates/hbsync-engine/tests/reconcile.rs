@@ -4171,7 +4171,8 @@ fn a_file_edited_on_both_sides_waits(b: NodeId, c: NodeId, q: NodeId) {
         let plan = w.plan();
         assert!(!plan.writes_drive(), "{gone}: {:?}", plan.ops);
         assert!(plan.ops.is_empty(), "{gone}: {:?}", plan.ops);
-        assert!(plan.conflicts.is_empty(), "{gone}: {:?}", plan.conflicts);
+        // Told, as any copy that waits to be made.
+        assert_eq!(plan.conflicts, [Conflict::CopyWaits { node: c }], "{gone}");
         assert!(plan.deferred.contains(&c), "{gone}: planned again");
     }
     let mut w = world();
@@ -4185,6 +4186,79 @@ fn a_file_edited_on_both_sides_waits(b: NodeId, c: NodeId, q: NodeId) {
         (plan.ops.iter()).any(|op| matches!(op, Op::RemoteCreate { node, .. } if *node == copy)),
         "{:?}",
         plan.ops
+    );
+}
+
+/// The same told whichever is met first, the file or its copy: the folder they are in waits
+/// (moved there into the one this device can't read), and both with it.
+#[test]
+fn a_file_edited_on_both_sides_in_a_folder_that_waits_says_its_copy_waits() {
+    for order in [[0, 1, 2], [1, 0, 2], [2, 1, 0], [1, 2, 0]] {
+        let id = ids(3);
+        let [b, c, q] = order.map(|i| id[i]);
+        let mut w = World::default();
+        w.synced(b, folder(ROOT, "b"))
+            .synced(c, file(b, "c.txt", "x"));
+        w.remote(b, Some(folder(q, "b")))
+            .remote(c, Some(file(b, "c.txt", "theirs")))
+            .local(c, Some(file(b, "c.txt", "mine")));
+        w.input.unreadable.insert(q);
+        let plan = w.plan();
+        assert!(plan.ops.is_empty(), "{order:?}: {:?}", plan.ops);
+        assert_eq!(
+            plan.conflicts,
+            [Conflict::CopyWaits { node: c }],
+            "{order:?}"
+        );
+    }
+}
+
+/// A folder brought back for the copy alone goes again with those above it brought back for
+/// it (`a` and `b`, both gone there): neither is made again there, and the file's edit keeps
+/// both here. With something else changed in it, the folder comes back for that, as ever:
+/// made again there, the other edit sent, and still no copy.
+#[test]
+fn a_folder_brought_back_for_a_copy_that_isnt_made_goes_again() {
+    let [a, b, c, e, q] = ids(5)[..] else {
+        unreachable!()
+    };
+    let world = || {
+        let mut w = World::default();
+        w.synced(a, folder(ROOT, "a"))
+            .synced(b, folder(a, "b"))
+            .synced(c, file(b, "c.txt", "x"))
+            .synced(e, file(b, "e.txt", "e"));
+        w.remote(a, None)
+            .remote(b, None)
+            .remote(e, None)
+            .remote(c, Some(file(q, "c.txt", "theirs")))
+            .local(c, Some(file(b, "c.txt", "mine")));
+        w.input.unreadable.insert(q);
+        w
+    };
+    let plan = world().plan();
+    assert!(!plan.writes_drive(), "{:?}", plan.ops);
+    assert_eq!(sorted_ops(&plan), [("LocalDelete", e)]);
+
+    let mut w = world();
+    w.local(e, Some(file(b, "e.txt", "mine too")));
+    let plan = w.plan();
+    let made: Vec<NodeId> = (plan.ops.iter())
+        .filter(|op| matches!(op, Op::RemoteCreate { .. }))
+        .map(Op::node)
+        .collect();
+    let mut want = vec![a, b, e];
+    want.sort();
+    let mut got = made.clone();
+    got.sort();
+    assert_eq!(got, want, "{:?}", plan.ops);
+    assert!(
+        !plan
+            .conflicts
+            .iter()
+            .any(|c| matches!(c, Conflict::EditEdit { .. })),
+        "{:?}",
+        plan.conflicts
     );
 }
 

@@ -523,9 +523,13 @@ impl Reconciler<'_> {
                     }
                     // And one edited on both sides that waits itself makes no copy meanwhile:
                     // it stays as it is here, edit and all, judged again once its folder
-                    // reads. (Its copy stayed in the plan and was sent, with no item here to
-                    // send, at every sync: found by the simulator.)
-                    self.unfork(node);
+                    // reads, and says so, as one whose copy waits. (Its copy stayed in the
+                    // plan and was sent, with no item here to send, at every sync: found by
+                    // the simulator.)
+                    if self.forks.contains_key(&node) {
+                        self.unfork(node);
+                        self.plan.conflicts.push(Conflict::CopyWaits { node });
+                    }
                 }
             }
         }
