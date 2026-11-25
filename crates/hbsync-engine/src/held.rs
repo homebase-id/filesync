@@ -557,6 +557,29 @@ pub fn put_back_plan<S: Sides>(nodes: &[NodeId], sides: &S) -> Result<PutBack, S
     Ok(plan)
 }
 
+/// "Put them back" where nothing is restored on the drive: a folder that writes to another
+/// identity's drive (sync semantics §13), on which only its owner restores. Of `nodes`, the
+/// deletes made here are undone as [`put_back_plan`] undoes them (deleted here, live on the
+/// drive: the base goes, with what below it is gone here too, so it comes down again; one
+/// the drive removed too meanwhile is left to the drive). A removal made there, the item
+/// still here, is left held: undoing it would be a restore. Returns the bases to forget, and
+/// how many of `nodes` it left held so.
+///
+/// Costs a row lookup per node, then as [`put_back_plan`] for the ones gone here.
+pub fn put_back_here<S: Sides>(
+    nodes: &[NodeId],
+    sides: &S,
+) -> Result<(Vec<NodeId>, usize), S::Error> {
+    let mut gone_here = Vec::new();
+    for &node in nodes {
+        if sides.here(node)?.is_none() {
+            gone_here.push(node);
+        }
+    }
+    let plan = put_back_plan(&gone_here, sides)?;
+    Ok((plan.forget, nodes.len() - gone_here.len()))
+}
+
 #[cfg(test)]
 mod tests {
     use std::convert::Infallible;

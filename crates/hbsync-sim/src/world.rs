@@ -861,8 +861,10 @@ impl Sim {
     /// in pages the rest of its sweep, as [`Sim::quiesce`] runs it). What a later page held
     /// meanwhile stays held, shown again.
     pub(crate) fn put_back(&mut self, c: usize) {
-        // Read-only (§13), the engine refuses it: what is held stays held.
-        if self.clients[c].read_only {
+        // Read-only (§13), the engine refuses it: what is held stays held. But in a folder
+        // that writes there, whose own deletes (removals there) are put back, below.
+        let (read_only, writes) = (self.clients[c].read_only, self.clients[c].writes);
+        if read_only && !writes {
             return;
         }
         let held = std::mem::take(&mut self.clients[c].held);
@@ -874,6 +876,15 @@ impl Sim {
             rounds += 1;
         }
         self.clients[c].held.retain(|n| !held.contains(n));
+        if read_only {
+            // Only the deletes made here, their bases forgotten: nothing is restored on
+            // another identity's drive, and a removal made there is held again by the next
+            // plan.
+            let Ok((bases, _)) =
+                self.with_sides(c, |sides| hbsync_engine::held::put_back_here(&held, sides));
+            self.forget_bases(c, &bases);
+            return;
+        }
         // What it puts back, for the check after it: what was synced of the held, but not one
         // gone here and not live on the drive (removed there too: its state wins, §7). One a
         // crash left aside comes back at recovery, and the plan follows the drive.
