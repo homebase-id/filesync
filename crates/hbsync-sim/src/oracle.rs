@@ -455,12 +455,17 @@ impl Sim {
         // What waits for a folder no client reads, and the folders it keeps where it changed
         // (§6.3): no client writes it to the drive, a tag changed on it neither.
         let mut stays_waiting: BTreeSet<NodeId> = BTreeSet::new();
+        // What waits on a client, or is left out there, by the end: that client's tag changes
+        // of it aren't sent meanwhile (another's stand; an add that was sent and is lost
+        // since isn't excused). Not checked: one made before it began to wait, that could
+        // have been sent then and wasn't (the oracle doesn't know when a node began to wait).
+        let mut waits_on: BTreeSet<(usize, NodeId)> = BTreeSet::new();
         // What waits for a folder no client reads on the drive, through folders in Recently
         // deleted too.
         let mut waits_on_drive: BTreeSet<NodeId> = BTreeSet::new();
         // The drive's orphans that wait on a client with the folder that client knows for
-        // them (below), by how many clients: one that waits on every client is no client's
-        // to recover.
+        // them (below), or that it doesn't sync, by how many clients: one that is so on every
+        // client is no client's to recover.
         let mut orphan_waits: BTreeMap<NodeId, usize> = BTreeMap::new();
         for (c, client) in self.clients.iter().enumerate() {
             // A launcher whose bit the client doesn't hold is executable only as the user made
@@ -502,6 +507,16 @@ impl Sim {
             if !client.read_only {
                 written_somewhere.extend(synced.ids());
             }
+            // The drive's orphans this client doesn't sync (out of its scope, or left where
+            // it holds nothing of them and doesn't sync their place in Recovered files
+            // either: `Sim::left_orphans`): none of its to recover, as one that waits on it
+            // isn't (`orphan_waits`). One it is to recover is in `synced`, and doesn't count.
+            let unsynced: BTreeSet<NodeId> = (server.iter())
+                .filter(|(n, s)| {
+                    !s.parent.is_root() && !server.contains(s.parent) && !synced.contains(*n)
+                })
+                .map(|(n, _)| n)
+                .collect();
             left_somewhere.extend(left);
             // What the client blocks for a refusal: each operation refused itself is one the
             // drive refuses as it is now (by its own judgement: a record that blocked one it
@@ -546,6 +561,21 @@ impl Sim {
                 };
                 let local_hash = client.extra.get(&k).and_then(|e| e.local_hash);
                 changed_here(here, had, local_hash, server.get(k))
+            };
+            // Whether `k`, changed here, was edited there too, to other bytes: a conflict whose
+            // copy is made where the item is here (§5). Where that folder waits, or is gone there
+            // and in one that waits, the copy isn't made, and the node waits with it (the
+            // engine's `CopyWaits`): where the drive has it, it isn't followed meanwhile.
+            // (Bytes alone: a change of the executable bit forks in the engine too, which
+            // no property of what waits makes.)
+            let forks = |k: NodeId| {
+                let file = client
+                    .local
+                    .get(k)
+                    .is_some_and(|l| l.kind == NodeKind::File);
+                let had = client.base.get(k).and_then(|b| b.content).map(|c| c.hash);
+                let there = server.get(k).and_then(|d| d.content).map(|c| c.hash);
+                file && changed(k) && there.is_some() && there != had
             };
             // Whether the merge places `n` where it is here: made here, or moved here where the
             // drive has it where its base does (or not at all).
@@ -615,7 +645,6 @@ impl Sim {
                         at = known.parent;
                     };
                     if waits {
-                        *orphan_waits.entry(n).or_default() += 1;
                         // With what the drive has in the orphan: it waits with it.
                         for k in below(&drive, n).into_iter().chain(chain) {
                             orphan_out.insert(k);
@@ -629,7 +658,8 @@ impl Sim {
                     .filter(|(k, _)| !aside.contains(k) || kept.contains(k))
                     .filter(|(k, here)| match synced.get(*k) {
                         Some(t) if client.base.get(*k).is_some_and(|b| !b.same_place(t)) => {
-                            aside.contains(&t.parent) && !kept.contains(&t.parent)
+                            (aside.contains(&t.parent) && !kept.contains(&t.parent))
+                                || (forks(*k) && reaches(&aside, &kept, here.parent))
                         }
                         Some(_) => reaches(&aside, &kept, here.parent),
                         // Gone there (or never there): kept where it changed or moved here
@@ -664,6 +694,16 @@ impl Sim {
                 }
                 if (aside.len(), kept.len()) == before {
                     break;
+                }
+            }
+            // The drive's orphans that wait here, by whichever rule: with their folder here,
+            // or for one that waits (`orphan_waits`).
+            for (n, s) in server.iter() {
+                let orphan = !s.parent.is_root() && !server.contains(s.parent);
+                let not_its =
+                    unsynced.contains(&n) || aside.contains(&n) || orphan_out.contains(&n);
+                if orphan && not_its {
+                    *orphan_waits.entry(n).or_default() += 1;
                 }
             }
             for &n in &orphan_out {
@@ -701,12 +741,15 @@ impl Sim {
                     ));
                 }
                 let blobs = (&ledger.blobs, &mut kept_here);
-                set_aside(n, &mut visible, &mut synced, &mut base, blobs);
+                let left_out = set_aside(n, &mut visible, &mut synced, &mut base, blobs);
+                // Left out here: this client's tag changes of it aren't sent meanwhile.
+                waits_on.extend(left_out.into_iter().map(|n| (c, n)));
             }
             // No client writes a tag change on what waits, nor on a folder it keeps here (gone
             // there); one synced that waits with it here is live on the drive, where another
             // client's tag change of it stands.
             stays_waiting.extend(&waiting);
+            waits_on.extend(aside.iter().map(|n| (c, *n)));
             stays_waiting.extend(
                 aside
                     .into_iter()
@@ -955,7 +998,7 @@ impl Sim {
         let left_as_is = &refused_here | &stays_waiting;
         self.ledger
             .tags
-            .check(&server, &left_as_is, held_at_removal)?;
+            .check(&server, &left_as_is, &waits_on, held_at_removal)?;
         Ok(())
     }
 }
