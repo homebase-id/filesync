@@ -39,7 +39,7 @@ const MAY_NOT_SEND: &str = "your Homebase cloud hasn't given Filesync the permis
                             what others share with you yet";
 
 /// How long a write waits for the socket's word between its own looks at their file: 15
-/// seconds in all, then it says it is waiting ([`RemoteError::Waiting`]). The word comes in
+/// seconds in all, then it says the write is on its way ([`RemoteError::OnItsWay`]). The word comes in
 /// well under the first wait where both servers are up (20 to 120 ms measured for the whole
 /// write): no look is made then. Without a socket (a sync run once, by hand) a write takes
 /// the first wait and one look.
