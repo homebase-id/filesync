@@ -4196,20 +4196,21 @@ fn a_file_edited_on_both_sides_in_a_folder_that_waits_says_its_copy_waits() {
     for order in [[0, 1, 2], [1, 0, 2], [2, 1, 0], [1, 2, 0]] {
         let id = ids(3);
         let [b, c, q] = order.map(|i| id[i]);
-        let mut w = World::default();
-        w.synced(b, folder(ROOT, "b"))
-            .synced(c, file(b, "c.txt", "x"));
-        w.remote(b, Some(folder(q, "b")))
-            .remote(c, Some(file(b, "c.txt", "theirs")))
-            .local(c, Some(file(b, "c.txt", "mine")));
-        w.input.unreadable.insert(q);
-        let plan = w.plan();
-        assert!(plan.ops.is_empty(), "{order:?}: {:?}", plan.ops);
-        assert_eq!(
-            plan.conflicts,
-            [Conflict::CopyWaits { node: c }],
-            "{order:?}"
-        );
+        // Edited on both sides; and renamed on both sides too: that its copy waits is all it
+        // says, in either order.
+        for (here, there) in [("c.txt", "c.txt"), ("mine.txt", "theirs.txt")] {
+            let mut w = World::default();
+            w.synced(b, folder(ROOT, "b"))
+                .synced(c, file(b, "c.txt", "x"));
+            w.remote(b, Some(folder(q, "b")))
+                .remote(c, Some(file(b, there, "theirs")))
+                .local(c, Some(file(b, here, "mine")));
+            w.input.unreadable.insert(q);
+            let plan = w.plan();
+            assert!(plan.ops.is_empty(), "{order:?} {here}: {:?}", plan.ops);
+            let told = [Conflict::CopyWaits { node: c }];
+            assert_eq!(plan.conflicts, told, "{order:?} {here}");
+        }
     }
 }
 

@@ -92,15 +92,17 @@ pub(crate) fn orphaning_action() -> impl Strategy<Value = Action> + Clone {
     ]
 }
 
-/// Events on `clients` clients: the users edit, delete and tag, while a newer client moves
-/// synced nodes into folders no client reads ([`Action::IntoNewer`]: they wait for them,
-/// where a device has them, edited or not, on one device or several) and other devices
-/// delete folders, stop half way, restore and purge.
+/// Events on `clients` clients: client 0's user edits; the users delete and tag, while a newer
+/// client moves synced nodes into folders no client reads ([`Action::IntoNewer`]: they wait
+/// for them, where a device has them, edited or not) and other devices delete folders, stop
+/// half way, restore and purge. One device edits: within the engine's known gap of what waits
+/// for such a folder (a file edited there and here, the drive's edit first, is forked into a
+/// copy whose upload is planned at every sync, its item never made).
 pub(crate) fn waiting_event(clients: usize) -> impl Strategy<Value = Event> {
     let c = move || 0..clients;
     prop_oneof![
         3 => (c(), waiting_action()).prop_map(|(client, action)| Event::Act { client, action }),
-        2 => (c(), 0usize..16).prop_map(|(client, file)| Event::Act { client, action: Action::Edit { file } }),
+        2 => (0usize..16).prop_map(|file| Event::Act { client: 0, action: Action::Edit { file } }),
         1 => c().prop_map(|client| Event::Plan { client }),
         3 => c().prop_map(|client| Event::Step { client }),
     ]

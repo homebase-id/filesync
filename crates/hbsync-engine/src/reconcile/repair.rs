@@ -526,8 +526,11 @@ impl Reconciler<'_> {
                     // reads, and says so, as one whose copy waits. (Its copy stayed in the
                     // plan and was sent, with no item here to send, at every sync: found by
                     // the simulator.)
+                    // (Instead of its other conflicts, as where its copy is met first:
+                    // `fork_waits`.)
                     if self.forks.contains_key(&node) {
                         self.unfork(node);
+                        self.plan.conflicts.retain(|c| c.node() != node);
                         self.plan.conflicts.push(Conflict::CopyWaits { node });
                     }
                 }
