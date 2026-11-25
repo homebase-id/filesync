@@ -200,6 +200,20 @@ struct Reconciler<'a> {
     evicted: BTreeSet<NodeId>,
     /// What a read-only name clash left out (§13), each once.
     left: BTreeSet<NodeId>,
+    /// The names held here by what waits for its folder there ([`Reconciler::fix_orphans`]:
+    /// out of the plan, where it is here), and by the folders kept for it, by folder: taken
+    /// here till the wait ends. What would take one is left out here meanwhile, never
+    /// renamed there for it.
+    held_waiting: HashMap<NodeId, HashSet<String>>,
+    /// What is here and a repair took out of the plan, on an identity's own drive: what waits
+    /// for its folder there ([`Reconciler::fix_orphans`]), and what was left out for a name
+    /// and put back where it is here ([`Reconciler::leave_out`]). Changed here, each keeps the
+    /// folders it is in ([`Reconciler::keep_for_what_is_out`]).
+    out_here: BTreeSet<NodeId>,
+    /// The folders gone there that [`Reconciler::fix_orphans`] brought back for a live node in
+    /// them: one brought back for a conflict copy alone goes again where the copy isn't made
+    /// after all ([`Reconciler::unfork`]).
+    brought_back: BTreeSet<NodeId>,
     /// The nodes this identity may change on another identity's drive that follow it in this
     /// plan all the same (§13, `one_way`): one gone there or here, or edited on both sides
     /// where no copy of it may be added (the merge's); one a repair gave its place (an orphan let go of, a cycle's move
@@ -278,6 +292,9 @@ impl<'a> Reconciler<'a> {
             forks: BTreeMap::new(),
             evicted: BTreeSet::new(),
             left: BTreeSet::new(),
+            held_waiting: HashMap::new(),
+            out_here: BTreeSet::new(),
+            brought_back: BTreeSet::new(),
             follows: HashSet::new(),
             adds: HashSet::new(),
             removals: HashMap::new(),
@@ -342,6 +359,10 @@ impl<'a> Reconciler<'a> {
         loop {
             let waited = self.waiters.len();
             self.fix_names(only.as_ref());
+            // What a name left out is put back where it is here, maybe in a folder the plan
+            // deletes here: changed here, it keeps that folder, which holds its name, in a
+            // folder judged again for it.
+            self.keep_for_what_is_out();
             only = if self.waiters.len() != waited {
                 // Every folder again: none just for what was left out.
                 self.rejudge.clear();

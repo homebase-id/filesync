@@ -47,6 +47,11 @@ impl Reconciler<'_> {
         self.plan.conflicts.retain(|c| c.node() != node);
         self.plan.conflicts.push(Conflict::CopyWaits { node });
         self.defer(node);
+        // Out of the plan as it is here, edit and all: it keeps its folders
+        // ([`Reconciler::keep_for_what_is_out`]).
+        if !self.masking.read_only && self.input.local.contains(node) {
+            self.out_here.insert(node);
+        }
     }
 
     /// A repair puts `node` at `state` in the merged tree; ops follow for it.
@@ -448,6 +453,7 @@ impl Reconciler<'_> {
                         }
                     }
                     self.retarget(parent, state);
+                    self.brought_back.insert(parent);
                     queue.push(parent);
                 }
                 Parent::Recover => {
@@ -515,12 +521,103 @@ impl Reconciler<'_> {
                     if let Some(original) = self.forked_into(node) {
                         self.fork_waits(original);
                     }
+                    // And one edited on both sides that waits itself makes no copy meanwhile:
+                    // it stays as it is here, edit and all, judged again once its folder
+                    // reads, and says so, as one whose copy waits. (Its copy stayed in the
+                    // plan and was sent, with no item here to send, at every sync: found by
+                    // the simulator.)
+                    // (Instead of its other conflicts, as where its copy is met first:
+                    // `fork_waits`.)
+                    if self.forks.contains_key(&node) {
+                        self.unfork(node);
+                        self.plan.conflicts.retain(|c| c.node() != node);
+                        self.plan.conflicts.push(Conflict::CopyWaits { node });
+                    }
                 }
+            }
+        }
+        // What waits and changed here keeps the folders it is in here: one gone there would be
+        // deleted here with it, change and all (it is out of the plan, so nothing sends the
+        // change or keeps the folder alive for it, as an edit in the plan does). An identity's
+        // own drive only: read-only, a change here moves out (`emit`). Here for the first
+        // names judged; again after them, with what they leave out
+        // ([`Reconciler::keep_for_what_is_out`]).
+        if !self.masking.read_only {
+            let here = |n: &&NodeId| self.input.local.contains(**n);
+            self.out_here.extend(withdrawn.iter().filter(here));
+            self.keep_for_what_is_out();
+        }
+        // What waits is where it is here, on its name: taken here till the wait ends, or
+        // what the drive has under that name now (another made there since, one renamed to
+        // it) was planned onto it, refused by the disk at every sync (found by the
+        // simulator). Whatever changed here: out of the plan, it doesn't move out either.
+        // Not a parked item: that isn't on its name on disk. Nor what is below a folder that
+        // waits and isn't kept: no name is judged in that one.
+        for &node in &withdrawn {
+            let judged = (self.input.local.get(node)).is_some_and(|here| {
+                !withdrawn.contains(&here.parent) || self.merged.contains(here.parent)
+            });
+            if judged && !self.input.parked.contains(&node) {
+                self.holds_waiting(node);
             }
         }
         // Each group once, with all that waits in it: one page of its own, not one a node.
         for group in groups {
             self.wait_together(group);
+        }
+    }
+
+    /// What is here, out of the plan ([`Reconciler::out_here`]) and changed here keeps the
+    /// folders it is in here, on an identity's own drive: one the plan deletes here would
+    /// take the change along. After each judging of names, till none more is kept: what a
+    /// name leaves out is put back where it is here, and a folder kept holds its name
+    /// against what the plan had under it.
+    pub(super) fn keep_for_what_is_out(&mut self) {
+        if self.masking.read_only {
+            return;
+        }
+        let out: Vec<NodeId> = self.out_here.iter().copied().collect();
+        for node in out {
+            // Made here counts as changed, whatever the drive has of it: an item with no
+            // base isn't one this device may unlink (§7), the bytes the same there or not
+            // (sent up under a numbered name, say, its rename here still to run).
+            if !self.input.base.contains(node) || self.loses_here(node) {
+                self.keep_folders_here(node);
+            }
+        }
+    }
+
+    /// The folders `node` is in here that the plan doesn't have are left as they are: out of
+    /// the plan, in the merged tree where they are here, each holding its name
+    /// ([`Reconciler::held_waiting`]) in a folder judged again for it. Not deleted here, not
+    /// made again there, planned again with `node`. On up through those the plan has where
+    /// they are here (one put back there for a name may be in a folder the plan doesn't
+    /// have), to the first it moves: that one takes what is in it along.
+    fn keep_folders_here(&mut self, node: NodeId) {
+        let i = self.input;
+        for folder in i.local.ancestors_iter(node) {
+            let Some(here) = i.local.get(folder) else {
+                break;
+            };
+            match self.merged.get(folder) {
+                Some(to) if to.parent == here.parent => continue,
+                Some(_) => break,
+                None => {}
+            }
+            self.scope.remove(&folder);
+            self.origin.remove(&folder);
+            self.leave_as_is(folder);
+            self.holds_waiting(folder);
+            self.rejudge.insert(here.parent);
+        }
+    }
+
+    /// `node` holds the name it has here while it waits for its folder there, or is kept for
+    /// what does ([`Reconciler::held_waiting`]).
+    fn holds_waiting(&mut self, node: NodeId) {
+        if let Some(here) = self.input.local.get(node) {
+            let names = self.held_waiting.entry(here.parent).or_default();
+            names.insert(name_key(&here.name));
         }
     }
 
@@ -656,6 +753,32 @@ impl Reconciler<'_> {
         self.waits.contains(&node) || self.waiters.contains(&node)
     }
 
+    /// `node` leaves the plan as it is here: its fork, if any, is undone with what it told
+    /// (edited on both sides: found again once the node is planned).
+    fn unfork(&mut self, node: NodeId) {
+        let Some(copy) = self.forks.get(&node).copied() else {
+            return;
+        };
+        // What was told of the copy goes too (its name taken where it was to be made: it
+        // isn't renamed, it isn't made).
+        let copied = |c: &Conflict| matches!(c, Conflict::EditEdit { node: n, .. } if *n == node);
+        self.plan
+            .conflicts
+            .retain(|c| !copied(c) && c.node() != copy);
+        let mut folder = self.merged.get(copy).map(|s| s.parent);
+        self.drop_fork(node);
+        // A folder gone there that was brought back for the copy alone goes again, with those
+        // above it brought back for it: not made again there for a copy that isn't made.
+        // (Planned as before it was brought back; what else keeps it here does so after.)
+        while let Some(f) = folder.filter(|f| self.brought_back.contains(f)) {
+            if self.merged.children(f).next().is_some() {
+                break;
+            }
+            self.brought_back.remove(&f);
+            folder = self.merged.remove(f).map(|s| s.parent);
+        }
+    }
+
     /// The fork of `node`, if any, is undone: its copy isn't made.
     pub(super) fn drop_fork(&mut self, node: NodeId) {
         if let Some(copy) = self.forks.remove(&node) {
@@ -691,16 +814,30 @@ impl Reconciler<'_> {
         free
     }
 
-    /// `node`, which lost its name in a read-only folder (§13), and what is below it stay as
-    /// they are: out of the plan (dirty still), in the merged tree where they are here (the
-    /// names they hold here stay held: nothing is planned onto them), else out of it. Told
-    /// once, for `node`.
+    /// `node`, which lost its name where none is renamed on the drive for it (in a read-only
+    /// folder, §13; to what waits here, §8a), and what is below it stay as they are: out of
+    /// the plan (dirty still), in the merged tree where they are here (the names they hold
+    /// here stay held: nothing is planned onto them), else out of it. Told once, for `node`.
     /// False where it was left out already.
     fn leave_out(&mut self, node: NodeId) -> bool {
         if !self.left.insert(node) {
             return false;
         }
         for n in self.merged.subtree(node) {
+            // Its conflict copy isn't made while it is left out (edited on both sides: judged
+            // again once the name is free): half of one, sent with no item here to send, is
+            // planned at every sync (a member's of an item it may change, too).
+            self.unfork(n);
+            // A conflict copy left out with the folder it is to be made in, its original
+            // elsewhere (the drive moved that one out): the original waits with it.
+            if let Some(original) = self.forked_into(n) {
+                self.fork_waits(original);
+            }
+            // On an identity's own drive nothing moves out: where it is put back here it may
+            // keep its folders ([`Reconciler::keep_for_what_is_out`]).
+            if !self.masking.read_only && self.input.local.contains(n) {
+                self.out_here.insert(n);
+            }
             // What changed here still moves out (its name aside): a folder deleted here takes
             // it along otherwise.
             if !self.evicted.contains(&n) {
@@ -766,7 +903,7 @@ impl Reconciler<'_> {
     /// the first numbered name that is free, as a clash's loser does on an identity's own
     /// drive. A clash of names on the drive is its owner's to mend, so none is made there.
     pub(super) fn keep_off_taken_names(&mut self) {
-        if !self.masking.read_only || self.input.writable.is_empty() {
+        if !self.writes_there() {
             return;
         }
         let i = self.input;
@@ -877,8 +1014,16 @@ impl Reconciler<'_> {
             // And names this device's held removals keep there (§7): the same.
             let masked = self.masks.names.get(&parent);
             let kept = self.kept.get(&parent);
+            // And names what waits for its folder there holds here: its to keep till the
+            // wait ends. Nothing is renamed there for one (the clash is this device's alone:
+            // the drive has what waits elsewhere): judged as a read-only folder's names are,
+            // what is on the name on disk keeping it and anything else left out here.
+            let waiting = self.held_waiting.get(&parent).cloned();
+            let held = |key: &str| waiting.as_ref().is_some_and(|w| w.contains(key));
             let taken = |key: &str| {
-                masked.is_some_and(|m| m.contains(key)) || kept.is_some_and(|k| k.contains(key))
+                masked.is_some_and(|m| m.contains(key))
+                    || kept.is_some_and(|k| k.contains(key))
+                    || held(key)
             };
             // Each name once, and again when a node left where it is for a name comes to it
             // (a chain of name waits in one folder, judged in one pass).
@@ -972,17 +1117,21 @@ impl Reconciler<'_> {
                 // held by them alone leaves every newcomer out (one ignored here may be on it).
                 // What moves out holds no name on disk: it goes first.
                 let at_name = |s: &NodeState| s.parent == parent && name_key(&s.name) == key;
+                let one_way = self.masking.read_only || held(&key);
                 // Nor does a parked item: its name is free on disk, or another item's.
                 let on_disk = |n: &NodeId| {
-                    self.masking.read_only
+                    one_way
                         && !self.evicted.contains(n)
                         && !self.input.parked.contains(n)
                         && self.input.local.get(*n).is_some_and(at_name)
                 };
                 // (One that moves out holds the name where its drive version comes back to it.)
+                // (Not where what waits holds the name: that one is on it on disk, and one
+                // synced under the name before, its item gone, doesn't come back to it.)
                 let here = |n: &NodeId| {
                     on_disk(n)
                         || (self.masking.read_only
+                            && !held(&key)
                             && self.input.base.get(*n).is_some_and(at_name)
                             && (!self.evicted.contains(n)
                                 || self.remote_state(*n).is_some_and(at_name)))
@@ -1039,7 +1188,11 @@ impl Reconciler<'_> {
                         }
                         continue;
                     }
-                    if self.masking.read_only {
+                    // Left out, where nothing is renamed there: read-only, and what the drive
+                    // has under a name what waits holds here. (What is only here under such a
+                    // name, a new item parked for it, is no newcomer of the drive's: it takes
+                    // a numbered name, as any clash's loser on an identity's own drive.)
+                    if self.masking.read_only || (one_way && self.remote_state(loser).is_some()) {
                         // Once: held in another folder here, that one is judged again with it.
                         if !self.leave_out(loser) {
                             continue;
@@ -1051,9 +1204,9 @@ impl Reconciler<'_> {
                         // Where it is here, in this folder, it holds that name: judged with what
                         // would take it, as one left where it is for a name. (One that moves
                         // out holds none.)
-                        let held = (self.input.local.get(loser))
+                        let stays = (self.input.local.get(loser))
                             .filter(|h| h.parent == parent && !self.evicted.contains(&loser));
-                        if let Some(to) = held.map(|h| name_key(&h.name)).filter(|to| *to != key) {
+                        if let Some(to) = stays.map(|h| name_key(&h.name)).filter(|to| *to != key) {
                             by_key.entry(to.clone()).or_default().push(loser);
                             queue.push_back(to);
                         }

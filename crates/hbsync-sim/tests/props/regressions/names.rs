@@ -1594,3 +1594,175 @@ fn regression_what_is_in_a_node_that_waits_for_another_page_is_planned_with_it()
     assert!(sim.quiesce(30), "no convergence");
     sim.check().unwrap_or_else(|e| panic!("{e}"));
 }
+
+/// A file synced on both clients that waits for a folder no client reads (a newer client moved
+/// it there) still holds its name on each, till the wait ends. c1 deletes its copy and makes
+/// another `c.txt`, which goes up under that name: on c0 it is left out (the old file is on
+/// the name), not put onto it and not renamed on the drive. Before, it was planned onto the
+/// name at every sync and refused by the disk: the clients never settled.
+#[test]
+fn what_waits_holds_its_name_and_a_newcomer_is_left_out() {
+    use super::{act, settle, top};
+    use Action::*;
+    let mut sim = Sim::new(2);
+    let parent = top(&sim, 0);
+    sim.run(&[act(0, CreateFile { parent, name: 3 })]);
+    settle(&mut sim);
+    let old = sim.item(1, "c.txt").expect("c.txt");
+    sim.run(&[act(1, NewerFolder { name: 1 })]);
+    let (pick, folder) = sim.newer_move_picks(old, "b").expect("on the drive");
+    sim.run(&[act(1, IntoNewer { pick, folder })]);
+    settle(&mut sim);
+    let node = sim.pick(1, old, false).expect("on c1");
+    sim.run(&[act(1, Delete { node })]);
+    let parent = top(&sim, 1);
+    sim.run(&[
+        act(1, CreateFile { parent, name: 3 }),
+        Event::Plan { client: 1 },
+    ]);
+    while !sim.planned(1).is_empty() {
+        sim.run(&[Event::Step { client: 1 }]);
+    }
+    let new = sim.item(1, "c.txt").expect("the new c.txt");
+    let sent = sim.drive_version(new);
+    assert!(sent.is_some(), "c1's c.txt went up");
+    settle(&mut sim);
+    assert_eq!(sim.server_paths(), ["b", "b/a", "b/c.txt", "c.txt"]);
+    assert_eq!(sim.drive_version(new), sent, "not renamed on the drive");
+    assert_eq!(sim.local_paths(0), ["c.txt"]);
+    assert_eq!(
+        sim.item(0, "c.txt"),
+        Some(old),
+        "c0 keeps the old file on the name"
+    );
+    assert_eq!(
+        sim.local_hash(0, old),
+        sim.drive_hash(old),
+        "with its old bytes"
+    );
+    assert_eq!(sim.local_paths(1), ["c.txt"]);
+    assert_eq!(sim.item(1, "c.txt"), Some(new));
+}
+
+/// [`what_waits_holds_its_name_and_a_newcomer_is_left_out`] where the name comes to a file
+/// both clients had: c1 renames `a` to `c.txt` (once its own waiting copy is gone). On c0 it
+/// stays `a` meanwhile, and the drive keeps the rename as c1 made it.
+#[test]
+fn what_waits_holds_its_name_and_one_renamed_to_it_stays_as_it_was() {
+    use super::{act, settle, top};
+    use Action::*;
+    let mut sim = Sim::new(2);
+    let parent = top(&sim, 0);
+    sim.run(&[
+        act(0, CreateFile { parent, name: 3 }),
+        act(0, CreateFile { parent, name: 0 }),
+    ]);
+    settle(&mut sim);
+    let (old, a) = (
+        sim.item(1, "c.txt").expect("c.txt"),
+        sim.item(1, "a").expect("a"),
+    );
+    sim.run(&[act(1, NewerFolder { name: 1 })]);
+    let (pick, folder) = sim.newer_move_picks(old, "b").expect("on the drive");
+    sim.run(&[act(1, IntoNewer { pick, folder })]);
+    settle(&mut sim);
+    let node = sim.pick(1, old, false).expect("on c1");
+    sim.run(&[act(1, Delete { node })]);
+    let (node, parent) = (sim.pick(1, a, false).expect("a"), top(&sim, 1));
+    sim.run(&[
+        act(
+            1,
+            Move {
+                node,
+                parent,
+                name: 3,
+            },
+        ),
+        Event::Plan { client: 1 },
+    ]);
+    while !sim.planned(1).is_empty() {
+        sim.run(&[Event::Step { client: 1 }]);
+    }
+    let renamed = sim.drive_version(a);
+    settle(&mut sim);
+    assert_eq!(sim.server_paths(), ["b", "b/a", "b/c.txt", "c.txt"]);
+    assert_eq!(
+        sim.drive_version(a),
+        renamed,
+        "not renamed again on the drive"
+    );
+    assert_eq!(sim.local_paths(0), ["a", "c.txt"]);
+    assert_eq!(sim.item(0, "a"), Some(a), "a stays as it was on c0");
+    assert_eq!(sim.item(0, "c.txt"), Some(old));
+    assert_eq!(sim.local_paths(1), ["c.txt"]);
+    assert_eq!(sim.item(1, "c.txt"), Some(a));
+}
+
+/// A file edited on two computers, the first edit on the drive, then moved there into a
+/// folder no client reads: the second computer's file waits as it is, its edit in it, and no
+/// conflict copy is made meanwhile. (Its copy was sent at every sync, with no item here to
+/// send it from: the fork of what waits wasn't undone.)
+#[test]
+fn a_file_edited_on_both_sides_that_waits_makes_no_copy_meanwhile() {
+    use super::{act, settle, top};
+    use Action::*;
+    let mut sim = Sim::new(2);
+    let parent = top(&sim, 0);
+    sim.run(&[act(0, CreateFile { parent, name: 3 })]);
+    settle(&mut sim);
+    let f = sim.item(1, "c.txt").expect("on c1");
+    let file = sim.file_pick(0, f).expect("on c0");
+    sim.run(&[act(0, Edit { file }), Event::Plan { client: 0 }]);
+    while !sim.planned(0).is_empty() {
+        sim.run(&[Event::Step { client: 0 }]);
+    }
+    let file = sim.file_pick(1, f).expect("on c1");
+    sim.run(&[act(1, Edit { file }), act(1, NewerFolder { name: 1 })]);
+    let (pick, folder) = sim.newer_move_picks(f, "b").expect("on the drive");
+    sim.run(&[act(1, IntoNewer { pick, folder })]);
+    let moved_at = sim.drive_version(f);
+    settle(&mut sim);
+    assert_eq!(sim.server_paths(), ["b", "b/a", "b/c.txt"]);
+    assert_eq!(sim.drive_version(f), moved_at, "not written in place");
+    assert_eq!(sim.local_paths(1), ["c.txt"]);
+    assert_ne!(sim.local_hash(1, f), sim.drive_hash(f), "its edit is in it");
+}
+
+/// A file made on one computer where another's is on the drive already goes up under a
+/// numbered name; the run ends before it is renamed here, so it has no base yet. A newer
+/// client moves it into a folder no client reads (it waits here), and the folder it is in
+/// here is deleted on the other computer. That folder stays here, the file in it: an item
+/// with no base isn't one a device unlinks. (The drive holding its bytes, it went with the
+/// folder's delete: found by the simulator, every client editing.)
+#[test]
+fn what_was_made_here_and_waits_keeps_its_folder() {
+    use super::{act, add_to, settle, top};
+    use Action::*;
+    let mut sim = Sim::new(2);
+    let parent = top(&sim, 0);
+    sim.run(&[act(0, CreateFolder { parent, name: 1 })]);
+    settle(&mut sim);
+    let b = sim.item(0, "b").expect("b");
+    add_to(&mut sim, 0, "b", 3);
+    sim.run(&[Event::Plan { client: 0 }]);
+    while !sim.planned(0).is_empty() {
+        sim.run(&[Event::Step { client: 0 }]);
+    }
+    add_to(&mut sim, 1, "b", 3);
+    sim.run(&[Event::Plan { client: 1 }, Event::Step { client: 1 }]);
+    let y = sim.item(1, "b/c.txt").expect("c1's own");
+    sim.run(&[act(1, NewerFolder { name: 0 })]);
+    let (pick, folder) = sim.newer_move_picks(y, "a").expect("on the drive");
+    let node = sim.pick(0, b, false).expect("on c0");
+    sim.run(&[
+        act(1, IntoNewer { pick, folder }),
+        act(0, Delete { node }),
+        Event::Plan { client: 0 },
+    ]);
+    while !sim.planned(0).is_empty() {
+        sim.run(&[Event::Step { client: 0 }]);
+    }
+    settle(&mut sim);
+    assert_eq!(sim.local_paths(1), ["b", "b/c.txt"]);
+    assert!(sim.local_paths(0).is_empty(), "{:?}", sim.local_paths(0));
+}

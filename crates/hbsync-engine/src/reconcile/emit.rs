@@ -275,6 +275,27 @@ impl Reconciler<'_> {
             true => HashSet::new(),
             false => moving_out(moves.iter().chain(&content), &i.local),
         };
+        // Read-only (§13), a delete here takes no change made here: what it would take that
+        // changed here moves out first, whatever kept it out of the plan. In a folder that
+        // writes there, an edit here of a node it may change goes up, as what is new here in
+        // a folder it may add to, so nothing moved them out; left out (its name taken here,
+        // or its folder's), such a one doesn't go up either (found by the simulator: a file's
+        // folder no longer shared, its name at the top taken). In any, one that waits for
+        // its folder there (in a version this device can't read, say) left the plan, moved
+        // out at the merge or not.
+        if self.masking.read_only {
+            let tops: Vec<NodeId> = (gone_here.iter().copied())
+                .filter(|&n| !self.masks.masked.contains(&n))
+                .filter(|&n| !below_another(&i.local, n, &gone_here, &moving))
+                .collect();
+            for top in tops {
+                for n in expects_here(&i.local, top, &moving).0 {
+                    if !gone_here.contains(&n) && self.loses_here(n) {
+                        evicting.insert(n);
+                    }
+                }
+            }
+        }
         // What moves out of the folder, only the topmost (it takes what is below it, but what
         // the plan moves out of it first), before the deletes here: a folder they delete
         // doesn't take it, nor what is below it (§13). Never held, so no `moves_out_of`.
@@ -330,6 +351,25 @@ impl Reconciler<'_> {
                 _ => {}
             }
         }
+
+        // On an identity's own drive nothing moves out before a delete here: what one would
+        // take that changed here and is out of the plan has kept its folder by now
+        // ([`Reconciler::keep_for_what_is_out`]). (Not asked of a plan that is made again,
+        // with what waits for a name or a place waiting: [`reconcile`].)
+        debug_assert!(
+            self.masking.read_only
+                || !self.waiters.is_empty()
+                || !self.placed.is_empty()
+                || deletes.iter().all(|op| match op {
+                    Op::LocalDelete { subtree, .. } => (subtree.iter()).all(|n| {
+                        self.scope.contains(n)
+                            || self.masks.masked.contains(n)
+                            || (i.base.contains(*n) && !self.loses_here(*n))
+                    }),
+                    _ => true,
+                }),
+            "a delete here would take a change made here that the plan doesn't have"
+        );
 
         self.plan.ops.extend(
             self.masks
