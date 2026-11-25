@@ -452,13 +452,14 @@ pub fn trying_to_connect(identity: &crate::Identity) -> String {
     format!("Trying again to connect to {identity}…")
 }
 
-/// "N changes on their way to X": sent, and not taken by their server yet.
+/// "N changes on their way to X": sent, and not taken by their server yet. (All that is
+/// left: its count.)
 fn on_their_way(s: &FolderStatus) -> String {
     let to = match &s.sharer {
         Some(sharer) => sharer.to_string(),
         None => "their owner".into(),
     };
-    match s.on_their_way {
+    match s.pending {
         1 => format!("Up to date · 1 change on its way to {to}"),
         n => format!("Up to date · {} changes on their way to {to}", count(n)),
     }

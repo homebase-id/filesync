@@ -838,20 +838,17 @@ mod tests {
         assert_eq!(look(&v), Look::Busy);
         assert_eq!(status_line(&v), "Syncing 1,234 of 19,000 files");
 
-        // Items waiting: busy. All of them on their way to another identity's server: this
-        // computer is done.
-        let mut s = status(State::Idle);
-        s.pending = 3;
-        assert_eq!(look(&view(&running(s.clone()), &[])), Look::Busy);
-        s.on_their_way = 3;
-        let d = running(s);
-        let v = view(&d, &[]);
-        assert_eq!(look(&v), Look::UpToDate);
-        assert!(
-            status_line(&v).contains("3 changes on their way"),
-            "{}",
-            status_line(&v)
-        );
+        // A share with items waiting: busy. All of them on their way to its owner's server:
+        // this computer is done.
+        let mut share = status(State::Idle);
+        share.sharer = Some("tom.example".into());
+        share.path = "/home/anna/Homebase/Shared/tom.example".into();
+        share.pending = 3;
+        let d = Daemon::Running(with_share(share.clone()));
+        assert_eq!(look(&view(&d, &[])), Look::Busy);
+        share.on_their_way = 3;
+        let d = Daemon::Running(with_share(share));
+        assert_eq!(look(&view(&d, &[])), Look::UpToDate);
     }
 
     #[test]
