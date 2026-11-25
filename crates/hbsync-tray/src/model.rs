@@ -201,6 +201,8 @@ fn folder_look(s: &FolderStatus) -> Look {
         State::Waiting => Look::UpToDate,
         State::Paused | State::Offline | State::Stopped => Look::Quiet,
         State::Starting | State::Syncing => Look::Busy,
+        // What is left is with another identity's server: this computer is done.
+        State::Idle if s.all_on_their_way() => Look::UpToDate,
         State::Idle if s.pending > 0 => Look::Busy,
         State::Idle => Look::UpToDate,
     }
@@ -835,6 +837,18 @@ mod tests {
         let v = view(&d, &[]);
         assert_eq!(look(&v), Look::Busy);
         assert_eq!(status_line(&v), "Syncing 1,234 of 19,000 files");
+
+        // A share with items waiting: busy. All of them on their way to its owner's server:
+        // this computer is done.
+        let mut share = status(State::Idle);
+        share.sharer = Some("tom.example".into());
+        share.path = "/home/anna/Homebase/Shared/tom.example".into();
+        share.pending = 3;
+        let d = Daemon::Running(with_share(share.clone()));
+        assert_eq!(look(&view(&d, &[])), Look::Busy);
+        share.on_their_way = 3;
+        let d = Daemon::Running(with_share(share));
+        assert_eq!(look(&view(&d, &[])), Look::UpToDate);
     }
 
     #[test]

@@ -464,6 +464,11 @@ pub struct FolderStatus {
     pub last_sync: Option<LastSync>,
     /// Items not in sync yet.
     pub pending: u64,
+    /// How many of them have a change on its way to another identity's server, which
+    /// hasn't taken it yet (a folder that writes to what is shared with it): nothing of
+    /// this computer's to do for those.
+    #[serde(default)]
+    pub on_their_way: u64,
     /// Deletes waiting for the user's confirmation.
     pub held_deletes: Option<HeldDeletes>,
     /// Conflicts and failures of recent syncs, newest last.
@@ -497,6 +502,13 @@ impl FolderStatus {
     /// writes there holds its own deletes too, which can.
     pub fn puts_back(&self, held: &HeldDeletes) -> bool {
         self.sharer.is_none() || (self.writes && held.here > 0)
+    }
+
+    /// Whether all that isn't in sync yet is a change on its way to another identity's
+    /// server ([`FolderStatus::on_their_way`]): this computer has nothing left to do, and
+    /// shows as up to date, saying so.
+    pub fn all_on_their_way(&self) -> bool {
+        self.pending > 0 && self.on_their_way >= self.pending
     }
 
     /// Whether the identity refuses this computer (`Denied`, or `Paused` meanwhile): logging in
@@ -535,6 +547,7 @@ impl FolderStatus {
             retry_at: None,
             last_sync: None,
             pending: 0,
+            on_their_way: 0,
             held_deletes: None,
             recent: Vec::new(),
             notes_added: 0,
