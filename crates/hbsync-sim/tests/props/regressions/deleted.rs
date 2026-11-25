@@ -2809,3 +2809,44 @@ fn a_file_edited_here_that_waits_for_a_newer_folder_keeps_its_folder_here() {
         );
     }
 }
+
+/// A folder `b` deleted on c1, renamed on c0 to `d`, a name c1 ignores (§10), while its file
+/// waits for a folder no client reads (moved there by a newer client): c1 lets `b` go (its
+/// base to be forgotten, the drive's node not synced here any more) and keeps the file's base
+/// where it waits. The engine planned the forgetting of `b`'s base all the same, which its
+/// executor holds until its children's bases go (`drop_unsynced_base`: "its children first"),
+/// and the file's waits: planned and held at every sync, c1 never settled. Now `b`'s base
+/// stays while the file's is below it, and nothing is planned for it meanwhile.
+#[test]
+fn a_folder_let_go_here_keeps_its_base_while_what_waits_has_its_below_it() {
+    use super::{act, add_to, settle, top};
+    use Action::*;
+    let mut sim = Sim::new(2);
+    let parent = top(&sim, 0);
+    sim.run(&[act(0, CreateFolder { parent, name: 1 })]);
+    add_to(&mut sim, 0, "b", 3);
+    settle(&mut sim);
+    let (b, file) = (
+        sim.item(1, "b").expect("b"),
+        sim.item(1, "b/c.txt").expect("c.txt"),
+    );
+    sim.run(&[act(0, NewerFolder { name: 0 })]);
+    let (pick, folder) = sim.newer_move_picks(file, "a").expect("on the drive");
+    sim.run(&[act(0, IntoNewer { pick, folder })]);
+    settle(&mut sim);
+    let node = sim.pick(1, b, false).expect("on c1");
+    sim.run(&[act(1, Delete { node })]);
+    let (node, parent) = (sim.pick(0, b, false).expect("on c0"), top(&sim, 0));
+    sim.run(&[act(
+        0,
+        Move {
+            node,
+            parent,
+            name: 5,
+        },
+    )]);
+    settle(&mut sim);
+    assert_eq!(sim.server_paths(), ["a", "a/a", "a/c.txt", "d"]);
+    assert_eq!(sim.local_paths(0), ["d", "d/c.txt"]);
+    assert!(sim.local_paths(1).is_empty(), "{:?}", sim.local_paths(1));
+}

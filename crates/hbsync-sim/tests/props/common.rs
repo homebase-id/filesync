@@ -130,7 +130,8 @@ pub(crate) fn waiting_event_all_editing(clients: usize) -> impl Strategy<Value =
 /// item of a node deleted here that comes back, edited elsewhere, is planned onto the name a
 /// waiting item made here since holds; a folder renamed to an ignored name, with what waits in
 /// it on its base, is forgotten at every sync, never done; a tag added here to what was moved
-/// here, then waits, is never sent (the oracle calls it lost).
+/// here, then waits, is never sent (the oracle excuses a tag of what waits on its client that
+/// was never sent, whenever it was set: with moves it would excuse that one too).
 pub(crate) fn naming_waiting_event(clients: usize) -> impl Strategy<Value = Event> {
     let i = || 0usize..16;
     let names = prop_oneof![
