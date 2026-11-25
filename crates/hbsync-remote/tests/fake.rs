@@ -56,7 +56,7 @@ fn a_member_writes_only_where_it_is_one_that_writes() -> R {
         matches!(refused, Err(RemoteError::ReadOnly(_))),
         "{refused:?}"
     );
-    assert_eq!(reading.writes(false)?, false);
+    assert!(!reading.writes(false)?);
     let writing = reading.clone().writing();
     assert!(writing.writes(false)? && sharer.writes(false)?);
     let made = create_file(&writing, &new, b"1")?;
@@ -66,7 +66,7 @@ fn a_member_writes_only_where_it_is_one_that_writes() -> R {
     // One whose app may not send to other identities says so, and is refused each write
     // (not as read-only: what is shared with it may be changed still).
     writing.faults().may_not_send = true;
-    assert_eq!(writing.writes(true)?, false);
+    assert!(!writing.writes(true)?);
     let refused = create_file(&writing, &file("more", scratch.node, b"2"), b"2");
     assert!(matches!(refused, Err(RemoteError::Fatal(_))), "{refused:?}");
     Ok(())

@@ -710,6 +710,13 @@ impl Runner {
         unreachable!("the last one is returned")
     }
 
+    /// Whether the folder is written to though read-only otherwise: another identity's
+    /// share, where the app may send to other identities, as its drive says now
+    /// ([`Drive::writes`]; asked anew where the user asked for the sync that is due).
+    fn writes(&self) -> Result<bool, hbsync_remote::RemoteError> {
+        Ok(self.drive.shared() && self.drive.writes(self.retry_refused)?)
+    }
+
     /// Whether the folder, another identity's share, is to be opened again as a sync is due:
     /// the app may send to other identities now and couldn't as it was opened (the owner
     /// gave it the permission: what they share for editing is written to from here on), or
@@ -718,11 +725,8 @@ impl Runner {
     /// once where the user asked for the sync); one that can't say leaves the folder as it
     /// is.
     fn writes_changed(&self, parts: &Parts) -> bool {
-        if !self.drive.shared() {
-            return false;
-        }
         let writes = parts.engine.config().folder.writes;
-        match self.drive.writes(self.retry_refused) {
+        match self.writes() {
             Ok(now) if now != writes => {
                 let what = match now {
                     true => "the app may now change what is shared for editing",
@@ -869,8 +873,7 @@ impl Runner {
         // What another identity shares is written to (what they share for editing) where the
         // app may send to other identities, as its drive says now; one that can't say is
         // read-only until it can ([`Runner::writes_changed`] asks as each sync is due).
-        let writes = self.drive.shared() && self.drive.writes(false).unwrap_or(false);
-        cfg.folder.writes = writes;
+        cfg.folder.writes = self.writes().unwrap_or(false);
         if let Some(tweak) = self.cfg.tweak {
             tweak(&mut cfg);
         }
@@ -1309,6 +1312,7 @@ impl Runner {
             match answer {
                 Some((HeldAnswer::Delete, seen)) => p.engine.confirm_deletes(seen.iter().copied()),
                 Some((HeldAnswer::PutBack, seen)) => {
+                    let writes = p.engine.config().folder.writes;
                     match p.engine.put_back(&seen) {
                         Ok(_) => {}
                         // A read-only folder never puts back (§13): nothing to try again.
@@ -1316,7 +1320,7 @@ impl Runner {
                         // where a folder that writes held deletes of its own as the user
                         // answered, and their owner removed those too before the sync.)
                         Err(hbsync_engine::EngineError::ReadOnly(_)) => {
-                            let why = crate::words::no_put_back(lock(&self.status).writes);
+                            let why = crate::words::no_put_back(writes);
                             self.tell(vec![why.into()])
                         }
                         // What it didn't put back is still held, and shown again; the first

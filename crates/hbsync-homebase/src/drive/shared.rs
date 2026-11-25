@@ -446,11 +446,7 @@ impl Remote for PeerRemote {
     /// identities ([`HomebaseRemote::may_send`]: no request while it may; a no is read again
     /// at most once a minute, or, `asked`, once it is two seconds old).
     fn writes(&self, asked: bool) -> Result<bool> {
-        let within = match asked {
-            true => super::SENDS_READ_ASKED,
-            false => super::SENDS_READ_AGAIN,
-        };
-        Ok(self.writing && self.own.may_send_within(within)?)
+        Ok(self.writing && self.own.sends(asked)?)
     }
 
     fn create(&self, node: &NodeMeta, payload: Option<Upload<'_>>) -> Result<Written> {
