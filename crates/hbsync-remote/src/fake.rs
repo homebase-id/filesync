@@ -1427,8 +1427,8 @@ impl FakeRemote {
                 // already (**[verified]** live: `recipientIdentityReturnedBadRequest`, its
                 // `Fatal`). One the member reads, live or in their Recently deleted, is
                 // there already ([`FakeServer::create_by`]).
-                let unseen = |file_id: &RemoteFileId| !server.shared_live(*file_id);
-                if server.file_id_of(meta.node).as_ref().is_some_and(unseen) {
+                let unseen = |file_id| !server.shared_live(file_id);
+                if server.file_id_of(meta.node).is_some_and(unseen) {
                     return Err(RemoteError::Fatal(
                         "the owner's server didn't take the change".into(),
                     ));
