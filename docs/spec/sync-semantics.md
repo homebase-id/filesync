@@ -784,6 +784,17 @@ expected fingerprint is treated as done.
   loses its newer fields) is left out, reported, and recorded as there all the same (node
   schema, Identity and tombstones):
   - What is in a folder this device can't read stays in it, waiting: it is never an orphan.
+    One that was here before (another writer moved it there) stays where it is here
+    meanwhile, out of the plan. Changed here, it keeps the folders it is in here too: one
+    deleted there isn't deleted here (the delete would take the change, which nothing
+    sends while the node waits) nor made again there, and is planned again with it, until
+    the folder reads; what else is in it and is gone there goes item by item. So does one
+    that waits while the drive's picture isn't whole (§6.3). Changed means its bytes (or
+    made here): renamed, moved or tagged here and no more, it goes with its folder, and
+    comes back as the drive has it once the folder reads. (On an identity's own drive:
+    read-only, a change here moves out instead, §13.) A limit: a new folder of a kept
+    folder's name on the drive is the one renamed there (the kept one holds the name
+    here, as any item planned again does).
   - A node whose newer version it can't read (unreadable) is kept as it had it: a local edit
     goes up as a new node (a conflict copy, under a free name); a rename, tags, a delete or a
     download of it is refused and not tried again while it is the same; the drive's version

@@ -235,6 +235,60 @@ impl Sim {
         self.server.unreadable.insert(folder, [file].into());
     }
 
+    /// What [`Action::IntoNewer`] picks from: the drive's live nodes [`Action::IntoFile`] may
+    /// move, but what is in a folder no client reads at any depth (it waits already), and the
+    /// folders no client reads that are live. (Such a folder is at the drive's top, and none
+    /// is moved: nothing moved into one holds it.)
+    fn newer_move_candidates(&self) -> (Vec<NodeId>, Vec<NodeId>) {
+        let server = &self.server;
+        let folders: Vec<NodeId> = (server.unreadable.keys())
+            .filter(|f| server.live.contains_key(f))
+            .copied()
+            .collect();
+        let tree = server.tree();
+        let waits = |n: &NodeId| {
+            (tree.ancestors(*n).into_iter()).any(|a| server.unreadable.contains_key(&a))
+        };
+        let (nodes, _) = self.file_move_candidates();
+        let nodes = nodes.into_iter().filter(|n| !waits(n)).collect();
+        (nodes, folders)
+    }
+
+    /// For scripted tests: the picks of [`Action::IntoNewer`] that move `node` into the folder
+    /// no client reads named `folder` at the drive's top (no client has its id).
+    pub fn newer_move_picks(&self, node: NodeId, folder: &str) -> Option<(usize, usize)> {
+        let (nodes, folders) = self.newer_move_candidates();
+        let named = |f: &NodeId| self.server.live[f].state.name == folder;
+        let pick = nodes.iter().position(|m| *m == node)?;
+        Some((pick, folders.iter().position(named)?))
+    }
+
+    /// [`Action::IntoNewer`].
+    fn move_into_newer(&mut self, pick: usize, folder: usize) {
+        let (nodes, folders) = self.newer_move_candidates();
+        let (Some(&node), Some(&into)) = (
+            nodes.get(pick % nodes.len().max(1)),
+            folders.get(folder % folders.len().max(1)),
+        ) else {
+            return;
+        };
+        // Never into itself (a cycle), and at a name free there, as any client keeps names.
+        let tree = self.server.tree();
+        let name = &self.server.live[&node].state.name;
+        if tree.ancestors(into).contains(&node) || tree.child_named(into, name, None).is_some() {
+            return;
+        }
+        let version = VersionTag(self.server.uuid());
+        if let Some(n) = self.server.live.get_mut(&node) {
+            n.state.parent = into;
+            n.remote.version = version;
+            self.server
+                .moved_in
+                .insert(node, (n.remote.file_id, version));
+        }
+        self.server.unreadable.entry(into).or_default().insert(node);
+    }
+
     /// [`Action::IntoFile`].
     fn move_into_file(&mut self, pick: usize, file: usize) {
         let (nodes, files) = self.file_move_candidates();
@@ -612,6 +666,7 @@ impl Sim {
             Action::DeleteOutright { pick } => self.delete_outright(pick),
             Action::IntoFile { pick, file } => self.move_into_file(pick, file),
             Action::NewerFolder { name } => self.newer_folder(name),
+            Action::IntoNewer { pick, folder } => self.move_into_newer(pick, folder),
             Action::MoveAcross { file } => {
                 let Some(&(a, b)) = self.computers.iter().find(|(a, b)| *a == c || *b == c) else {
                     return;

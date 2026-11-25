@@ -102,6 +102,16 @@ pub enum Action {
     NewerFolder {
         name: usize,
     },
+    /// A newer client moves a live node of the drive into a folder no client reads
+    /// ([`Action::NewerFolder`]'s), at a name free there and a new version: it waits for that
+    /// folder on every computer, where a computer has it as it was; a member reads it at its
+    /// top. Any node but the fixed folders, a computer's Desktop's folder, the role folder's and
+    /// what is in a folder no client reads already; nothing when the drive holds no such folder
+    /// live.
+    IntoNewer {
+        pick: usize,
+        folder: usize,
+    },
     /// The drive's owner shares a node of the drive with the member ([`Sim::with_member`]), or
     /// withdraws its share where it is shared: live or in Recently deleted, its file as it is
     /// (no new version); `below`: with all the drive has in it now, live and in Recently
