@@ -338,6 +338,14 @@ pub struct Handle {
     drive: Arc<Drive>,
 }
 
+impl RunnerConfig {
+    /// Whether the folder writes to what is shared with the account for editing
+    /// ([`RunnerConfig::writes`]): only one that is read-only otherwise (another identity's).
+    pub fn writes(&self) -> bool {
+        self.read_only.is_some() && self.writes
+    }
+}
+
 impl Command {
     /// What pauses (`Some`) or resumes a folder.
     pub fn pausing(pause: Option<Pause>) -> Command {
@@ -431,20 +439,18 @@ impl Handle {
                         .into(),
                 );
             }
-            // (After the token: an answer to deletes held elsewhere before is told so.)
-            // What another identity removed can't be put back. A folder that writes there
-            // holds its own deletes too: those can.
-            let own = held.shown.as_ref().is_some_and(|shown| shown.here > 0);
-            if answer == HeldAnswer::PutBack && self.drive.shared() && !(writes && own) {
-                return Err(match writes {
-                    true => crate::words::NO_PUT_BACK_THEIRS.into(),
-                    false => crate::words::NO_PUT_BACK.into(),
-                });
-            }
+            // (After the token: an answer to deletes held elsewhere before is told so. And
+            // before what can't be put back: answered, nothing is shown to judge that by.)
             if held.answered {
                 return Err(
                     "they were answered already: look at them again after the next sync".into(),
                 );
+            }
+            // What another identity removed can't be put back. A folder that writes there
+            // holds its own deletes too: those can.
+            let own = held.shown.as_ref().is_some_and(|shown| shown.here > 0);
+            if answer == HeldAnswer::PutBack && self.drive.shared() && !(writes && own) {
+                return Err(crate::words::no_put_back(writes).into());
             }
             // Under `held`: the runner takes the answer once it is set.
             (self.control.0.send(Msg::Answered)).map_err(|_| "the sync has stopped".to_owned())?;
@@ -621,7 +627,7 @@ impl Runner {
         let mut status = FolderStatus::new(&cfg.identity, &cfg.folder);
         status.kind = cfg.kind;
         status.sharer.clone_from(&cfg.sharer);
-        status.writes = cfg.read_only.is_some() && cfg.writes;
+        status.writes = cfg.writes();
         status.paused_until = cfg.paused.and_then(|p| p.until);
         let status = Arc::new(Mutex::new(status));
         let held = Arc::new(Mutex::new(Held::default()));
@@ -845,7 +851,7 @@ impl Runner {
             );
         }
         cfg.folder.read_only.clone_from(&self.cfg.read_only);
-        cfg.folder.writes = self.cfg.read_only.is_some() && self.cfg.writes;
+        cfg.folder.writes = self.cfg.writes();
         if let Some(tweak) = self.cfg.tweak {
             tweak(&mut cfg);
         }
@@ -1283,9 +1289,12 @@ impl Runner {
                     match p.engine.put_back(&seen) {
                         Ok(_) => {}
                         // A read-only folder never puts back (§13): nothing to try again.
-                        // (Refused as it is asked, [`Handle::answer`]: not come by here.)
+                        // (Refused as it is asked, [`Handle::answer`]: come by here only
+                        // where a folder that writes held deletes of its own as the user
+                        // answered, and their owner removed those too before the sync.)
                         Err(hbsync_engine::EngineError::ReadOnly(_)) => {
-                            self.tell(vec![crate::words::NO_PUT_BACK.into()])
+                            let why = crate::words::no_put_back(self.cfg.writes());
+                            self.tell(vec![why.into()])
                         }
                         // What it didn't put back is still held, and shown again; the first
                         // time, it runs once more a minute on (a file the identity said once
@@ -1665,7 +1674,7 @@ impl Runner {
         engine: &mut Engine,
         report: &SyncReport,
     ) -> Result<Vec<String>, StateError> {
-        let writes_to = self.cfg.sharer.as_ref().filter(|_| self.cfg.writes);
+        let writes_to = self.cfg.sharer.as_ref().filter(|_| self.cfg.writes());
         let moved_out = report::moved_out_notes(report, writes_to);
         self.tell(moved_out);
         let skips = self.stalled.told(&report.skipped, Instant::now());

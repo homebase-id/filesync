@@ -568,8 +568,8 @@ included (service managers restart it then).
   the status's `writes`; sync semantics §13, "What may be changed is told per item"; nothing
   sets it yet) is read-only for the rest of what it holds, and says so differently:
   `hbsync status` shows it with `<->`; what moves out is told as that item's ("report.txt:
-  moved to …, as tom.example shares it with you for reading only, or not at all (it isn't
-  synced)"); and it holds its own deletes too, which are removals at the sharer's ("2 items
+  moved to …, as it can't be synced to tom.example from where it is"); and it holds its
+  own deletes too, which are removals at the sharer's ("2 items
   that tom.example shares with you were deleted on this computer. Delete removes them for
   tom.example too: their Recently deleted keeps them, and only tom.example can restore them
   from there. Put them back brings them back to this computer.", then "The rest was removed

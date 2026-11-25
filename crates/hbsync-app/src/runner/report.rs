@@ -70,13 +70,19 @@ pub(super) fn notes(
 /// first few named.
 ///
 /// `writes_to`: the folder writes to what `writes_to` shares with the account for editing,
-/// so what moved out is what couldn't go to them (shared for reading, or not at all): said
-/// so, as the folder isn't read-only as a whole.
+/// so what moved out is what couldn't go to them: said so, as the folder isn't read-only as a
+/// whole.
 pub(super) fn moved_out_notes(
     report: &SyncReport,
     writes_to: Option<&crate::Identity>,
 ) -> Vec<String> {
     let mut notes = Vec::new();
+    // Why: of a folder that writes, whatever kept this one from going (shared for reading,
+    // made where nothing can be added, changed on both sides where no copy can be).
+    let why = match writes_to {
+        Some(sharer) => format!("it can't be synced to {sharer} from where it is"),
+        None => "this folder is read-only (what changes here isn't synced)".to_owned(),
+    };
     // Each by the name it went out as, where not its own (taken there).
     let mut moved: Vec<(String, String)> = (report.moved_out.iter())
         .map(|(path, to)| {
@@ -94,18 +100,7 @@ pub(super) fn moved_out_notes(
     for group in moved.chunk_by(|a, b| a.0 == b.0) {
         let into = &group[0].0;
         let paths: Vec<String> = group.iter().map(|(_, path)| path.clone()).collect();
-        notes.push(match writes_to {
-            Some(sharer) => format!(
-                "{}: moved to {into}, as {sharer} shares it with you for reading only, or \
-                 not at all (it isn't synced)",
-                listed(&paths)
-            ),
-            None => format!(
-                "{}: moved to {into}, as this folder is read-only (what changes here isn't \
-                 synced)",
-                listed(&paths)
-            ),
-        });
+        notes.push(format!("{}: moved to {into}, as {why}", listed(&paths)));
     }
     notes
 }
@@ -660,6 +655,34 @@ mod tests {
             held_token(&[delete_here(a)]),
             held_token(&[delete(a)]),
             "its way counts"
+        );
+    }
+
+    /// What moved out is told by where it went, and why: of a read-only folder that it is
+    /// one; of a share that writes, that this item couldn't go to its owner.
+    #[test]
+    fn what_moved_out_is_told_with_why() {
+        let report = SyncReport {
+            moved_out: vec![(
+                "report.txt".into(),
+                "/home/anna/moved out/report.txt".into(),
+            )],
+            ..SyncReport::default()
+        };
+        assert_eq!(
+            moved_out_notes(&report, None),
+            [
+                "report.txt: moved to /home/anna/moved out, as this folder is read-only (what \
+              changes here isn't synced)"
+            ]
+        );
+        let tom = crate::Identity::from("tom.example");
+        assert_eq!(
+            moved_out_notes(&report, Some(&tom)),
+            [
+                "report.txt: moved to /home/anna/moved out, as it can't be synced to tom.example \
+              from where it is"
+            ]
         );
     }
 }

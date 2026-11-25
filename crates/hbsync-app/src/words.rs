@@ -321,6 +321,15 @@ pub const NO_PUT_BACK_THEIRS: &str = "These were removed by their owner, or are 
                                       shared with you: they can't be put back on Homebase, \
                                       only deleted here or left held";
 
+/// Why a put back is refused in what another identity shares, by whether the folder writes
+/// there ([`NO_PUT_BACK_THEIRS`]) or is read-only ([`NO_PUT_BACK`]).
+pub fn no_put_back(writes: bool) -> &'static str {
+    match writes {
+        true => NO_PUT_BACK_THEIRS,
+        false => NO_PUT_BACK,
+    }
+}
+
 /// What the held deletes `held` are and what each answer does, a paragraph for each way:
 /// `delete` and `put_back` name the answers as the user gives them (the tray's buttons, the
 /// CLI's commands). `sharer`: whose share the folder is of, where it is one's: what its

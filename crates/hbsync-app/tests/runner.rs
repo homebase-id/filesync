@@ -2357,10 +2357,36 @@ fn a_share_that_writes_puts_back_its_own_held_deletes() -> R {
     })?;
     let held = b.status().held_deletes.ok_or("held")?;
     b.handle.answer(HeldAnswer::PutBack, &held.token)?;
+    // Answered: a second answer is told that, whatever it asks.
+    let again = b.handle.answer(HeldAnswer::PutBack, &held.token);
+    assert!(
+        again
+            .as_ref()
+            .is_err_and(|why| why.contains("answered already") || why.contains("changed since")),
+        "{again:?}"
+    );
     wait_until("they are back", || b.has("f07.txt") && b.has("f59.txt"))?;
     b.wait_idle()?;
     assert_eq!(b.status().held_deletes, None);
     assert_eq!(live_names(&server).len(), 60, "nothing removed there");
+
+    // What its sharer takes back is held as the sharer's, and not put back: said as that,
+    // not as the folder being read-only.
+    for name in &names {
+        let id = header_named(&server, name).ok_or("on the drive")?.file_id;
+        a.remote.withdraw(id)?;
+    }
+    b.handle.send(Command::SyncNow);
+    wait_until("their going is held", || {
+        b.status().held_deletes.is_some_and(|h| h.remotely == 60)
+    })?;
+    let held = b.status().held_deletes.ok_or("held")?;
+    assert_eq!(held.here, 0);
+    let refused = b.handle.answer(HeldAnswer::PutBack, &held.token);
+    assert!(
+        (refused.as_ref()).is_err_and(|why| why.contains("removed by their owner")),
+        "{refused:?}"
+    );
     Ok(())
 }
 
