@@ -46,6 +46,10 @@ pub(crate) const FLUSHES: AccountKey = AccountKey("db.flushes");
 
 /// The local change journal's cursor (USN, FSEvents).
 pub const JOURNAL_CURSOR: FolderKey = FolderKey("local.journal_cursor");
+/// Whether the folder wrote to what another identity shares with it when it last ran
+/// (`1`; none: it didn't): the files this identity may change are writable on disk by it
+/// (sync semantics §13).
+pub const WRITES: FolderKey = FolderKey("share.writes");
 /// The ignore rules the last scan applied.
 pub const FILTER: FolderKey = FolderKey("filter.fingerprint");
 /// What the last run left out of the drive (sync semantics §12).

@@ -1579,8 +1579,29 @@ whatever changed here, and the plan holds no operation on the drive:
   replace or delete a read-only file, it is made writable just before either. What moves
   out is the user's own, and writable: a copy made there keeps the file's bits until then.
   Only what is placed from now on: a file there from before stays as it is until its next
-  version. The cost: one more change of a file's attributes as it is placed (and two around
+  version (one that may be changed: until its node is next planned with nothing to do,
+  below). The cost: one more change of a file's attributes as it is placed (and two around
   a tag write) (engine test `a_shares_files_are_read_only_on_this_device`).
+  Not a file this identity may change, where the folder writes to what is shared with it
+  ("What may be changed is told per item", below): its save goes up, so it is placed
+  writable. The bit follows what may be done with the file: a change of its share (to
+  editing, or back to reading) marks its node, and where its plan finds nothing else to
+  do the file's bit is put right, written only where it differs; where the folder starts
+  to write, or stops (the app was given the permission to send to other identities, or
+  lost it), each file that may be changed is planned again once, for the same. In a
+  folder that doesn't write, only a file the drive says may be changed is looked at (and
+  made read-only, where it isn't): the rest stay as they are. Not put right: a file
+  whose share turns to reading in the very sync the folder stops writing in, till its
+  next version (a hint that is off: a save there moves out). The cost: for a node told
+  done in such a folder, a row read; where it counts, a look at its file; where the bit
+  differs, its change and the file's row written again (the change moves the file's
+  change time, and a scan would read and hash the file anew for it), where the file was
+  exactly as its row has it just before: one changed since the last scan is the scan's
+  to read; for a folder that starts or stops writing, one mark and one
+  plan per file that may be changed (engine tests
+  `a_file_that_may_be_changed_is_writable_on_disk`,
+  `the_folder_writing_or_not_puts_the_files_that_may_be_changed_right`,
+  `a_file_that_may_be_changed_is_placed_writable`). The simulator doesn't model the bit.
   A read-only file anywhere is treated the same way, the user's own too (a copy of a shared
   file keeps its bits in Explorer, Finder and `cp`; filesync #459): what another device did
   to the file goes through. Its tags are written with it made writable for the write, then

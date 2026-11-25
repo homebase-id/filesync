@@ -878,3 +878,186 @@ fn a_new_file_made_again_where_its_share_was_taken_back_is_refused_once() -> R {
     assert_eq!(a.read("d/new.txt")?, b"made by the member");
     Ok(())
 }
+
+/// The owner `a` shares what is named `name` on its drive with the member, for reading.
+fn share_to_read(a: &Client, server: &Server, name: &str) -> R {
+    a.remote.share(common::header_named(server, name).file_id)?;
+    server.lock().map_err(|_| "poisoned")?.tick();
+    Ok(())
+}
+
+/// Whether the member's file at `rel` is read-only on disk.
+fn read_only_here(b: &Client, rel: &str) -> bool {
+    hbsync_platform::ops::is_read_only(&b.root.join(rel))
+}
+
+/// In a folder that writes to what is shared with it, a file this identity may change is
+/// writable on disk (its save goes up); one shared for reading is read-only, as every file
+/// of a folder that doesn't write (a save over it would only move out). The bit follows the
+/// share: turned to editing, the file is made writable, and back.
+#[test]
+fn a_file_that_may_be_changed_is_writable_on_disk() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    a.write("d/edit.txt", "one")?;
+    a.write("d/read.txt", "one")?;
+    a.sync()?;
+    share_to_edit(&a, &server, "d")?;
+    share_to_edit(&a, &server, "edit.txt")?;
+    share_to_read(&a, &server, "read.txt")?;
+    let (mut b, out) = writing_member(&server, "b")?;
+    b.sync()?;
+    assert!(!read_only_here(&b, "d/edit.txt"));
+    assert!(read_only_here(&b, "d/read.txt"));
+
+    // The shares turned round: the files as they are, their versions too.
+    share_to_edit(&a, &server, "read.txt")?;
+    share_to_read(&a, &server, "edit.txt")?;
+    b.sync()?;
+    assert!(read_only_here(&b, "d/edit.txt"));
+    assert!(!read_only_here(&b, "d/read.txt"));
+
+    // And a save of the one that may be changed now goes up, with no bit to clear first.
+    fs::write(b.root.join("d/read.txt"), "the member's")?;
+    b.sync()?;
+    a.sync()?;
+    assert_eq!(a.read("d/read.txt")?, b"the member's");
+    nothing_moved_out(&out)
+}
+
+/// A folder that doesn't write keeps every file read-only, whatever its share says. Writing
+/// from then on (the app was given the permission to send to other identities), the files
+/// this identity may change are made writable at its first sync, the others left; and back,
+/// where it no longer writes.
+#[test]
+fn the_folder_writing_or_not_puts_the_files_that_may_be_changed_right() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    a.write("d/edit.txt", "one")?;
+    a.write("d/read.txt", "one")?;
+    a.sync()?;
+    share_to_edit(&a, &server, "d")?;
+    share_to_edit(&a, &server, "edit.txt")?;
+    share_to_read(&a, &server, "read.txt")?;
+    let out = tempfile::tempdir()?;
+    let to = out.path().to_path_buf();
+    let reading = FakeRemote::member(server.clone());
+    let mut b = Client::on(reading.clone(), "b", move |cfg| {
+        cfg.folder.read_only = Some(to.clone());
+    })?;
+    b.sync()?;
+    assert!(read_only_here(&b, "d/edit.txt") && read_only_here(&b, "d/read.txt"));
+    // In a folder that doesn't write, a file shared for reading is left as it is on disk
+    // (one there from before files were placed read-only, say), planned again or not.
+    let read = common::header_named(&server, "read.txt")
+        .node()
+        .ok_or("node")?;
+    hbsync_platform::ops::set_read_only(&b.root.join("d/read.txt"), false)?;
+    b.engine.db().write(|s| s.folder().mark_dirty(read))?;
+    b.sync()?;
+    assert!(!read_only_here(&b, "d/read.txt"));
+    hbsync_platform::ops::set_read_only(&b.root.join("d/read.txt"), true)?;
+
+    b.restart_with(Box::new(reading.clone().writing()), |cfg| {
+        cfg.folder.writes = true;
+    })?;
+    b.sync()?;
+    assert!(!read_only_here(&b, "d/edit.txt"));
+    assert!(read_only_here(&b, "d/read.txt"));
+    // The file's row is the file as it is now, its change time too: the next scan doesn't
+    // read and hash it again for the bit.
+    let node = common::header_named(&server, "edit.txt")
+        .node()
+        .ok_or("node")?;
+    let row = b
+        .engine
+        .db()
+        .read(|s| s.local_by_node(node))?
+        .ok_or("row")?;
+    let now = hbsync_platform::stat(&b.root.join("d/edit.txt"))?.fingerprint();
+    assert_eq!(row.fingerprint, now);
+    // Started again as it is: nothing to put right, and nothing planned for it.
+    b.restart_with(Box::new(reading.clone().writing()), |cfg| {
+        cfg.folder.writes = true;
+    })?;
+    let report = b.engine.sync("2026-10-08", true)?;
+    assert_eq!(report.rounds, 0, "{report:?}");
+    assert!(!read_only_here(&b, "d/edit.txt"));
+
+    b.restart_with(Box::new(reading), |_| {})?;
+    b.sync()?;
+    assert!(read_only_here(&b, "d/edit.txt") && read_only_here(&b, "d/read.txt"));
+    nothing_moved_out(&out)
+}
+
+/// Such a file is placed writable, not placed read-only and put right afterwards: in a sync
+/// of one round, which plans nothing after the download.
+#[test]
+fn a_file_that_may_be_changed_is_placed_writable() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    a.write("d/edit.txt", "one")?;
+    a.sync()?;
+    share_to_edit(&a, &server, "d")?;
+    share_to_edit(&a, &server, "edit.txt")?;
+    let out = tempfile::tempdir()?;
+    let to = out.path().to_path_buf();
+    let remote = FakeRemote::member(server.clone()).writing();
+    let mut b = Client::on(remote, "b", move |cfg| {
+        cfg.folder.read_only = Some(to.clone());
+        cfg.folder.writes = true;
+        cfg.max_rounds = 1;
+    })?;
+    let report = b.engine.sync("2026-10-08", true)?;
+    assert_eq!(report.rounds, 1);
+    assert_eq!(b.read("d/edit.txt")?, b"one");
+    assert!(!read_only_here(&b, "d/edit.txt"));
+    Ok(())
+}
+
+/// A file changed since it was last scanned, in a way that keeps its size and its time (here
+/// its change time alone moved: a tag written, say), whose bit is then put right: the file's
+/// row isn't written again with what the file holds now. The scan reads the file for the
+/// change; with the new change time under the old row it never would.
+#[test]
+fn the_bit_put_right_hides_no_change_made_since_the_scan() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    a.write("d/edit.txt", "one")?;
+    a.sync()?;
+    share_to_edit(&a, &server, "d")?;
+    share_to_read(&a, &server, "edit.txt")?;
+    let (mut b, _out) = writing_member(&server, "b")?;
+    b.sync()?;
+    assert!(read_only_here(&b, "d/edit.txt"));
+    let node = common::header_named(&server, "edit.txt")
+        .node()
+        .ok_or("node")?;
+    let scanned = b
+        .engine
+        .db()
+        .read(|s| s.local_by_node(node))?
+        .ok_or("row")?;
+
+    // Its share turned to editing, and the file touched meanwhile (its change time moves:
+    // made read-only again, as it was), neither scanned yet.
+    share_to_edit(&a, &server, "edit.txt")?;
+    let at = b.root.join("d/edit.txt");
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    hbsync_platform::ops::set_read_only(&at, false)?;
+    hbsync_platform::ops::set_read_only(&at, true)?;
+    let touched = hbsync_platform::stat(&at)?.fingerprint();
+    if touched == scanned.fingerprint {
+        // (A file system that keeps no change time: nothing to tell apart.)
+        return Ok(());
+    }
+    b.engine.sync("2026-10-08", true)?;
+    assert!(!read_only_here(&b, "d/edit.txt"));
+    let row = b
+        .engine
+        .db()
+        .read(|s| s.local_by_node(node))?
+        .ok_or("row")?;
+    assert_eq!(row.fingerprint, scanned.fingerprint, "left to the scan");
+    Ok(())
+}

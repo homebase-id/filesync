@@ -260,6 +260,9 @@ pub struct Engine {
     /// The writes to another identity's drive that were on their way, or held, in this sync
     /// so far ([`Executor::with_on_their_way`]): from none at each sync's start.
     on_their_way: crate::exec::OnTheirWay,
+    /// Whether this engine has looked at the folder writing or not since it last ran
+    /// ([`Engine::apply_writes_change`]).
+    writes_applied: bool,
     /// What the folder holds of the drive, as set up ([`FolderKind`]).
     part: Part,
     /// A sync plans nothing while the folder of shares is to give way
@@ -352,6 +355,7 @@ impl Engine {
             rescanned: Default::default(),
             refusals: FolderRefusals::default(),
             on_their_way: crate::exec::OnTheirWay::default(),
+            writes_applied: false,
             waited: Waited::default(),
             unreported: None,
             part,
@@ -547,6 +551,110 @@ impl Engine {
         }
         let sync = self.sync_with(date, Pull::Done(feed))?;
         Ok(StartupReport { local, sync })
+    }
+
+    /// In a folder synced from another identity's drive, the files this identity may change
+    /// are read-only on disk or not by whether the folder writes there
+    /// ([`FolderCtx::keeps_read_only`]). Where that changed since the folder last ran (the
+    /// app was given the permission to send to other identities, or lost it), each of them is
+    /// planned again, and put right as its plan finds nothing else to do
+    /// ([`Engine::put_read_only_right`]). In one transaction with the new value, so a crash
+    /// can't skip it. Asked once an engine, at its first sync: one read of a setting where
+    /// nothing changed.
+    fn apply_writes_change(&mut self) -> Result<(), StateError> {
+        if self.cfg.folder.read_only.is_none() {
+            return Ok(());
+        }
+        if self.writes_applied {
+            return Ok(());
+        }
+        let writes = self.cfg.folder.writes;
+        self.db.write(|s| {
+            if s.get_kv(keys::WRITES)?.is_some() == writes {
+                return Ok(());
+            }
+            s.folder().mark_writable_dirty()?;
+            match writes {
+                true => s.folder().set_kv(keys::WRITES, "1"),
+                false => s.folder().delete_kv(keys::WRITES),
+            }
+        })?;
+        self.writes_applied = true;
+        Ok(())
+    }
+
+    /// The read-only bit of the files of `clean` (nodes a plan found nothing to do for) put
+    /// as the folder keeps it ([`FolderCtx::keeps_read_only`]): a file placed read-only that
+    /// this identity may change since (its share turned to editing, or the folder writes
+    /// now) is made writable, and the other way round. A change of what may be done with a
+    /// file marks its node dirty ([`hbsync_state::AccountTx::set_writable`]), so it is
+    /// planned, and told clean where nothing else changed.
+    ///
+    /// Only in a folder synced from another identity's drive. Where it doesn't write, only
+    /// for a file the drive says may be changed (writable here, if at all, since the folder
+    /// wrote): the rest stay as they are, one there from before files were placed read-only
+    /// too. A row read for each such node, a look at the file where it counts, and where
+    /// the bit differs its change, with the file's row written again: the change moves the
+    /// file's change time, which its fingerprint holds, and a scan would read and hash the
+    /// file anew for it. Written again only where the file was, just before, exactly as its
+    /// row has it: one changed since the last scan (a tag, a write that keeps its size and
+    /// time) is the scan's to read, and its new change time taken with the old row would
+    /// hide that change for good. Best effort: a file that can't be changed stays as it is.
+    fn put_read_only_right(
+        &mut self,
+        clean: &std::collections::HashSet<NodeId>,
+    ) -> Result<(), StateError> {
+        let folder = &self.cfg.folder;
+        if folder.read_only.is_none() || clean.is_empty() {
+            return Ok(());
+        }
+        let files = self.db.read(|s| {
+            let mut files = Vec::new();
+            for node in clean {
+                let writable = s.get_mirror(*node)?.is_some_and(|row| row.writable);
+                if !folder.writes && !writable {
+                    continue;
+                }
+                let here = s.local_by_node(*node)?;
+                if let Some(here) = here.filter(|l| l.kind == hbsync_types::NodeKind::File) {
+                    files.push((here, writable));
+                }
+            }
+            Ok(files)
+        })?;
+        let mut changed = Vec::new();
+        for (row, writable) in files {
+            let at = row.path.to_native(&folder.root);
+            let read_only = folder.keeps_read_only(writable);
+            if hbsync_platform::ops::is_read_only(&at) == read_only {
+                continue;
+            }
+            let fp = row.fingerprint;
+            let as_scanned = hbsync_platform::stat(&at).is_ok_and(|meta| meta.fingerprint() == fp);
+            if !matches!(
+                hbsync_platform::ops::set_read_only(&at, read_only),
+                Ok(true)
+            ) {
+                continue;
+            }
+            // As it is now, where it was as its row has it and nothing but its change time
+            // moved (else the row stays, and the scan looks at the file).
+            if as_scanned
+                && let Ok(meta) = hbsync_platform::stat(&at)
+                && meta.file_id == fp.file_id
+                && fp.same_after_rename(&meta)
+            {
+                changed.push(hbsync_state::LocalRow {
+                    fingerprint: meta.fingerprint(),
+                    ..row
+                });
+            }
+        }
+        if changed.is_empty() {
+            return Ok(());
+        }
+        self.db
+            .write(|s| changed.iter().try_for_each(|row| s.folder().put_local(row)))
     }
 
     /// Prepares for a filter that changed since the last run (§10): items may have come into
@@ -784,6 +892,7 @@ impl Engine {
         // (unpark), and what this one did is when it ends, however it ends: a power cut loses
         // at most the sync in progress (sync semantics §8a).
         self.db.flush()?;
+        self.apply_writes_change()?;
         self.on_their_way = crate::exec::OnTheirWay::default();
         let synced = self.sync_pass(date, pulled);
         // Best effort: a failure here leaves what was done undone in no way, and the next
@@ -1290,6 +1399,7 @@ impl Engine {
                 .try_for_each(|m| s.folder().clear_mark(*m))?;
             sent.iter().try_for_each(|n| s.folder().mark_dirty(*n))
         })?;
+        self.put_read_only_right(&clean)?;
         if ops.is_empty() {
             return Ok(Some(plan.held));
         }
