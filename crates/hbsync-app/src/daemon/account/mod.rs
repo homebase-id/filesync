@@ -321,6 +321,8 @@ impl Account {
         // The app's want of the owner's approval is the account's to say, whichever share
         // met it: one that can't be opened (kept here) or one that is synced (its own).
         status.needs_approval |= folders.iter().any(|f| f.needs_approval);
+        // (And its want of the approval to change what others share: a synced share's.)
+        status.needs_edit_approval = folders.iter().any(|f| f.needs_edit_approval);
         (status, folders)
     }
 

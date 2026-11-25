@@ -832,6 +832,19 @@ fn print_status(status: &DaemonStatus) {
                 a.identity
             )
         });
+        // What is shared for editing syncs one way for want of the approval: nothing waits,
+        // so it is said as what approving gives. (Not beside the line above: that approval
+        // is asked for both.)
+        let approval = approval.or_else(|| {
+            a.needs_edit_approval.then(|| {
+                format!(
+                    "sharing: files shared with you for editing are read-only here until you \
+                     approve: `hbsync approve {}` asks your Homebase to let {APP_NAME} change \
+                     them",
+                    a.identity
+                )
+            })
+        });
         // Recently deleted being deleted for good, in the background.
         let emptying = a.emptying.as_ref().map(words::emptying_status);
         if hints.is_none()

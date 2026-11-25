@@ -5,6 +5,13 @@ use super::*;
 impl ReadTx<'_> {
     // ---- remote mirror ----
 
+    /// Whether the drive says this identity may change anything of it (`MirrorRow::writable`:
+    /// another identity's, which shares something for editing). No index serves it: the
+    /// mirror is read until one is found, all of it where none is.
+    pub fn any_writable(&self) -> Result<bool> {
+        Ok(self.count("SELECT EXISTS (SELECT 1 FROM remote WHERE writable = 1)")? > 0)
+    }
+
     pub fn get_mirror(&self, node: NodeId) -> Result<Option<MirrorRow>> {
         if node.is_root() {
             return Ok(None);

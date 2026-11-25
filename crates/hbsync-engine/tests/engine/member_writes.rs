@@ -1066,3 +1066,37 @@ fn the_bit_put_right_hides_no_change_made_since_the_scan() -> R {
     assert_eq!(row.fingerprint, scanned.fingerprint, "left to the scan");
     Ok(())
 }
+
+/// A share that isn't written to says, with each sync's report, whether anything in it is
+/// shared for editing (what the product asks its owner's approval by): not while all of it
+/// is shared for reading, from the sync that learns of the first item shared for editing,
+/// and not once the folder writes.
+#[test]
+fn a_share_not_written_to_tells_what_could_be_changed() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    a.write("d/one.txt", "one")?;
+    a.sync()?;
+    share_to_read(&a, &server, "d")?;
+    share_to_read(&a, &server, "one.txt")?;
+    let out = tempfile::tempdir()?;
+    let to = out.path().to_path_buf();
+    let reading = FakeRemote::member(server.clone());
+    let mut b = Client::on(reading.clone(), "b", move |cfg| {
+        cfg.folder.read_only = Some(to.clone());
+    })?;
+    assert!(!b.engine.sync("2026-10-08", true)?.editable);
+    // (A sync with nothing to do says what the last one found.)
+    assert!(!b.engine.sync("2026-10-08", true)?.editable);
+
+    share_to_edit(&a, &server, "one.txt")?;
+    assert!(b.engine.sync("2026-10-08", true)?.editable);
+    assert!(b.engine.sync("2026-10-08", true)?.editable);
+
+    // The folder writes: nothing to ask for.
+    b.restart_with(Box::new(reading.writing()), |cfg| {
+        cfg.folder.writes = true;
+    })?;
+    assert!(!b.engine.sync("2026-10-08", true)?.editable);
+    Ok(())
+}

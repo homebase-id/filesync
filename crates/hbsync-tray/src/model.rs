@@ -16,6 +16,9 @@ const PROBLEMS_SHOWN: usize = 8;
 const WIDTH: usize = 60;
 /// Said where a share that has no line of its own waits for the owner's approval of the app.
 const NEEDS_APPROVAL: &str = "Your approval is needed to read what others share";
+/// The same for changing it: something is shared with the identity for editing, and syncs
+/// one way until the owner approves.
+const NEEDS_EDIT_APPROVAL: &str = "Shared files are read-only until you approve editing";
 
 /// What the tray knows about the daemon.
 #[derive(Debug, Clone, PartialEq)]
@@ -61,6 +64,13 @@ impl Daemon {
     /// account says so, whichever share met it).
     pub fn needs_approval(&self, identity: &hbsync_app::Identity) -> bool {
         self.account(identity).is_some_and(|a| a.needs_approval)
+    }
+
+    /// Something others share with `identity` for editing is read-only for want of the
+    /// owner's approval of the app.
+    pub fn needs_edit_approval(&self, identity: &hbsync_app::Identity) -> bool {
+        self.account(identity)
+            .is_some_and(|a| a.needs_edit_approval)
     }
 
     /// The status of the account `identity`.
@@ -319,6 +329,13 @@ pub(crate) fn menu(view: &View) -> Vec<Item> {
             // (Short enough for the menu under any name the app goes by: never cut.)
             items.push(Item::Label(NEEDS_APPROVAL.into()));
         }
+        // What is shared for editing is read-only for want of the owner's approval: said, and
+        // asked for below. Nothing waits or fails for it, so the icon stays as it is. (Not
+        // beside the line above: the approval asked there is for both.)
+        let uneditable = !unapproved && view.daemon.needs_edit_approval(&s.identity);
+        if uneditable {
+            items.push(Item::Label(NEEDS_EDIT_APPROVAL.into()));
+        }
         if let Some(h) = view
             .daemon
             .held_or_main()
@@ -342,10 +359,16 @@ pub(crate) fn menu(view: &View) -> Vec<Item> {
             items.push(Item::Action(Action::LogInAgain, "Log in again…".into()));
         }
         // What others share waits for the owner's approval of the app: asked for here.
+        // (One page asks for all the app lacks: named by what the user gets from it.)
         if unapproved {
             items.push(Item::Action(
                 Action::Approve,
                 "Approve reading shared files…".into(),
+            ));
+        } else if uneditable {
+            items.push(Item::Action(
+                Action::Approve,
+                "Approve editing shared files…".into(),
             ));
         }
         items.push(Item::Separator);
@@ -618,6 +641,50 @@ mod tests {
         assert!(actions(&m).contains(&Action::Approve));
         assert_eq!(look(&v), Look::Attention);
         assert!(m.iter().any(why), "{m:?}");
+    }
+
+    /// What is shared for editing and read-only for want of the owner's approval is said in
+    /// the menu, with the approval offered: nothing waits or fails, so the icon and the
+    /// status line stay as they are. Where the app may not read what is shared either, that
+    /// is what is said and asked (its page asks for both).
+    #[test]
+    fn editing_what_is_shared_is_offered_for_approval() {
+        let account = |reads: bool, edits: bool| {
+            let Daemon::Running(mut d) = running(status(State::Idle)) else {
+                panic!("running");
+            };
+            let mut account = hbsync_app::protocol::AccountStatus::new(&"anna.example.com".into());
+            (account.needs_approval, account.needs_edit_approval) = (reads, edits);
+            d.accounts.push(account);
+            Daemon::Running(d)
+        };
+        let label =
+            |m: &[Item], what: &str| m.iter().any(|i| matches!(i, Item::Label(l) if l == what));
+        let action = |m: &[Item], what: &str| {
+            m.iter()
+                .any(|i| matches!(i, Item::Action(Action::Approve, l) if l == what))
+        };
+        assert!(NEEDS_EDIT_APPROVAL.chars().count() <= WIDTH);
+
+        let d = account(false, true);
+        let v = view(&d, &[]);
+        assert_eq!(look(&v), Look::UpToDate);
+        assert_eq!(status_line(&v), "Up to date");
+        let m = menu(&v);
+        assert!(label(&m, NEEDS_EDIT_APPROVAL), "{m:?}");
+        assert!(action(&m, "Approve editing shared files…"), "{m:?}");
+
+        let d = account(true, true);
+        let m = menu(&view(&d, &[]));
+        assert!(
+            label(&m, NEEDS_APPROVAL) && !label(&m, NEEDS_EDIT_APPROVAL),
+            "{m:?}"
+        );
+        assert!(action(&m, "Approve reading shared files…"), "{m:?}");
+        assert!(!action(&m, "Approve editing shared files…"), "{m:?}");
+
+        let d = account(false, false);
+        assert!(!actions(&menu(&view(&d, &[]))).contains(&Action::Approve));
     }
 
     /// Shares that are off (their folder gone, or not made) are said in the menu; nothing is
