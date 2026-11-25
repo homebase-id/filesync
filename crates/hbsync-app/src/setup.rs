@@ -9,10 +9,11 @@ use std::time::Duration;
 
 pub use crate::login::{Asked, Paste};
 use hbsync_engine::root::{RootError, SyncRoot};
-/// What an [`Owner`] answers with.
+/// What an [`Owner`] is asked for ([`Owner::approve_sharing`]).
 pub use hbsync_homebase::app::Lacks;
 use hbsync_homebase::drive::HomebaseRemote;
 use hbsync_homebase::{Client, app};
+/// What an [`Owner`] answers with.
 pub use hbsync_homebase::{Credentials, HomebaseError};
 use hbsync_remote::Remote;
 
@@ -904,14 +905,13 @@ mod tests {
     #[test]
     fn an_approval_is_said_by_what_was_asked_for() {
         let anna = Identity::new("anna.example.com");
-        let (reads, sends) = (true, true);
         let only_sends = Lacks {
-            sends,
-            ..Lacks::default()
+            reads: false,
+            sends: true,
         };
         let only_reads = Lacks {
-            reads,
-            ..Lacks::default()
+            reads: true,
+            sends: false,
         };
         let said = |approved: Approved| approved.said(&anna);
         assert_eq!(

@@ -228,8 +228,8 @@ impl Lacks {
             self.reads.then_some(USE_TRANSIT_READ),
             self.sends.then_some(USE_TRANSIT_WRITE),
         ];
-        let keys: Vec<String> = keys.iter().flatten().map(u32::to_string).collect();
-        keys.join(",")
+        let keys = keys.into_iter().flatten().map(|key| key.to_string());
+        keys.collect::<Vec<_>>().join(",")
     }
 }
 
@@ -377,14 +377,13 @@ mod tests {
         assert_eq!(params["p"], registered["p"].as_str().ok_or("no p")?);
         assert_eq!(params["p"], "305,210");
         assert!(!params.contains_key("d"));
-        let (reads, sends) = (true, true);
         let only_reads = Lacks {
-            reads,
-            ..Lacks::default()
+            reads: true,
+            sends: false,
         };
         let only_sends = Lacks {
-            sends,
-            ..Lacks::default()
+            reads: false,
+            sends: true,
         };
         assert_eq!(asked(only_reads)?["p"], "305");
         assert_eq!(asked(only_sends)?["p"], "210");
