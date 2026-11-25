@@ -353,6 +353,14 @@ pub enum Planned<'a> {
 }
 
 impl Planned<'_> {
+    /// The hash the bytes are known to have before they are sent (`None`: hashed on send).
+    pub fn known(&self) -> Option<ContentHash> {
+        match self {
+            Planned::Known(h) => Some(*h),
+            Planned::OnSend { .. } => None,
+        }
+    }
+
     pub fn algorithm(&self) -> HashAlgorithm {
         match self {
             Planned::Known(h) => h.algorithm,

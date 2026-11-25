@@ -126,6 +126,35 @@ fn a_members_writes_on_their_way_are_its_servers() -> R {
     Ok(())
 }
 
+/// The same file edited again while its first edit is on its way, to bytes of the same size
+/// at the same time: another write, not the one sent. It isn't answered as the first one
+/// (it was, and the second edit was then recorded as sent and never went up): it waits
+/// behind it, and meets the first's version once that has landed.
+#[test]
+fn an_edit_of_other_bytes_isnt_the_write_on_its_way() -> R {
+    let (sharer, scratch) = sharing_a_folder_to_edit()?;
+    let member = FakeRemote::member(sharer.server_handle()).writing();
+    let new = file("mine", scratch.node, b"1");
+    let at = create_file(&member, &new, b"1")?;
+    member.faults().on_their_way = true;
+    let edit = |data: &[u8]| {
+        let mut bytes = std::io::Cursor::new(data);
+        member.update(&at.target, &new, Some(upload(&mut bytes)))
+    };
+    waits(edit(b"2"));
+    // Asked again as it was: the one on its way. With other bytes: not that one.
+    waits(edit(b"2"));
+    waits(edit(b"3"));
+    let delivered = member.deliver();
+    assert!(matches!(delivered.as_slice(), [Ok(_)]), "{delivered:?}");
+    let other = edit(b"3");
+    assert!(
+        matches!(other, Err(RemoteError::VersionMismatch)),
+        "the first edit landed, and this one isn't it: {other:?}"
+    );
+    Ok(())
+}
+
 /// The answer of a write still on its way.
 fn waits<T: std::fmt::Debug>(answer: Result<T, RemoteError>) {
     assert!(
