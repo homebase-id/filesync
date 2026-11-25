@@ -234,6 +234,34 @@ pub(crate) fn with_a_folder_wiped(sim: Sim) -> Sim {
     sim
 }
 
+/// A member that writes (client 2), the owner's folder of three files and a file beside it
+/// synced on all and shared with it for editing: a delete of the member's is one of what it
+/// may change from the first event on (and, with the guard on, soon one it holds).
+pub(crate) fn with_all_shared_to_edit(sim: Sim) -> Sim {
+    let mut sim = sim.with_writing_member(2);
+    let act = |action| Event::Act { client: 0, action };
+    sim.run(&[
+        act(Action::CreateFolder { parent: 0, name: 0 }),
+        act(Action::CreateFile { parent: 1, name: 1 }),
+        act(Action::CreateFile { parent: 1, name: 3 }),
+        act(Action::CreateFile { parent: 1, name: 5 }),
+        act(Action::CreateFile { parent: 0, name: 6 }),
+    ]);
+    assert!(sim.quiesce(10), "synced");
+    let all = sim.local_paths(0);
+    for path in &all {
+        let node = sim.item(0, path).expect("on the owner's device");
+        let pick = sim.share_pick(node).expect("on the drive");
+        sim.run(&[
+            act(Action::Share { pick, below: false }),
+            act(Action::Editable { pick, below: false }),
+        ]);
+    }
+    assert!(sim.quiesce(10), "shared");
+    assert_eq!(sim.local_paths(2), all, "the member has all of it");
+    sim
+}
+
 /// The mass-delete guard's minimum [`with_a_folder_wiped`] runs with.
 pub(crate) const WIPED_MIN: usize = 1;
 
