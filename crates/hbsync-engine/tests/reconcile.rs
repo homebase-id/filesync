@@ -3591,6 +3591,136 @@ fn sorted_ops(plan: &hbsync_engine::Plan) -> Vec<(&'static str, NodeId)> {
     ops
 }
 
+/// A file edited here that waits for its folder there (the drive has it in a folder this
+/// device can't read: a newer writer's, say) is out of the plan, edit and all. The folder it
+/// is in here, deleted there, stays: its delete here would take the edit. It isn't made
+/// again there either, and what else is in it, gone there, goes item by item. Not edited, the
+/// file goes with its folder (the drive has it).
+#[test]
+fn a_file_that_waits_for_a_folder_it_cant_read_keeps_the_folders_it_is_in_here() {
+    let [b, c, f, g, q] = ids(5)[..] else {
+        unreachable!()
+    };
+    for edited in [true, false] {
+        let mut w = World::default();
+        w.synced(b, folder(ROOT, "b"))
+            .synced(c, folder(b, "c"))
+            .synced(f, file(c, "f.txt", "x"))
+            .synced(g, file(b, "g.txt", "g"));
+        w.remote(b, None)
+            .remote(c, None)
+            .remote(g, None)
+            .remote(f, Some(file(q, "f.txt", "x")));
+        w.input.unreadable.insert(q);
+        if edited {
+            w.local(f, Some(file(c, "f.txt", "mine")));
+        }
+        let plan = w.plan();
+        assert!(!plan.writes_drive(), "{edited}: {:?}", plan.ops);
+        let want = match edited {
+            true => vec![("LocalDelete", g)],
+            false => vec![("LocalDelete", b)],
+        };
+        assert_eq!(sorted_ops(&plan), want, "{edited}: {:?}", plan.ops);
+        if edited {
+            for kept in [b, c, f] {
+                assert!(plan.deferred.contains(&kept), "{kept:?} is planned again");
+            }
+        }
+    }
+}
+
+/// Only the folders the plan doesn't keep are left as they are: `a`, above them, is renamed
+/// there, and is renamed here with all in it. A folder that waits itself (moved there into
+/// the one this device can't read) keeps the folders it is in here for the file edited in
+/// it. Two that wait in one folder keep it as one does. And a file that waits with no more
+/// than a rename here keeps nothing: it goes with its folder (the drive has it; the name it
+/// was given here goes with it).
+#[test]
+fn what_waits_keeps_the_folders_the_plan_doesnt() {
+    let [a, b, d, f, g, h, q] = ids(7)[..] else {
+        unreachable!()
+    };
+    let world = || {
+        let mut w = World::default();
+        w.synced(a, folder(ROOT, "a"))
+            .synced(b, folder(a, "b"))
+            .synced(d, folder(b, "d"))
+            .synced(f, file(d, "f.txt", "x"))
+            .synced(h, file(b, "h.txt", "h"))
+            .synced(g, file(b, "g.txt", "g"));
+        w.input.unreadable.insert(q);
+        w
+    };
+    let ops = |w: &World| {
+        let plan = w.plan();
+        assert!(!plan.writes_drive(), "{:?}", plan.ops);
+        sorted_ops(&plan)
+    };
+
+    // `a` renamed there; `b` and `d` deleted there, `f` moved into `q` and edited here.
+    let mut w = world();
+    w.remote(a, Some(folder(ROOT, "a2")))
+        .remote(b, None)
+        .remote(d, None)
+        .remote(g, None)
+        .remote(h, None)
+        .remote(f, Some(file(q, "f.txt", "x")))
+        .local(f, Some(file(d, "f.txt", "mine")));
+    let mut want = vec![("LocalDelete", g), ("LocalDelete", h), ("LocalMove", a)];
+    want.sort();
+    assert_eq!(ops(&w), want);
+
+    // The folder `d` waits (moved into `q`), the file edited in it with it; `b` deleted there.
+    let mut w = world();
+    w.remote(b, None)
+        .remote(g, None)
+        .remote(h, None)
+        .remote(d, Some(folder(q, "d")))
+        .local(f, Some(file(d, "f.txt", "mine")));
+    let mut want = vec![("LocalDelete", g), ("LocalDelete", h)];
+    want.sort();
+    assert_eq!(ops(&w), want);
+
+    // Two files that wait, both edited here, in `b`, deleted there with `d` and `g`.
+    let mut w = world();
+    w.remote(b, None)
+        .remote(d, None)
+        .remote(g, None)
+        .remote(f, Some(file(q, "f.txt", "x")))
+        .remote(h, Some(file(q, "h.txt", "h")))
+        .local(f, Some(file(d, "f.txt", "mine")))
+        .local(h, Some(file(b, "h.txt", "mine too")));
+    assert_eq!(ops(&w), [("LocalDelete", g)]);
+
+    // Renamed here, no more: it goes with its folder.
+    let mut w = world();
+    w.remote(b, None)
+        .remote(d, None)
+        .remote(g, None)
+        .remote(h, None)
+        .remote(f, Some(file(q, "f.txt", "x")))
+        .local(f, Some(file(d, "renamed.txt", "x")));
+    assert_eq!(ops(&w), [("LocalDelete", b)]);
+}
+
+/// The same where the drive's picture isn't whole yet (the file's folder there not read so
+/// far): it waits, and the folder it is in here stays.
+#[test]
+fn a_file_edited_here_that_waits_for_its_folder_there_keeps_its_folder_here() {
+    let [b, f, q] = ids(3)[..] else {
+        unreachable!()
+    };
+    let mut w = World::default();
+    w.synced(b, folder(ROOT, "b"))
+        .synced(f, file(b, "f.txt", "x"));
+    w.remote(b, None).remote(f, Some(file(q, "f.txt", "x")));
+    w.input.remote_complete = false;
+    w.local(f, Some(file(b, "f.txt", "mine")));
+    let plan = w.plan();
+    assert!(plan.ops.is_empty(), "{:?}", plan.ops);
+}
+
 /// A read-only world: the drive decides (§13).
 fn read_only() -> World {
     World {
@@ -3986,6 +4116,145 @@ fn read_only_what_is_new_in_a_folder_that_may_be_changed_is_added() {
         .collect();
     let at = |n: NodeId| made.iter().position(|m| *m == n);
     assert!(at(dir_in) < at(below), "{:?}", plan.ops);
+}
+
+/// A delete here takes no edit. `inner` may be changed and was edited here, in `dir`, whose
+/// share is withdrawn (gone from what this identity reads) while `inner`'s stays: the drive
+/// has it at the top now, where `top` holds its name, so it is left out and its edit doesn't
+/// go up. `dir`'s delete here doesn't take the edit: it moves out first. Not edited, or
+/// edited to the bytes the drive has, it goes with its folder (the drive has it).
+#[test]
+fn read_only_a_delete_here_takes_no_edit_of_what_was_left_out() {
+    for order in [[0, 1, 2], [2, 1, 0], [1, 2, 0]] {
+        let id = ids(3);
+        let [top, dir, inner] = order.map(|i| id[i]);
+        for (here, there, moves_out) in [("mine", "x", true), ("x", "x", false), ("y", "y", false)]
+        {
+            let mut w = read_only();
+            w.synced(top, file(ROOT, "a.txt", "t"))
+                .synced(dir, folder(ROOT, "d"))
+                .synced(inner, file(dir, "a.txt", "x"));
+            w.remote(dir, None)
+                .remote(inner, Some(file(ROOT, "a.txt", there)));
+            editing(&mut w);
+            w.local(inner, Some(file(dir, "a.txt", here)));
+            let plan = w.plan();
+            assert!(!plan.writes_drive(), "{order:?}: {:?}", plan.ops);
+            let mut want = vec![("LocalDelete", dir)];
+            if moves_out {
+                want.push(("LocalEvict", inner));
+            }
+            want.sort();
+            assert_eq!(sorted_ops(&plan), want, "{order:?} {here}");
+            let mut taken = (plan.ops.iter())
+                .find_map(|op| match op {
+                    Op::LocalDelete { subtree, .. } => Some(subtree.clone()),
+                    _ => None,
+                })
+                .expect("the folder goes here");
+            taken.sort();
+            let mut all = match moves_out {
+                true => vec![dir],
+                false => vec![dir, inner],
+            };
+            all.sort();
+            assert_eq!(taken, all, "{order:?} {here}: {:?}", plan.ops);
+        }
+    }
+}
+
+/// The same a level down: a folder `sub` of `dir` is the one left out (shared still, its name
+/// at the top taken), and holds the edited file, and one new here (it would be added there,
+/// `sub` its to add to, were `sub` planned). The two files alone move out; `sub` goes with
+/// `dir`. And the plan after it ran (the file's base forgotten as it moved out, `dir` and
+/// `sub` gone here): nothing to do, and no removal there of the file that moved out.
+#[test]
+fn read_only_a_delete_here_takes_no_edit_below_a_folder_left_out() {
+    let [top, dir, sub, inner, fresh] = ids(5)[..] else {
+        unreachable!()
+    };
+    let mut w = read_only();
+    w.synced(top, folder(ROOT, "s"))
+        .synced(dir, folder(ROOT, "d"))
+        .synced(sub, folder(dir, "s"))
+        .synced(inner, file(sub, "a.txt", "x"));
+    w.remote(dir, None).remote(sub, Some(folder(ROOT, "s")));
+    editing(&mut w);
+    w.local(inner, Some(file(sub, "a.txt", "mine")))
+        .local(fresh, Some(file(sub, "new.txt", "n")));
+    let plan = w.plan();
+    assert!(!plan.writes_drive(), "{:?}", plan.ops);
+    let mut want = vec![
+        ("LocalDelete", dir),
+        ("LocalEvict", fresh),
+        ("LocalEvict", inner),
+    ];
+    want.sort();
+    assert_eq!(sorted_ops(&plan), want);
+    let subtree = |op: &Op| match op {
+        Op::LocalDelete { subtree, .. } | Op::LocalEvict { subtree, .. } => subtree.clone(),
+        _ => Vec::new(),
+    };
+    let mut taken: Vec<Vec<NodeId>> = plan.ops.iter().map(subtree).collect();
+    taken.iter_mut().for_each(|t| t.sort());
+    taken.sort();
+    let mut all = vec![vec![fresh], vec![inner], {
+        let mut d = vec![dir, sub];
+        d.sort();
+        d
+    }];
+    all.sort();
+    assert_eq!(taken, all, "{:?}", plan.ops);
+
+    let mut after = read_only();
+    after
+        .synced(top, folder(ROOT, "s"))
+        .remote(sub, Some(folder(ROOT, "s")))
+        .remote(inner, Some(file(sub, "a.txt", "x")));
+    editing(&mut after);
+    let plan = after.plan();
+    assert!(plan.ops.is_empty(), "{:?}", plan.ops);
+    // For its name still: `sub` is left out, told so, and planned again.
+    assert!(
+        matches!(plan.conflicts[..], [Conflict::NameTaken { .. }]),
+        "{:?}",
+        plan.conflicts
+    );
+    assert_eq!(plan.conflicts[0].node(), sub);
+    assert!(plan.deferred.contains(&sub));
+}
+
+/// A file edited here whose folder on the drive this device can't read (a newer writer's,
+/// say) waits, out of the plan, its move out with it. Its folder here goes (its share
+/// withdrawn): the edit moves out first, whether the folder writes there or only reads.
+#[test]
+fn read_only_a_file_that_waits_for_a_folder_it_cant_read_moves_its_edit_out() {
+    let [b, f, q] = ids(3)[..] else {
+        unreachable!()
+    };
+    for writes in [false, true] {
+        let mut w = read_only();
+        w.synced(b, folder(ROOT, "b"))
+            .synced(f, file(b, "f.txt", "x"));
+        w.remote(b, None).remote(f, Some(file(q, "f.txt", "x")));
+        w.input.unreadable.insert(q);
+        if writes {
+            editing(&mut w);
+        }
+        w.local(f, Some(file(b, "f.txt", "mine")));
+        let plan = w.plan();
+        assert!(!plan.writes_drive(), "{writes}: {:?}", plan.ops);
+        let mut want = vec![("LocalDelete", b), ("LocalEvict", f)];
+        want.sort();
+        assert_eq!(sorted_ops(&plan), want, "{writes}: {:?}", plan.ops);
+        let taken = (plan.ops.iter())
+            .find_map(|op| match op {
+                Op::LocalDelete { subtree, .. } => Some(subtree.clone()),
+                _ => None,
+            })
+            .expect("the folder goes here");
+        assert_eq!(taken, [b], "{writes}: {:?}", plan.ops);
+    }
 }
 
 /// A file edited on both sides, in a folder this identity may add to: both are kept, as on

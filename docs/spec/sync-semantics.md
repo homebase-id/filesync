@@ -784,6 +784,17 @@ expected fingerprint is treated as done.
   loses its newer fields) is left out, reported, and recorded as there all the same (node
   schema, Identity and tombstones):
   - What is in a folder this device can't read stays in it, waiting: it is never an orphan.
+    One that was here before (another writer moved it there) stays where it is here
+    meanwhile, out of the plan. Changed here, it keeps the folders it is in here too: one
+    deleted there isn't deleted here (the delete would take the change, which nothing
+    sends while the node waits) nor made again there, and is planned again with it, until
+    the folder reads; what else is in it and is gone there goes item by item. So does one
+    that waits while the drive's picture isn't whole (§6.3). Changed means its bytes (or
+    made here): renamed, moved or tagged here and no more, it goes with its folder, and
+    comes back as the drive has it once the folder reads. (On an identity's own drive:
+    read-only, a change here moves out instead, §13.) A limit: a new folder of a kept
+    folder's name on the drive is the one renamed there (the kept one holds the name
+    here, as any item planned again does).
   - A node whose newer version it can't read (unreadable) is kept as it had it: a local edit
     goes up as a new node (a conflict copy, under a free name); a rename, tags, a delete or a
     download of it is refused and not tried again while it is the same; the drive's version
@@ -1586,7 +1597,9 @@ whatever changed here, and the plan holds no operation on the drive:
   forgotten.
 - The mass-delete guard (§7) judges the deletes here as everywhere (a removal elsewhere of
   every synced file is held); what it holds is confirmed or stays held: putting it back would
-  restore it on the drive, and is refused.
+  restore it on the drive, and is refused. (A folder that writes there also holds its own
+  deletes, and puts those back here without a write: below, "A delete here of an item the
+  store says may be changed".)
 - The folder things move out to is a full path outside the read-only one (else its scan would find them
   as new items there) and made where it is missing, on the folder's volume (a move out is one
   rename; a rename across devices, as into a bind mount of the same file system, tells it too):
@@ -1722,6 +1735,12 @@ rules hold too:
   - gone there, it follows the drive: what is gone there (deleted, its share withdrawn,
     taken along by its folder's removal) isn't made again, and an edit of it here moves
     out;
+  - not synced here for its name (left out: its folder no longer shared, its name at the
+    top taken, above), its edit here doesn't go up either, and stays with it; but a delete
+    here takes no edit: where its folder goes here, the edited file moves out first (what
+    a delete here would take that changed here does, whatever kept it out of the plan, in
+    a folder that only reads too: a file edited here that waits for a folder there this
+    device can't read, say);
   - deleted here, it is removed there: it goes to its owner's Recently deleted (below);
   - edited on both sides, both are kept where its folder may be added to (below): the
     drive's version keeps the file, and this device's becomes a conflict copy beside it,
@@ -1730,7 +1749,8 @@ rules hold too:
     moves out, as of any item of the folder (an executable bit changed here alone is no
     edit to keep, as in any read-only folder);
   - a move here to another folder goes up between two folders that may be added to
-    (below), and is undone, whole, anywhere else (the item goes back to the drive's place
+    (below; also into a folder made here in one, which is added first), and is undone,
+    whole, anywhere else (the item goes back to the drive's place
     and name); an edit made with it still goes up;
   - a rename or a move here onto a name another item holds, on the drive or in the plan, or
     one this device leaves out there or keeps (§10, §7), is undone: no clash of names is
@@ -1784,8 +1804,16 @@ rules hold too:
     removed one, goes along with it (this device doesn't know where the unshared folder
     is).
   - The mass-delete guard (§7) holds such removals as an own drive's: confirmed, they are
-    sent. Putting them back is refused in such a folder for now (`Engine::put_back`): what
-    is held is confirmed or stays held.
+    sent. **Put them back** undoes them here without a write to the drive: after a read of
+    the feed, the base of each node deleted here and live there goes, with what below it
+    is gone here too, so it comes down again (`held::put_back_here`; one the drive removed
+    too meanwhile is left to the drive). A removal made there that such a folder holds
+    (every synced file, the items still here) is not this identity's to put back: that is
+    a restore on the drive, which only its owner does. It stays held till confirmed, and a
+    put back that undoes nothing and leaves one such is refused, told so
+    (`Engine::put_back`; a folder that doesn't write holds only such removals, and refuses
+    every put back, as above).
+    Simulator: `a_guarded_writing_member_confirms_or_puts_back_its_own_deletes`.
   - What this device itself moved out of the folder (an edit of an item it may only read)
     is no delete of the user's: in a folder that writes, the bases of what moves out go
     before the item does, so the node is planned from the drive's alone and comes back,

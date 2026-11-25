@@ -642,10 +642,10 @@ impl Sim {
         };
         let plan = reconcile_with_known(&input, &opts, masking, known);
         // A member that writes plans only what it may (§13): a change of a node it may change,
-        // where the drive has it, or its move between two folders it may change; a node made
-        // in such a folder (or in one the plan makes there); a node it may change removed, a
-        // folder only with all it reads in it. Nothing at the top, and no name another node
-        // of the drive holds, as it reads it.
+        // where the drive has it, or its move between two folders it may change (or into one
+        // the plan makes there); a node made in such a folder (or in one the plan makes
+        // there); a node it may change removed, a folder only with all it reads in it.
+        // Nothing at the top, and no name another node of the drive holds, as it reads it.
         if client.writes {
             // (Not onto its own name spelled otherwise: what holds that with it did before.)
             let taken = |node: NodeId, parent: NodeId, name: &str| {
@@ -916,6 +916,18 @@ impl Sim {
         self.faults.plans += 1;
         client.pulls = (self.faults.pulls).unwrap_or(self.faults.plans.is_multiple_of(2));
         client.planned_changed = std::mem::take(&mut input.changed_at).into_iter().collect();
+        let server = &self.server;
+        client.planned_drive_waits = (server.live.keys().copied())
+            .filter(|n| server.waits_for_unreadable(*n))
+            .collect();
+        let at_base = |n: &NodeId| {
+            let n = client.coords.from_drive(*n);
+            let base = client.base.get(n);
+            (client.local.get(n)).is_some_and(|l| base.is_some_and(|b| l.same_place(b)))
+        };
+        client.planned_waits = (client.planned_drive_waits.iter().copied())
+            .filter(|n| (server.chain_to_unreadable(*n)).is_some_and(|c| c.iter().all(at_base)))
+            .collect();
         client.run_settled.clear();
         client.plan_saw = std::mem::take(&mut input.remote);
         for (folder, r) in input.removed {
@@ -1072,6 +1084,31 @@ impl Sim {
             self.ledger
                 .read_only_wrote(|| Some(format!("{name} {op:?}")));
         }
+        // Whether the operation writes what waits for a folder no client reads, judged as the
+        // plan saw it and as the drive is now (`Client::planned_waits`, as the client's folder
+        // sees the drive: a member reads such a node at its top): a write of a node that waits,
+        // or into one; or a placement here of one. One moved there after the plan keeps its
+        // version, under a folder moved there: what was planned before lands, as it would have
+        // just before.
+        let waits = |n: NodeId, planned: &BTreeSet<NodeId>| {
+            let n = self.clients[c].coords.to_drive(n);
+            planned.contains(&n) && self.server.waits_for_unreadable(n)
+        };
+        let (held, there) = (
+            &self.clients[c].planned_waits,
+            &self.clients[c].planned_drive_waits,
+        );
+        // Not checked: a delete of one (a user's delete here of what is in a folder moved there
+        // is rightly sent); a write of one held here elsewhere than its base has it, or below a
+        // folder so held (the engine may rightly send it); a placement of one that waits only
+        // through a folder in Recently deleted.
+        let waited = match &op {
+            Op::RemoteUpdate { parent, .. } => waits(node, held) || waits(*parent, held),
+            Op::RemoteTags { .. } => waits(node, held),
+            Op::RemoteCreate { parent, .. } => waits(*parent, held),
+            Op::LocalMkdir { .. } | Op::LocalDownload { .. } => waits(node, there),
+            _ => false,
+        };
         // A member that writes: what the engine's executor leaves for a later plan unsent
         // first (on its way in this sync, into a folder on its way, held after three in a
         // row: [`Sim::held_back`]); then its last guard, by what the drive says as the write
@@ -1134,6 +1171,8 @@ impl Sim {
             let name = &self.clients[c].name;
             self.ledger
                 .wrote_outside_scope(|| breach.then(|| format!("{name} {op:?}")));
+            self.ledger
+                .wrote_waiting(|| (waited && !landed).then(|| format!("{name} {op:?}")));
             let server = &self.server;
             self.ledger.dangling_write(|| {
                 let parent_unknown = server.live.get(&node).is_some_and(|n| {
@@ -2107,12 +2146,14 @@ impl Sim {
                 Some(server) if server.remote.version != expected => Skip, // changed meanwhile
                 // Removed to Recently deleted now, or already gone: done either way.
                 _ => {
-                    let now = self.on_drive(node);
+                    // (As a member reads it now, or as the whole drive has it: the place a
+                    // member reads changes with its folder's share, which is no move.)
+                    let now = [self.on_drive(node), self.on_whole_drive(node)];
                     // Rightly so where a user deleted it as it is now, or a folder's removal had
                     // taken it along when the plan was made: anything else the engine removes no
                     // user wanted gone.
                     let version = self.server.live.get(&node).map(|n| n.remote.version);
-                    let rightly = now.as_ref().is_some_and(|now| {
+                    let rightly = now.iter().flatten().any(|now| {
                         self.ledger.deleted_by_user(node, now)
                             || self.ledger.removed_by_lost_commit(c, node, now)
                     }) || version

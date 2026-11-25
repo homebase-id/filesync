@@ -92,6 +92,59 @@ pub(crate) fn orphaning_action() -> impl Strategy<Value = Action> + Clone {
     ]
 }
 
+/// Events on `clients` clients: client 0's user edits; the users delete and tag, while a newer
+/// client moves synced nodes into folders no client reads ([`Action::IntoNewer`]: they wait
+/// for them, where a device has them, edited or not) and other devices delete folders, stop
+/// half way, restore and purge. Within the engine's two known gaps of what waits for such a
+/// folder: no user makes, moves or renames an item (what waits doesn't hold its name here, and
+/// what comes to that name is downloaded again at every sync, never landing), and one device
+/// edits (a file edited there and here, the drive's edit first, is forked into a copy whose
+/// upload is planned at every sync, its item never made).
+pub(crate) fn waiting_event(clients: usize) -> impl Strategy<Value = Event> {
+    let i = || 0usize..16;
+    let actions = prop_oneof![
+        1 => i().prop_map(|node| Action::Delete { node }),
+        1 => (i(), i()).prop_map(|(node, tag)| Action::Tag { node, tag }),
+        2 => (i(), 0usize..4).prop_map(|(pick, folder)| Action::IntoNewer { pick, folder }),
+        1 => i().prop_map(|name| Action::NewerFolder { name }),
+        1 => (i(), i()).prop_map(|(pick, done)| Action::DeleteStopped { pick, done }),
+        1 => i().prop_map(|node| Action::Restore { node }),
+        1 => Just(Action::Purge),
+    ];
+    let c = move || 0..clients;
+    prop_oneof![
+        3 => (c(), actions).prop_map(|(client, action)| Event::Act { client, action }),
+        2 => i().prop_map(|file| Event::Act { client: 0, action: Action::Edit { file } }),
+        1 => c().prop_map(|client| Event::Plan { client }),
+        3 => c().prop_map(|client| Event::Step { client }),
+    ]
+}
+
+/// Folder "b" holding "b/c.txt" and "b/a/LLL…txt" (names of their own, whichever folder
+/// they end in), synced on every client, and a folder no client reads at the drive's top
+/// ([`Action::NewerFolder`]): for [`waiting_event`].
+pub(crate) fn with_a_tree_and_a_newer_folder(mut sim: Sim) -> Sim {
+    use Action::*;
+    let act = |action| Event::Act { client: 0, action };
+    let folder = |sim: &Sim, path: &str| {
+        let node = sim.item(0, path).unwrap_or(NodeId::ROOT);
+        sim.pick(0, node, true).expect(path)
+    };
+    let (a, b, c, l) = (0, 1, 3, 6); // NAMES: "a", "b", "c.txt", "LLL…txt"
+    let parent = folder(&sim, "");
+    sim.run(&[act(CreateFolder { parent, name: b })]);
+    let parent = folder(&sim, "b");
+    sim.run(&[
+        act(CreateFolder { parent, name: a }),
+        act(CreateFile { parent, name: c }),
+    ]);
+    let parent = folder(&sim, "b/a");
+    sim.run(&[act(CreateFile { parent, name: l })]);
+    sim.run(&[act(NewerFolder { name: 7 })]);
+    assert!(sim.quiesce(30), "no convergence");
+    sim
+}
+
 /// The users' actions, with new files more often, at names few enough that devices make the
 /// same ones (sync semantics §3, Hash on send: a new file is sent unread while nothing on the
 /// drive is its node or of its name).
@@ -178,6 +231,34 @@ pub(crate) fn with_a_folder_wiped(sim: Sim) -> Sim {
         !sim.held(1).is_empty(),
         "client 1 holds the folder's removal"
     );
+    sim
+}
+
+/// A member that writes (client 2), the owner's folder of three files and a file beside it
+/// synced on all and shared with it for editing: a delete of the member's is one of what it
+/// may change from the first event on (and, with the guard on, soon one it holds).
+pub(crate) fn with_all_shared_to_edit(sim: Sim) -> Sim {
+    let mut sim = sim.with_writing_member(2);
+    let act = |action| Event::Act { client: 0, action };
+    sim.run(&[
+        act(Action::CreateFolder { parent: 0, name: 0 }),
+        act(Action::CreateFile { parent: 1, name: 1 }),
+        act(Action::CreateFile { parent: 1, name: 3 }),
+        act(Action::CreateFile { parent: 1, name: 5 }),
+        act(Action::CreateFile { parent: 0, name: 6 }),
+    ]);
+    assert!(sim.quiesce(10), "synced");
+    let all = sim.local_paths(0);
+    for path in &all {
+        let node = sim.item(0, path).expect("on the owner's device");
+        let pick = sim.share_pick(node).expect("on the drive");
+        sim.run(&[
+            act(Action::Share { pick, below: false }),
+            act(Action::Editable { pick, below: false }),
+        ]);
+    }
+    assert!(sim.quiesce(10), "shared");
+    assert_eq!(sim.local_paths(2), all, "the member has all of it");
     sim
 }
 

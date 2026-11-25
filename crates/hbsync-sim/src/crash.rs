@@ -135,7 +135,7 @@ impl Sim {
                                 .take()
                                 .unwrap_or((self.faults.crashes % (count as u64 + 1)) as usize);
                             for n in self.unlink_aside(c, node, &hidden, k) {
-                                if let Some(seen) = self.base_seen(c, n) {
+                                if let Some(seen) = self.seen_by_user(c, n) {
                                     self.ledger.delete_commit_lost(c, n, seen);
                                 }
                             }

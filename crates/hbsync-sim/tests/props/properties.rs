@@ -238,6 +238,27 @@ proptest! {
         run_with(3, None, setup, &events)?;
     }
 
+    /// [`a_writing_member_writes_only_what_it_may_and_converges`] with the mass-delete guard
+    /// on (a low limit, so it trips often; §7): the member's deletes of what it may change
+    /// are held as an own drive's and sent only once confirmed; put back, they are undone
+    /// here without a write to the drive (the items come down again), while a removal made
+    /// there, which only its owner restores, stays held till confirmed. Whatever the users
+    /// answer, the clients converge without loss.
+    #[test]
+    fn a_guarded_writing_member_confirms_or_puts_back_its_own_deletes(
+        events in proptest::collection::vec(
+            prop_oneof![
+                8 => events_of(3, editing_action()),
+                1 => (0usize..3).prop_map(|client| Event::Confirm { client }),
+                1 => (0usize..3).prop_map(|client| Event::PutBack { client }),
+            ],
+            0..120,
+        ),
+        min in 1usize..3,
+    ) {
+        run_with(3, Some(min), |sim| sim.with_writing_member(2), &events)?;
+    }
+
     /// A device's folder that holds what other identities share (§10) is its own: nothing in
     /// it is synced and its name is held against the drive's, whatever the others make of that
     /// name, while its marker goes and comes back (`ToggleIgnore`: a plain folder meanwhile,
@@ -333,6 +354,19 @@ proptest! {
         events in proptest::collection::vec(events_of(4, orphaning_action()), 0..120)
     ) {
         run_with(3, None, Sim::with_role_device, &events)?;
+    }
+
+    /// A newer client moves synced nodes into folders no client reads, while the users edit,
+    /// delete and tag, and other devices delete folders, stop half way, restore and purge
+    /// ([`waiting_event`]): what waits for such a folder stays as it is where a device has
+    /// it, edited or not; edited, it keeps the folders it is in on that device, gone on the
+    /// drive (sync semantics §6.3). Everything else converges, without loss. (Not in a read-only folder:
+    /// an edit there that waits goes with its folder's delete, a known gap of the engine's.)
+    #[test]
+    fn what_waits_for_a_folder_no_client_reads_keeps_its_edit(
+        events in proptest::collection::vec(waiting_event(3), 0..120)
+    ) {
+        run_with(3, None, with_a_tree_and_a_newer_folder, &events)?;
     }
 
     /// A download fetches, then puts in place and commits a step later: meanwhile the drive

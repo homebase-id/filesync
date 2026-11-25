@@ -26,6 +26,13 @@ use crate::model::server::{Server, ServerNode, time};
 use crate::oracle::Seen;
 use crate::tagbook::Limit;
 
+/// A node of the drive as a user sees it ([`Seen`]).
+///
+/// [`Seen`]: crate::oracle::Seen
+fn seen(n: &NodeState) -> Seen {
+    (n.parent, n.name.clone(), n.content.map(|c| c.hash))
+}
+
 impl Sim {
     /// The server as client `c`'s folder sees it ([`Coords`]).
     pub(crate) fn server_view(&self, c: usize) -> Tree {
@@ -226,6 +233,60 @@ impl Sim {
         let state = NodeState::file(folder, NAMES[0], self.new_blob());
         self.server.put(file, state);
         self.server.unreadable.insert(folder, [file].into());
+    }
+
+    /// What [`Action::IntoNewer`] picks from: the drive's live nodes [`Action::IntoFile`] may
+    /// move, but what is in a folder no client reads at any depth (it waits already), and the
+    /// folders no client reads that are live. (Such a folder is at the drive's top, and none
+    /// is moved: nothing moved into one holds it.)
+    fn newer_move_candidates(&self) -> (Vec<NodeId>, Vec<NodeId>) {
+        let server = &self.server;
+        let folders: Vec<NodeId> = (server.unreadable.keys())
+            .filter(|f| server.live.contains_key(f))
+            .copied()
+            .collect();
+        let tree = server.tree();
+        let waits = |n: &NodeId| {
+            (tree.ancestors(*n).into_iter()).any(|a| server.unreadable.contains_key(&a))
+        };
+        let (nodes, _) = self.file_move_candidates();
+        let nodes = nodes.into_iter().filter(|n| !waits(n)).collect();
+        (nodes, folders)
+    }
+
+    /// For scripted tests: the picks of [`Action::IntoNewer`] that move `node` into the folder
+    /// no client reads named `folder` at the drive's top (no client has its id).
+    pub fn newer_move_picks(&self, node: NodeId, folder: &str) -> Option<(usize, usize)> {
+        let (nodes, folders) = self.newer_move_candidates();
+        let named = |f: &NodeId| self.server.live[f].state.name == folder;
+        let pick = nodes.iter().position(|m| *m == node)?;
+        Some((pick, folders.iter().position(named)?))
+    }
+
+    /// [`Action::IntoNewer`].
+    fn move_into_newer(&mut self, pick: usize, folder: usize) {
+        let (nodes, folders) = self.newer_move_candidates();
+        let (Some(&node), Some(&into)) = (
+            nodes.get(pick % nodes.len().max(1)),
+            folders.get(folder % folders.len().max(1)),
+        ) else {
+            return;
+        };
+        // Never into itself (a cycle), and at a name free there, as any client keeps names.
+        let tree = self.server.tree();
+        let name = &self.server.live[&node].state.name;
+        if tree.ancestors(into).contains(&node) || tree.child_named(into, name, None).is_some() {
+            return;
+        }
+        let version = VersionTag(self.server.uuid());
+        if let Some(n) = self.server.live.get_mut(&node) {
+            n.state.parent = into;
+            n.remote.version = version;
+            self.server
+                .moved_in
+                .insert(node, (n.remote.file_id, version));
+        }
+        self.server.unreadable.entry(into).or_default().insert(node);
     }
 
     /// [`Action::IntoFile`].
@@ -605,6 +666,7 @@ impl Sim {
             Action::DeleteOutright { pick } => self.delete_outright(pick),
             Action::IntoFile { pick, file } => self.move_into_file(pick, file),
             Action::NewerFolder { name } => self.newer_folder(name),
+            Action::IntoNewer { pick, folder } => self.move_into_newer(pick, folder),
             Action::MoveAcross { file } => {
                 let Some(&(a, b)) = self.computers.iter().find(|(a, b)| *a == c || *b == c) else {
                     return;
@@ -854,8 +916,10 @@ impl Sim {
     /// in pages the rest of its sweep, as [`Sim::quiesce`] runs it). What a later page held
     /// meanwhile stays held, shown again.
     pub(crate) fn put_back(&mut self, c: usize) {
-        // Read-only (§13), the engine refuses it: what is held stays held.
-        if self.clients[c].read_only {
+        // Read-only (§13), the engine refuses it: what is held stays held. But in a folder
+        // that writes there, whose own deletes (removals there) are put back, below.
+        let (read_only, writes) = (self.clients[c].read_only, self.clients[c].writes);
+        if read_only && !writes {
             return;
         }
         let held = std::mem::take(&mut self.clients[c].held);
@@ -867,6 +931,15 @@ impl Sim {
             rounds += 1;
         }
         self.clients[c].held.retain(|n| !held.contains(n));
+        if read_only {
+            // Only the deletes made here, their bases forgotten: nothing is restored on
+            // another identity's drive, and a removal made there is held again by the next
+            // plan.
+            let Ok((bases, _)) =
+                self.with_sides(c, |sides| hbsync_engine::held::put_back_here(&held, sides));
+            self.forget_bases(c, &bases);
+            return;
+        }
         // What it puts back, for the check after it: what was synced of the held, but not one
         // gone here and not live on the drive (removed there too: its state wins, §7). One a
         // crash left aside comes back at recovery, and the plan follows the drive.
@@ -1145,9 +1218,30 @@ impl Sim {
     /// The user of client `c` took its item `node` out of what it syncs (a delete, a move to
     /// another folder, a filter rule): as they saw it, as the client's base has it.
     pub(crate) fn user_removed(&mut self, c: usize, node: NodeId) {
-        if let Some(seen) = self.base_seen(c, node) {
+        if let Some(seen) = self.seen_by_user(c, node) {
             self.ledger.user_deleted(c, node, seen);
         }
+    }
+
+    /// Client `c`'s node `node` as its user saw it on the drive: as its base has it
+    /// ([`Sim::base_seen`]), but a member's at the drive's place where only the place differs.
+    /// A member reads a node at its top while the node's folder isn't shared, and that place
+    /// changes with the folder's share, without a move on the drive: the base at the top, of
+    /// the drive's name and bytes and at its version (a share given or withdrawn keeps it),
+    /// the user saw the drive's node as it is, which only a move there takes elsewhere.
+    /// (The version alone doesn't say so: a settle moves the base to it whatever was agreed.)
+    pub(crate) fn seen_by_user(&self, c: usize, node: NodeId) -> Option<Seen> {
+        let client = &self.clients[c];
+        let base = self.base_seen(c, node)?;
+        let drive = self.whole.as_ref().unwrap_or(&self.server);
+        let there = drive.live.get(&node).filter(|_| client.member);
+        let on_drive = there.map(|n| seen(&n.state)).filter(|on_drive| {
+            let synced = (client.extra.get(&node))
+                .is_some_and(|e| e.version == there.map(|n| n.remote.version));
+            let at_top = base.0 == client.coords.to_drive(NodeId::ROOT);
+            synced && at_top && base.1 == on_drive.1 && base.2 == on_drive.2
+        });
+        Some(on_drive.unwrap_or(base))
     }
 
     /// Client `c`'s base of `node`, as the drive would have it ([`Seen`]).
@@ -1163,12 +1257,19 @@ impl Sim {
         ))
     }
 
+    /// Live `node` as the whole drive has it, where a member's view stands in for the drive
+    /// ([`Sim::as_member`]; else `None`). A member reads a file at the top once its folder's
+    /// share is withdrawn, where the drive still has it in the folder: no move made there,
+    /// and none to win over a delete of the member's user, who had it in the folder.
+    pub(crate) fn on_whole_drive(&self, node: NodeId) -> Option<Seen> {
+        Some(seen(&self.whole.as_ref()?.live.get(&node)?.state))
+    }
+
     /// Live `node` as the drive has it, but for its tags ([`Seen`]).
     ///
     /// [`Seen`]: crate::oracle::Seen
     pub(crate) fn on_drive(&self, node: NodeId) -> Option<Seen> {
-        let n = &self.server.live.get(&node)?.state;
-        Some((n.parent, n.name.clone(), n.content.map(|c| c.hash)))
+        Some(seen(&self.server.live.get(&node)?.state))
     }
 
     /// `node` left the drive (a delete won): it settles the tag removals made before it.
