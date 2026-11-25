@@ -576,6 +576,11 @@ impl Sim {
                 // has stay, and the orphan isn't fetched. (Not for a client whose filter or
                 // scope leaves the place out, a read-only one, or a member: none of those is
                 // in a property that moves nodes into a folder no client reads.)
+                // Not checked from here on, knowingly: that the client doesn't fetch such an
+                // orphan after all (held or not, it is set aside; the rule against placing
+                // what waits looks for a folder no client reads above it on the drive, and
+                // the orphan has none there). Nor followed: a folder of the chain known from
+                // Recently deleted alone, or taken along, as the engine knows them.
                 let orphans: Vec<(NodeId, NodeId)> = (drive.iter())
                     .filter(|(n, s)| {
                         !aside.contains(n)
@@ -604,7 +609,8 @@ impl Sim {
                     };
                     if waits {
                         *orphan_waits.entry(n).or_default() += 1;
-                        for k in std::iter::once(n).chain(chain) {
+                        // With what the drive has in the orphan: it waits with it.
+                        for k in below(&drive, n).into_iter().chain(chain) {
                             orphan_out.insert(k);
                             if visible.contains(k) {
                                 aside.insert(k);
