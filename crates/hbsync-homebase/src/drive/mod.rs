@@ -899,7 +899,7 @@ impl HomebaseRemote {
                 let for_shares = may_be_for_shares(&e);
                 let e = self.write_error(e);
                 match &shared {
-                    Some(given) if for_shares => self.sent_shared(e, meta, &given.folder),
+                    Some(given) if for_shares => self.sent_shared(e, meta, given),
                     // Refused without shares too: it wasn't for them the last time.
                     None if for_shares && target.is_none() => {
                         self.folders.not_for_its_shares(meta.parent);
@@ -927,7 +927,7 @@ impl HomebaseRemote {
         // looks at them once the bytes are in, and writes them whatever became of the
         // folder's meanwhile. Nothing takes one back here yet: said, where that may be.
         if let Some(given) = &shared {
-            let as_then = |now: Shares| Arc::ptr_eq(&now, &given.folder);
+            let as_then = |now: Shares| now[..] == given.folder[..];
             if !self.folders.known(meta.parent).is_some_and(as_then) {
                 tracing::warn!(
                     "{:?} went up shared as its folder was when its upload began: how the \
@@ -961,15 +961,30 @@ impl HomebaseRemote {
         feed_page(|body| self.query_batch(body), cursor, limit, shape)
     }
 
-    /// What becomes of the error `e` of an upload of the new node `meta` that carried the
-    /// shares `sent`, where the server's refusal may be for them ([`may_be_for_shares`]): a
-    /// circle disabled or gone since, a share that ended on the way (the server looks at the
-    /// shares only once the bytes are in). The file is to go up all the same: it is tried
-    /// again soon, without them ([`Folders::refused`]; or, where the folder was read again
-    /// meanwhile, with what it shares now). One refused for something else is refused again
-    /// then, and held (or stops the sync) as any other.
-    fn sent_shared(&self, e: RemoteError, meta: &NodeMeta, sent: &Shares) -> RemoteError {
-        if self.folders.refused(meta.parent, sent) {
+    /// What becomes of the error `e` of an upload of the new node `meta` that went up
+    /// shared as `given`, where the server's refusal may be for the shares
+    /// ([`may_be_for_shares`]): a circle disabled or gone since, a share that ended on the
+    /// way (the server looks at the shares only once the bytes are in). The file is to go
+    /// up all the same, so it is tried again soon:
+    /// - where a share that was sent has ended since, with the folder's shares read again
+    ///   (the ones that last: the others weren't refused);
+    /// - else without them, as is what is added to that folder for a while
+    ///   ([`Folders::refused`]; where the folder changed meanwhile, with what it shares now).
+    ///   Which share it was for, the server doesn't say: none is given. The circles' keys
+    ///   are asked again by then, and the share of a circle that is gone is left out
+    ///   ([`HomebaseRemote::own_circle`]).
+    ///
+    /// One refused for something else is refused again then, and held (or stops the sync)
+    /// as any other. Told as an outage is (there is no class for one node sent again at
+    /// once): what else was to go up waits one backoff.
+    fn sent_shared(&self, e: RemoteError, meta: &NodeMeta, given: &Given) -> RemoteError {
+        let now = hbsync_types::unix_now_ms();
+        let mut circles = self.circles.lock().unwrap_or_else(|e| e.into_inner());
+        circles.retain(|circle, _| !given.shares.iter().any(|share| share.circle == *circle));
+        drop(circles);
+        if given.shares.iter().any(|share| !share.lasts(now, 0)) {
+            self.folders.forget(meta.parent);
+        } else if self.folders.refused(meta.parent, &given.folder) {
             tracing::warn!(
                 "{:?} was refused with its folder's shares ({e}): what is added to that \
                  folder goes up unshared for now",
@@ -994,7 +1009,11 @@ impl HomebaseRemote {
             }
             events.send(event)
         };
-        Notifier::spawn(self.client.clone(), self.drive, Events::to(heard))
+        let notifier = Notifier::spawn(self.client.clone(), self.drive, Events::to(heard))?;
+        // Asked to connect again (this computer woke, the network changed) or stopped, the
+        // connection it had hears nothing more, and says so only once the next is made.
+        let remote = Arc::clone(self);
+        Ok(notifier.before_it_drops_a_connection(move || remote.folders.listening(false)))
     }
 
     /// How `folder` of this drive, a private one, is shared: what a node added to it goes up
@@ -1043,6 +1062,12 @@ impl HomebaseRemote {
             tracing::warn!(
                 "{} of a folder's shares can't be read: what is added to it isn't given them",
                 read.unread
+            );
+        }
+        if read.shares.len() > MOST_SHARES {
+            tracing::warn!(
+                "a folder has more shares than a new file goes up with: what is added to \
+                 it is given {MOST_SHARES} of them"
             );
         }
         // (A tombstone still lists the rows it had: nothing is shared by it.)
@@ -1128,11 +1153,6 @@ impl HomebaseRemote {
         let now = hbsync_types::unix_now_ms();
         let lasting = folder.iter().filter(|share| share.lasts(now, size));
         let shares: Shares = lasting.take(MOST_SHARES).copied().collect();
-        if folder.len() > MOST_SHARES {
-            tracing::warn!(
-                "a folder has more shares than a new file goes up with: {MOST_SHARES} are given"
-            );
-        }
         let given = (shares.iter()).map(|s| (s.circle, s.permissions, s.expires_at));
         let sent = new_shares(key, given, |circle| self.own_circle(circle))?;
         let given = Given {
@@ -2788,14 +2808,13 @@ mod tests {
         };
         let shares = [share(opens, None), share(lacks, None)];
         (remote.folders).made(folder, at(100, 10), Arc::from(shares));
-        let Given {
-            shares: as_given,
-            sent,
-            folder: as_known,
-        } = given(folder, 0)?.ok_or("shared")?;
-        assert_eq!(*as_given, shares, "what a folder made here shares in turn");
-        assert_eq!(sent.shares.len(), 1, "{:?}", sent.shares);
-        let row = &sent.shares[0];
+        let went = given(folder, 0)?.ok_or("shared")?;
+        assert_eq!(
+            *went.shares, shares,
+            "what a folder made here shares in turn"
+        );
+        assert_eq!(went.sent.shares.len(), 1, "{:?}", went.sent.shares);
+        let row = &went.sent.shares[0];
         assert_eq!(
             (&row["circleId"], &row["permissions"]),
             (&json!(opens), &json!(3))
@@ -2805,7 +2824,8 @@ mod tests {
             (&json!(Uuid::nil()), &json!(null))
         );
         let locked = STANDARD.decode(row["lockedFileKey"].as_str().ok_or("a key")?)?;
-        let opened = circle_key.file_key(&locked, Uuid::new_v4(), Some(sent.global_transit_id))?;
+        let bound_to = Some(went.sent.global_transit_id);
+        let opened = circle_key.file_key(&locked, Uuid::new_v4(), bound_to)?;
         assert_eq!(opened, key.key, "bound to the transit id it goes up with");
 
         // A share that ends before the upload can be up isn't given: by the file's size.
@@ -2817,23 +2837,36 @@ mod tests {
         assert!(given(ending, 1 << 30)?.is_none(), "a gigabyte takes longer");
 
         // Refused by the server with an upload that carried them: tried again soon, and
-        // none are given for now. Only for the shares that were sent: a folder read again
-        // since shares what it shares now.
-        let meta = NodeMeta {
+        // none are given for now; the keys of the circles sent are asked again by then.
+        let meta = |parent: NodeId| NodeMeta {
             node: NodeId::new(),
-            parent: folder,
+            parent,
             kind: NodeKind::File,
             content: NodeContent::file("added", 1, 1, false),
             removed: false,
         };
         let refused = || RemoteError::Fatal("400".into());
-        let other: Shares = Arc::from(shares);
-        let again = remote.sent_shared(refused(), &meta, &other);
-        assert!(matches!(again, RemoteError::Transient(_)), "{again:?}");
-        assert!(given(folder, 0)?.is_some(), "not the shares it has now");
-        let again = remote.sent_shared(refused(), &meta, &as_known);
+        let keys = || remote.circles.lock().expect("unpoisoned").len();
+        assert_eq!(keys(), 2);
+        let again = remote.sent_shared(refused(), &meta(folder), &went);
         assert!(matches!(again, RemoteError::Transient(_)), "{again:?}");
         assert!(given(folder, 0)?.is_none());
+        assert_eq!(keys(), 0);
+
+        // Refused as a share that was sent has ended since: not for the others. The folder
+        // is read again (nothing answers here), and what lasts of it is given then.
+        (remote.circles.lock().expect("unpoisoned")).insert(opens, Some(circle_key));
+        let went = given(ending, 0)?.ok_or("shared")?;
+        let ended = Given {
+            shares: Arc::from([share(opens, Some(hbsync_types::unix_now_ms() - 1))]),
+            ..went
+        };
+        let again = remote.sent_shared(refused(), &meta(ending), &ended);
+        assert!(matches!(again, RemoteError::Transient(_)), "{again:?}");
+        assert!(
+            given(ending, 0).is_err(),
+            "asked about again, not taken as unshared"
+        );
         Ok(())
     }
 

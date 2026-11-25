@@ -96,6 +96,31 @@ pub struct ShareRow {
     pub permissions: u32,
 }
 
+/// A share row's `permissions` read strictly ([`shared_folder`]): a number, or names this
+/// client knows every one of. A name it doesn't know fails the row, where [`permissions`]
+/// leaves the name out: a new file would be given less than its folder's row gives.
+fn all_permissions<'de, D>(d: D) -> Result<u32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error;
+    let sent = Value::deserialize(d)?;
+    let unknown = |name: &str| D::Error::custom(format!("a permission not known: {name:?}"));
+    match &sent {
+        Value::Number(n) => {
+            (n.as_u64().and_then(|n| u32::try_from(n).ok())).ok_or_else(|| unknown(&n.to_string()))
+        }
+        Value::String(names) => names.split(',').try_fold(0, |all, name| {
+            let flags = permissions(json!(name.trim())).map_err(|_| unknown(name))?;
+            // (No bits: a name [`permissions`] doesn't know. The server names no flag so.)
+            (flags != 0)
+                .then_some(all | flags)
+                .ok_or_else(|| unknown(name))
+        }),
+        other => Err(unknown(&other.to_string())),
+    }
+}
+
 /// A share row's `permissions` as odin-core's `DrivePermission` flags ([`crate::app`]'s
 /// `READ`, `WRITE`, `REACT`, `COMMENT`): the server names them (`"read"`,
 /// `"read, write"`, `"readWrite"` for all four; **[verified]** live, odin-core 3ace44b69, and
@@ -516,7 +541,7 @@ pub(crate) fn shared_folder(row: &str) -> Result<SharedFolder, serde_json::Error
     #[serde(rename_all = "camelCase")]
     struct Shared {
         circle_id: Uuid,
-        #[serde(deserialize_with = "permissions")]
+        #[serde(deserialize_with = "all_permissions")]
         permissions: u32,
         #[serde(default)]
         expires_at: Option<i64>,
@@ -1839,10 +1864,13 @@ mod tests {
                 { "circleId": circle(3), "permissions": 1 },
                 // Withdrawn: no bits.
                 { "circleId": circle(4), "permissions": 0 },
-                // These don't read: an end that isn't a time, no circle, no permissions.
+                // These don't read: an end that isn't a time, no circle, no permissions, a
+                // permission this client doesn't know.
                 { "circleId": circle(5), "permissions": "read", "expiresAt": "soon" },
                 { "circleId": "x", "permissions": "read" },
                 { "circleId": circle(6) },
+                { "circleId": circle(7), "permissions": "read, someLaterOne" },
+                { "circleId": circle(8), "permissions": null },
                 "a row",
             ]),
         )?;
@@ -1862,7 +1890,7 @@ mod tests {
                 (circle(3), 1, None)
             ]
         );
-        assert_eq!(read.unread, 4);
+        assert_eq!(read.unread, 6);
         // No shares at all on the row: none, and nothing unread.
         let none = folder("active", Value::Null)?;
         assert!(none.shares.is_empty() && none.unread == 0);

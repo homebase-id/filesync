@@ -33,8 +33,9 @@ const REFUSED: Duration = Duration::from_secs(3600);
 /// and the notifications' connection it was learnt under heard nothing in that time.
 const SLEPT: Duration = Duration::from_secs(30);
 
-/// More folders than this known: the ones no longer gone by are dropped as the next is
-/// learnt (about 150 bytes each).
+/// More folders than this known (about 180 bytes each): the ones no longer gone by are
+/// dropped as the next is learnt, and where that leaves three quarters or more, the quarter
+/// asked about longest ago (a folder dropped is read again, if it is added to again).
 const MANY: usize = 65_536;
 
 /// As many changes told while one read is on its way are kept to check it against; more,
@@ -110,6 +111,8 @@ struct Known {
     listening: Option<u64>,
     /// The server refused its shares with an upload ([`Folders::refused`]): none are given.
     refused: bool,
+    /// When it was last asked about ([`State::asked`]).
+    asked: u64,
 }
 
 /// The one read of a folder's shares on its way ([`Folders::reading`]), and what was told
@@ -147,9 +150,8 @@ struct State {
     connects: u64,
     listening: Option<u64>,
     reading: Option<Reading>,
-    /// As many folders known has the ones not gone by any more dropped ([`MANY`], then
-    /// twice what was left).
-    full: usize,
+    /// Counts the folders learnt and asked about ([`Known::asked`]).
+    asked: u64,
 }
 
 impl State {
@@ -177,16 +179,11 @@ impl State {
     /// `folder` is shared as `shares`: the file `at`, or (`None`) one the notifications
     /// can't name, which their connection doesn't vouch for.
     fn learn(&mut self, folder: NodeId, at: Option<RemoteRef>, shares: Shares) {
-        if self.folders.len() >= self.full.max(MANY) {
-            let mut folders = std::mem::take(&mut self.folders);
-            folders.retain(|_, known| self.holds(known));
-            self.by_file
-                .retain(|_, folder| folders.contains_key(folder));
-            // (Where most are still gone by, not at every folder learnt from here on.)
-            self.full = folders.len() * 2;
-            self.folders = folders;
+        if self.folders.len() >= MANY {
+            self.make_room();
         }
         self.forget(folder);
+        self.asked += 1;
         let known = Known {
             file_id: at.map(|at| at.file_id.0),
             version: at.map(|at| at.version.0).unwrap_or_default(),
@@ -194,11 +191,31 @@ impl State {
             learnt: At::now(),
             listening: self.listening.filter(|_| at.is_some()),
             refused: false,
+            asked: self.asked,
         };
         self.folders.insert(folder, known);
         if let Some(at) = at {
             self.by_file.insert(at.file_id.0, folder);
         }
+    }
+}
+
+impl State {
+    /// Drops the folders no longer gone by; and where that leaves three quarters of
+    /// [`MANY`] or more (a tree of that many folders made in one go, all still vouched
+    /// for), the quarter asked about longest ago: a scan of all, once per quarter learnt.
+    fn make_room(&mut self) {
+        let mut folders = std::mem::take(&mut self.folders);
+        folders.retain(|_, known| self.holds(known));
+        if folders.len() >= MANY / 4 * 3 {
+            let mut asked: Vec<u64> = folders.values().map(|known| known.asked).collect();
+            let (_, oldest_kept, _) = asked.select_nth_unstable(MANY / 4);
+            let oldest_kept = *oldest_kept;
+            folders.retain(|_, known| known.asked >= oldest_kept);
+        }
+        self.by_file
+            .retain(|_, folder| folders.contains_key(folder));
+        self.folders = folders;
     }
 }
 
@@ -245,9 +262,13 @@ impl Folders {
     /// didn't sleep, else for [`KEPT`]. A folder whose shares the server refused has none
     /// for [`REFUSED`].
     pub(crate) fn known(&self, folder: NodeId) -> Option<Shares> {
-        let state = self.state();
-        let known = state.folders.get(&folder)?;
-        (state.holds(known)).then(|| Arc::clone(&known.shares))
+        let mut state = self.state();
+        state.asked += 1;
+        let asked = state.asked;
+        let holds = state.holds(state.folders.get(&folder)?);
+        let known = state.folders.get_mut(&folder)?;
+        known.asked = asked;
+        holds.then(|| Arc::clone(&known.shares))
     }
 
     /// The notifications connected (`true`), or their connection broke. What was learnt
@@ -322,20 +343,25 @@ impl Folders {
 
     /// The server refused an upload into `folder` that carried the shares `sent`: what is
     /// added to it goes up without them for [`REFUSED`], or until the folder changes. Only
-    /// where `sent` is still what is known of the folder (whether it was): one read again
-    /// meanwhile shares what it shares now, which nothing refused.
+    /// where `sent` is still how the folder is known to be shared (whether it was): one
+    /// that changed meanwhile shares what it shares now, which nothing refused.
     pub(crate) fn refused(&self, folder: NodeId, sent: &Shares) -> bool {
         let mut state = self.state();
         let Some(known) = state.folders.get_mut(&folder) else {
             return false;
         };
-        if !Arc::ptr_eq(&known.shares, sent) {
+        if known.shares[..] != sent[..] {
             return false;
         }
         known.shares = Shares::default();
         known.learnt = At::now();
         known.refused = true;
         true
+    }
+
+    /// Nothing is known of `folder` any more: it is read again when next added to.
+    pub(crate) fn forget(&self, folder: NodeId) {
+        self.state().forget(folder);
     }
 
     /// An upload into `folder` was refused without shares too: it wasn't for them that the
@@ -369,7 +395,10 @@ impl Folders {
     /// A feed row of a folder: one that isn't as it was learnt (another version, or changed
     /// since its version was written, as a share given or withdrawn changes it) is read
     /// again when next added to. This computer's own write of a folder comes back as it was
-    /// made, and stays known.
+    /// written, and stays known; but for a folder it made with shares, whose share rows the
+    /// server writes a millisecond after the header (**[verified]** live 2026-11-26, and
+    /// odin-core `WriteUploadShares`): that one is read once when next added to after the
+    /// feed was read.
     pub(crate) fn fed(&self, row: Fed) {
         let mut state = self.state();
         let same = |known: &Known| row.as_written && known.version == row.version;
@@ -635,11 +664,15 @@ pub(crate) mod tests {
             "it changed: read and tried again"
         );
 
-        // Read again since the upload began: what it shares now wasn't refused.
+        // Changed since the upload began: what it shares now wasn't refused. Read again
+        // as it was, it is what was refused.
         let now: Shares = Arc::from([share(8, None)]);
         folders.made(a, at(100, 10), Arc::clone(&now));
         assert!(!folders.refused(a, &sent));
         assert_eq!(folders.known(a), Some(Arc::clone(&now)));
+        folders.made(a, at(100, 10), Arc::from([share(7, None)]));
+        assert!(folders.refused(a, &sent), "the same shares, read again");
+        folders.made(a, at(100, 10), Arc::clone(&now));
 
         folders.not_for_its_shares(a);
         assert!(folders.known(a).is_some(), "not refused: left as it is");
@@ -661,8 +694,8 @@ pub(crate) mod tests {
         folders.made(node(one_more), at(one_more, 1), Shares::default());
         let mut state = folders.state();
         assert_eq!((state.folders.len(), state.by_file.len()), (1, 1));
-        assert_eq!(state.full, 0, "few left: as many as before fill it again");
-        // Heard all the while, none is dropped however long ago it was learnt.
+        // Heard all the while, all are still gone by: the quarter asked about longest ago
+        // goes, and one asked about since stays.
         state.folders.clear();
         state.by_file.clear();
         drop(state);
@@ -671,10 +704,15 @@ pub(crate) mod tests {
             folders.made(node(n + 1), at(n + 1, 1), Shares::default());
         }
         assert!(aged(&folders, KEPT));
+        assert!(
+            folders.known(node(1)).is_some(),
+            "the first learnt, asked about last"
+        );
         folders.made(node(one_more), at(one_more, 1), Shares::default());
         let state = folders.state();
-        assert_eq!(state.folders.len(), MANY + 1);
-        assert_eq!(state.full, MANY * 2);
+        let kept = MANY - MANY / 4 + 1;
+        assert_eq!((state.folders.len(), state.by_file.len()), (kept, kept));
+        assert!(state.folders.contains_key(&node(1)) && !state.folders.contains_key(&node(2)));
     }
 
     #[test]

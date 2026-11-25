@@ -150,6 +150,9 @@ pub struct Received {
 #[derive(Debug)]
 pub struct Notifier {
     control: Arc<Control>,
+    /// Called before a connection is dropped on purpose
+    /// ([`Notifier::before_it_drops_a_connection`]).
+    dropping: Option<Dropping>,
     /// Counted by the connection's thread, read with the `dev` feature.
     #[cfg_attr(not(feature = "dev"), allow(dead_code))]
     received: Arc<Received>,
@@ -217,7 +220,28 @@ impl Notifier {
                 };
                 run(connection, &events, &told)
             })?;
-        Ok(Notifier { control, received })
+        Ok(Notifier {
+            control,
+            dropping: None,
+            received,
+        })
+    }
+
+    /// Calls `told` before the connection is dropped on purpose ([`Notifier::reconnect`], or
+    /// as the notifier goes): no event says that it was, and the next one comes only once
+    /// another connection is made (or fails).
+    pub(crate) fn before_it_drops_a_connection(
+        mut self,
+        told: impl Fn() + Send + Sync + 'static,
+    ) -> Self {
+        self.dropping = Some(Dropping(Box::new(told)));
+        self
+    }
+
+    fn dropping(&self) {
+        if let Some(Dropping(told)) = &self.dropping {
+            told();
+        }
     }
 
     /// What it received so far (measurements).
@@ -230,12 +254,23 @@ impl Notifier {
     /// the machine woke up or the network changed, the old connection is most likely dead
     /// but would take a while to look it.
     pub fn reconnect(&self) {
+        self.dropping();
         self.control.tell(&self.control.reconnect);
+    }
+}
+
+/// What a notifier calls before it drops a connection on purpose.
+struct Dropping(Box<dyn Fn() + Send + Sync>);
+
+impl std::fmt::Debug for Dropping {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Dropping(..)")
     }
 }
 
 impl Drop for Notifier {
     fn drop(&mut self) {
+        self.dropping();
         self.control.tell(&self.control.stop);
     }
 }
@@ -869,6 +904,28 @@ mod tests {
 
     fn n(body: serde_json::Value) -> Notification {
         classify(body.to_string().as_bytes())
+    }
+
+    /// A notifier says before it drops its connection on purpose: asked to connect again,
+    /// and as it goes. No event tells of either.
+    #[test]
+    fn a_connection_dropped_on_purpose_is_told_first() {
+        let told = Arc::new(AtomicU64::new(0));
+        let count = Arc::clone(&told);
+        let notifier = Notifier {
+            control: Arc::new(Control::default()),
+            dropping: None,
+            received: Arc::new(Received::default()),
+        }
+        .before_it_drops_a_connection(move || {
+            count.fetch_add(1, Ordering::Relaxed);
+        });
+        assert_eq!(told.load(Ordering::Relaxed), 0);
+        notifier.reconnect();
+        assert_eq!(told.load(Ordering::Relaxed), 1);
+        assert!(notifier.control.reconnect.load(Ordering::Relaxed));
+        drop(notifier);
+        assert_eq!(told.load(Ordering::Relaxed), 2);
     }
 
     /// Connected and quiet, a read blocks until the ping is due, never on a short tick;

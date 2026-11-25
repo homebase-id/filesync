@@ -992,9 +992,14 @@ shares a folder writes the rows of what is in it then (**[verified]** chat-kmp
   circle, and never changed: read once per circle and run.
 - **What it costs.** The first node added to a folder in a run: one `query-batch` for that
   folder (9 ms on the dev server), and one key read per circle not read yet. Every later
-  one there, and everything added to a folder this computer made itself: nothing (a new
-  folder with a folder and four files in it went up in its six uploads; **[verified]**
-  live). At the top of the drive, and on a drive that isn't private, nothing is asked.
+  one there: nothing (40 files added at once: 40 uploads, one read of the folder, one of
+  the key; **[verified]** live). A new tree goes up in its uploads alone while they are one
+  batch (a folder with a folder and four files: six uploads), and stays so where it is
+  shared with no one. A folder made **with** shares is read once more when next added to
+  after the feed was read: the server writes its share rows a millisecond after its
+  header, so its own row comes back as changed since it was written (**[verified]** live
+  2026-11-26: `updated` 1 ms past `versionUpdated`). At the top of the drive, and on a
+  drive that isn't private, nothing is asked.
 - **How long what was read is gone by: while a change would be told.** A share given or
   withdrawn keeps the folder's version and moves its `updated` alone; it is announced to
   the owner's other devices as a change of the folder at the version it has. This client
@@ -1004,8 +1009,9 @@ shares a folder writes the rows of what is in it then (**[verified]** chat-kmp
   withdrawn by another device, and a file added there 3 s later went up with no share,
   after one new read. So:
   - what was learnt while the notifications are connected is gone by for as long as that
-    one connection holds, and this computer doesn't sleep (the wall clock running ahead of
-    the steady one tells, on Linux and macOS);
+    one connection holds: until it breaks, the daemon asks for a new one (this computer
+    woke, the network changed) or the wall clock runs ahead of the steady one (a sleep
+    nobody told of, on Linux and macOS);
   - what was learnt otherwise, or under an earlier connection, for 10 minutes at most by
     both clocks: the feed is read every 5 minutes while they are down, and as they
     connect. So each reconnect costs one read per folder added to afterwards;
@@ -1029,9 +1035,16 @@ shares a folder writes the rows of what is in it then (**[verified]** chat-kmp
     `argumentError`, `circleShareKeyNotSet`, `invalidShareKey`, or a 403), is sent again a
     few seconds later without them (twice the bytes, once), and what is added to that
     folder goes up unshared for an hour, or until the folder changes: said in the log.
-    Nothing shares those files later. Refused without them too, it wasn't for the shares:
-    the folder is read, and shared, again, and the refusal is what it is (the login's own
-    403 stops the sync as ever).
+    Which share it was for, the server doesn't say: none is given, the other circles' too
+    (giving the rows one by one after the upload would tell: with the row routes, not
+    used yet). Nothing shares those files later. The circles' keys are asked again by
+    then, so the share of a circle that is gone is left out from there on, and the others
+    given. Where a share that was sent has ended meanwhile, it was for that one: the
+    folder is read again and the upload goes with what lasts. Refused without shares too,
+    it wasn't for the shares: the folder is read, and shared, again, and the refusal is
+    what it is (the login's own 403 stops the sync as ever). Not seen live: provoking one
+    needs a circle disabled or deleted in the owner console under a folder the fixture
+    shares.
   - A folder whose row isn't there, or doesn't read, is taken to share nothing for 10
     minutes: said in the log.
   - How the folder is shared not read because the server isn't reached fails the upload as
