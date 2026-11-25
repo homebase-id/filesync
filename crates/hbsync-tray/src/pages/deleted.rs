@@ -24,9 +24,9 @@ fn held_page(status: &FolderStatus, held: &HeldDeletes, url: &str) -> String {
     } else {
         ""
     };
-    let put_back = match sharer {
-        Some(_) if !(status.writes && held.here > 0) => "",
-        _ => " <button name=answer value=put_back>Put them back</button>",
+    let put_back = match status.puts_back(held) {
+        true => " <button name=answer value=put_back>Put them back</button>",
+        false => "",
     };
     format!(
         "<h1>{} deletions to review</h1>\
@@ -303,6 +303,18 @@ mod tests {
         let theirs = held_page(&status, &held, "/deletions");
         assert!(!theirs.contains("put_back") && theirs.contains("value=delete"));
         assert!(theirs.contains("removed by tom.example"), "{theirs}");
+        // A share that writes: no button either for what its sharer removed; one where it
+        // holds deletes of its own.
+        status.writes = true;
+        let theirs = held_page(&status, &held, "/deletions");
+        assert!(!theirs.contains("put_back"), "{theirs}");
+        let mixed = HeldDeletes { here: 2, ..held };
+        let own = held_page(&status, &mixed, "/deletions");
+        assert!(own.contains("value=put_back"), "{own}");
+        assert!(
+            own.contains("2 items that tom.example shares with you"),
+            "{own}"
+        );
     }
 
     /// Empty is offered only when emptying takes something; else the page says why not.

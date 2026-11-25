@@ -766,15 +766,16 @@ fn answer_held(paths: &Paths, yes: bool, answer: HeldAnswer) -> Res<()> {
         .folders
         .into_iter()
         .filter_map(|f| {
-            let paused = f.state == State::Paused;
-            Some((f.path, f.sharer, f.writes, paused, f.held_deletes?))
+            let held = f.held_deletes.clone()?;
+            let (paused, puts_back) = (f.state == State::Paused, f.puts_back(&held));
+            Some((f.path, f.sharer, puts_back, paused, held))
         })
         .collect();
     if held.is_empty() {
         println!("No deletions to review.");
         return Ok(());
     }
-    for (path, sharer, writes, paused, held) in held {
+    for (path, sharer, puts_back, paused, held) in held {
         println!("{}:", path.display());
         let (delete, put_back) = ("`hbsync confirm-deletes`", "`hbsync put-back`");
         for line in words::held_deletes(&held, sharer.as_ref(), delete, put_back) {
@@ -792,8 +793,7 @@ fn answer_held(paths: &Paths, yes: bool, answer: HeldAnswer) -> Res<()> {
         };
         // What another identity removed can't be put back: said above, not asked. (Its own
         // deletes, where the folder writes there, can.)
-        let own = writes && held.here > 0;
-        let unasked = answer == HeldAnswer::PutBack && sharer.is_some() && !own;
+        let unasked = answer == HeldAnswer::PutBack && !puts_back;
         if unasked || (!yes && !ask_yes(question)?) {
             println!("Nothing done; they are still to review.");
             continue;

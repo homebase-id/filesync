@@ -492,6 +492,13 @@ impl FolderStatus {
         self.kind == RootKind::Main && self.sharer.is_none()
     }
 
+    /// Whether `held`, deletes held in this folder, can be answered with a put back: not what
+    /// another identity removed from what they share (theirs alone to change); a share that
+    /// writes there holds its own deletes too, which can.
+    pub fn puts_back(&self, held: &HeldDeletes) -> bool {
+        self.sharer.is_none() || (self.writes && held.here > 0)
+    }
+
     /// Whether the identity refuses this computer (`Denied`, or `Paused` meanwhile): logging in
     /// again is the way out.
     pub fn refused(&self) -> bool {
