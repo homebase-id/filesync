@@ -750,14 +750,7 @@ impl<'a> Executor<'a> {
                 if let Err(e) = self.commit_ran(ran, &mut pending) {
                     first_error = Some(e);
                 }
-                // (Where the hold of writes on their way starts with writes still in the
-                // batch, those go back unsent: the rest of it starts again without them.)
-                let held = self.on_their_way.holds_writes()
-                    && pending.values().any(|p| p.op.writes_remote());
-                first_error.is_none()
-                    && !self.should_stop()
-                    && !self.schedule.backing_off()
-                    && !held
+                first_error.is_none() && !self.should_stop() && !self.schedule.backing_off()
             },
         );
         // What never started leaves no record (one that runs later writes its own).
