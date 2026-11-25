@@ -38,9 +38,9 @@ pub(crate) struct ExecReport {
     /// Writes on their way to another identity's drive were left for a later plan
     /// ([`Outcome::Wait`]): asked again no sooner than this (the soonest any said).
     pub not_before: Option<Duration>,
-    /// The nodes whose write is on its way there or was held, with what waits for one as
-    /// its folder: not asked again in the sync's later rounds.
-    pub on_its_way: std::collections::HashSet<hbsync_types::NodeId>,
+    /// What the sync's runs so far left on its way there, for its next run
+    /// ([`super::Executor::with_on_their_way`]).
+    pub on_their_way: super::OnTheirWay,
 }
 
 /// Why a run stopped before its plan was done.

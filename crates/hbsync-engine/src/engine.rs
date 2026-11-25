@@ -158,10 +158,7 @@ impl SyncReport {
         self.waiting.extend(later.waiting);
         self.left_aside = later.left_aside;
         self.unfinished = later.unfinished;
-        self.not_before = match (self.not_before, later.not_before) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
-        };
+        self.not_before = crate::time::sooner(self.not_before, later.not_before);
     }
 }
 
@@ -260,9 +257,9 @@ pub struct Engine {
     unreported: Option<SyncReport>,
     /// The folder's refusals ([`crate::refused`]).
     refusals: FolderRefusals,
-    /// The nodes whose write to another identity's drive was on its way, or held, in this
-    /// sync so far ([`Executor::with_on_its_way`]): from none at each sync's start.
-    on_its_way: std::collections::HashSet<NodeId>,
+    /// The writes to another identity's drive that were on their way, or held, in this sync
+    /// so far ([`Executor::with_on_their_way`]): from none at each sync's start.
+    on_their_way: crate::exec::OnTheirWay,
     /// What the folder holds of the drive, as set up ([`FolderKind`]).
     part: Part,
     /// A sync plans nothing while the folder of shares is to give way
@@ -354,7 +351,7 @@ impl Engine {
             progress: Arc::default(),
             rescanned: Default::default(),
             refusals: FolderRefusals::default(),
-            on_its_way: std::collections::HashSet::new(),
+            on_their_way: crate::exec::OnTheirWay::default(),
             waited: Waited::default(),
             unreported: None,
             part,
@@ -779,7 +776,7 @@ impl Engine {
         // (unpark), and what this one did is when it ends, however it ends: a power cut loses
         // at most the sync in progress (sync semantics §8a).
         self.db.flush()?;
-        self.on_its_way.clear();
+        self.on_their_way = crate::exec::OnTheirWay::default();
         let synced = self.sync_pass(date, pulled);
         // Best effort: a failure here leaves what was done undone in no way, and the next
         // sync's opening flush reports it.
@@ -1300,23 +1297,21 @@ impl Engine {
         .with_progress(Arc::clone(&self.progress))
         .with_full(self.drive.full())
         .with_refusals(refusals)
-        .with_on_its_way(std::mem::take(&mut self.on_its_way))
+        .with_on_their_way(std::mem::take(&mut self.on_their_way))
         .with_moved_out(&mut moved_out);
         self.refusals.running();
         let ran = exec.run(ops);
         report.moved_out.extend(moved_out);
         let exec = ran?;
         self.refusals.ran(exec.refused);
-        self.on_its_way = exec.on_its_way;
+        self.on_their_way = exec.on_their_way;
         self.drive.absorb(exec.news);
         // What was done counts, and the folders it asks to look at are looked at, however
         // the run ended.
         report.ops_done += exec.done;
         report.skipped.extend(exec.skipped);
         report.failed.extend(exec.failed);
-        if let Some(after) = exec.not_before {
-            report.not_before = Some(report.not_before.map_or(after, |s| s.min(after)));
-        }
+        report.not_before = crate::time::sooner(report.not_before, exec.not_before);
         let synced = activity::group(exec.synced, activity::GROUP_OVER);
         self.db
             .write(|s| s.folder().add_synced(&synced, activity::KEEP))?;

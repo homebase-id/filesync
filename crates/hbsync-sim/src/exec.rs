@@ -196,10 +196,13 @@ impl Sim {
             || (planned < 2 * nodes + 2 && !self.clients[c].pages.borrow().own.is_empty())
         {
             planned += 1;
-            // Another round of the same sync: what was on its way in it stays so.
+            // Another round of the same sync: what was on its way in it stays so, and how
+            // many in a row (the engine's `OnTheirWay`, a sync long).
             let on_its_way = self.clients[c].on_its_way.clone();
+            let waits = self.clients[c].waits;
             self.plan(c);
             self.clients[c].on_its_way.extend(on_its_way);
+            self.clients[c].waits = waits;
             // A page that holds deletes is one too: the user answers it (`Sim::quiesce`).
             let client = &self.clients[c];
             if !client.plan.is_empty() || !client.held.is_empty() {
@@ -303,8 +306,8 @@ impl Sim {
         if !self.clients[c].added || self.as_member(c, |sim| sim.plan(c)).is_some() {
             return;
         }
-        // A new sync: what was on its way is asked again, and a new run hears afresh (a page
-        // of the same sweep keeps the first: `Sim::next_page_planned`).
+        // A new sync: what was on its way is asked again, and it hears afresh (a page of the
+        // same sweep keeps both: `Sim::next_page_planned`).
         self.clients[c].on_its_way.clear();
         self.clients[c].waits = 0;
         // A run whose operations are left undone stopped (the engine's sync stopped: what its
@@ -3583,21 +3586,23 @@ impl Sim {
 
     /// Why the engine's executor leaves member `c`'s write `op` unsent, for a later plan,
     /// before it is asked of the drive (its `run_ops`): its node's write was on its way, or
-    /// held, in this sync; it goes into a folder whose own write was, which the mirror has no
-    /// row of yet (`goes_into_one_on_its_way`); or three in a row were on their way in this
-    /// run (`Heard::holds_writes`).
+    /// held, in this sync; it is made in, or moved into, a folder whose own write was
+    /// (`goes_into_one_on_its_way`); or three in a row were on their way in this sync
+    /// (`OnTheirWay::holds_writes`).
     pub(crate) fn held_back(&self, c: usize, op: &Op) -> Option<&'static str> {
         let client = &self.clients[c];
-        let into = match op {
-            Op::RemoteCreate { parent, .. } | Op::RemoteUpdate { parent, .. } => Some(*parent),
-            _ => None,
-        };
-        let no_row = |n: NodeId| {
-            !client.planned_remote.contains(n) && !client.planned_removed.contains_key(&n)
+        let waits = |folder: &NodeId| client.on_its_way.contains(folder);
+        let goes_into = match op {
+            Op::RemoteCreate { parent, .. } => waits(parent),
+            Op::RemoteUpdate { node, parent, .. } => {
+                let there = client.planned_remote.get(*node);
+                waits(parent) && there.is_none_or(|row| row.parent != *parent)
+            }
+            _ => false,
         };
         if client.on_its_way.contains(&op.node()) {
             Some("on its way to the drive: asked again later")
-        } else if into.is_some_and(|p| client.on_its_way.contains(&p) && no_row(p)) {
+        } else if goes_into {
             Some("its folder is on its way to the drive")
         } else if client.waits >= 3 {
             Some("held: the drive's server isn't taking changes for now")

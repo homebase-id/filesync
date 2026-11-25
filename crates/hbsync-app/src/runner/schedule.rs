@@ -421,6 +421,37 @@ mod tests {
         Duration::from_millis(n)
     }
 
+    /// Work left that waits for another identity's server is tried again no sooner than it
+    /// said, however short the backoff; a change still asks for a sync at once.
+    #[test]
+    fn work_that_waits_for_their_server_is_retried_no_sooner_than_said() {
+        let t0 = Instant::now();
+        let wait = Duration::from_secs(60);
+        let mut s = Schedule::new(t0, LOOK, false);
+        s.synced(
+            t0,
+            Synced::Unfinished {
+                progressed: true,
+                not_before: Some(wait),
+            },
+        );
+        assert!(!s.due(t0 + Duration::from_secs(30)));
+        assert_eq!(s.next_wake(t0, false), Some(t0 + wait));
+        assert!(s.due(t0 + wait));
+        s.want(Why::Local);
+        assert!(s.due(t0 + Duration::from_secs(1)));
+        // Without: the backoff's own few seconds.
+        let mut s = Schedule::new(t0, LOOK, false);
+        s.synced(
+            t0,
+            Synced::Unfinished {
+                progressed: true,
+                not_before: None,
+            },
+        );
+        assert!(s.due(t0 + Duration::from_secs(30)));
+    }
+
     /// A sync says what asked for it: the start, then what came since the sync before ended;
     /// unfinished work's retry when nothing else did. A sync that fails keeps them.
     #[test]

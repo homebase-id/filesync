@@ -1852,12 +1852,16 @@ rules hold too:
     edit made on both sides is (a conflict copy where its folder may be added to, moved
     out elsewhere). A copy of one's own edit, and nothing lost: to be spared by
     remembering what was sent (not done).
-  - After three writes on their way in a row, none taken between them, the run's other
+  - After three writes on their way in a row, none taken between them, the sync's other
     writes to that drive are held, unsent: their server isn't taking any, and each would
-    cost the wait for its answer (and a file its upload) to learn the same.
-  - What is to go into a folder whose own create or move is on its way waits for it: the
-    store has no row of that folder to ask yet. Told so, left for the next plan with
-    it, and not refused as going into a folder that is read-only.
+    cost the wait for its answer (and a file its upload) to learn the same. What comes
+    down goes on meanwhile.
+  - What is made in, or moved into, a folder whose own create or move is on its way waits
+    for it: a new folder has no row to ask yet, and one that moves isn't where it is to
+    be (a folder sent into one whose move out of it hasn't landed would close a ring
+    there for a while). Told so, left for the next plan with it, and not refused as
+    going into a folder that is read-only. A change of what is in such a folder already
+    goes up.
   - A write the owner's server doesn't take in the end (their file changed meanwhile,
     the share turned to reading) is told as such when it is asked again, and the item
     planned from what is there: the owner's change wins, as against any stale write.

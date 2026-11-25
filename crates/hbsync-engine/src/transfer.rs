@@ -265,6 +265,14 @@ pub enum JobError {
 }
 
 impl JobError {
+    /// Whether it is a write on its way to another identity's drive
+    /// ([`RemoteError::OnItsWay`]).
+    pub fn on_its_way(&self) -> bool {
+        matches!(self, JobError::Remote(RemoteError::OnItsWay { .. }))
+    }
+}
+
+impl JobError {
     /// What it means ([`ErrorClass`]).
     pub fn class(&self) -> ErrorClass {
         match self {
@@ -361,8 +369,11 @@ pub(crate) fn run_jobs_while(
                         }
                         Task::Removals(jobs) => remove(remote, jobs),
                     };
+                    // (A write on its way to another identity's drive is that write's own
+                    // wait: the others go on, till a few in a row hold the rest, which is
+                    // the executor's to say.)
                     let failed = results.iter().filter_map(|(_, result)| match result {
-                        JobResult::Failed(e) => Some(policy(e.class()).in_run),
+                        JobResult::Failed(e) if !e.on_its_way() => Some(policy(e.class()).in_run),
                         _ => None,
                     });
                     for in_run in failed {

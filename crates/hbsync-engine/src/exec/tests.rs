@@ -4639,6 +4639,43 @@ fn errors_go_through_the_policy() {
     }
 }
 
+/// Writes on their way in a row hold the sync's other writes from the third. One the owner's
+/// server takes between them starts the count again; what isn't a write there doesn't.
+#[test]
+fn three_writes_on_their_way_in_a_row_hold_the_rest() {
+    let at = some_version();
+    let write = Op::RemoteDelete {
+        node: NodeId::new(),
+        parent: NodeId::ROOT,
+        file_id: at.file_id,
+        expected: at.version,
+    };
+    let other = Op::Settle {
+        node: NodeId::new(),
+    };
+    let wait = || Outcome::Wait("on its way".into(), Duration::from_secs(60));
+    let mut heard = OnTheirWay::default();
+    for _ in 0..2 {
+        heard.ended(&write, &wait());
+    }
+    assert!(!heard.holds_writes());
+    heard.ended(&other, &Outcome::Done);
+    heard.ended(&write, &Outcome::waiting("left"));
+    heard.ended(&write, &wait());
+    assert!(heard.holds_writes(), "three in a row");
+
+    let mut heard = OnTheirWay::default();
+    for outcome in [wait(), wait(), Outcome::Done, wait(), wait()] {
+        heard.ended(&write, &outcome);
+    }
+    assert!(!heard.holds_writes(), "one was taken between them");
+    heard.ended(&write, &Outcome::Settled);
+    for _ in 0..3 {
+        heard.ended(&write, &wait());
+    }
+    assert!(heard.holds_writes());
+}
+
 /// The drive removes a file and a plan here deletes it; before the delete runs, the drive brings
 /// it back (a restore, the same file at a new version) and another engine's pull puts that in
 /// the mirror. The delete acted on the removal: the next plan brings the file back here, and

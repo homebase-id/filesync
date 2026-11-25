@@ -239,10 +239,10 @@ pub(crate) struct Client {
     /// adapter's memory, gone with a crash).
     pub(crate) sent: BTreeMap<NodeId, (crate::outbox::Write, u64)>,
     /// The nodes whose write was on its way, or held, in this sync so far, and what was left
-    /// for one as its folder: not asked again in the sync (the engine's `Engine::on_its_way`).
+    /// for one as its folder: not asked again in the sync (the engine's `OnTheirWay::nodes`).
     pub(crate) on_its_way: BTreeSet<NodeId>,
-    /// Writes on their way in a row in this run, none taken between them: from the third,
-    /// the run's other writes are held (the engine's `Heard::waits`, `WAIT_HOLD`).
+    /// Writes on their way in a row in this sync, none taken between them: from the third,
+    /// the sync's other writes are held (the engine's `OnTheirWay::waits`, `WAIT_HOLD`).
     pub(crate) waits: u32,
 }
 
