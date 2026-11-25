@@ -565,8 +565,7 @@ impl Executor<'_> {
         // In a read-only folder (§13) a file is placed read-only: a save over it, which
         // would only move out, is kept from happening by accident. Not one this identity
         // may change, where the folder writes.
-        let writable = self.folder.read_only.is_some()
-            && self.folder.writes
+        let writable = self.folder.writes
             && (self.db.read(|s| s.get_mirror(node))?).is_some_and(|row| row.writable);
         let done = done.read_only(self.folder.keeps_read_only(writable));
         // The old version a download replaces from another folder: aside till the commit.
