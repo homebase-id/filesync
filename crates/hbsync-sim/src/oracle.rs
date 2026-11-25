@@ -451,6 +451,10 @@ impl Sim {
         // What waits for a folder no client reads on the drive, through folders in Recently
         // deleted too.
         let mut waits_on_drive: BTreeSet<NodeId> = BTreeSet::new();
+        // The drive's orphans that wait on a client with the folder that client knows for
+        // them (below), by how many clients: one that waits on every client is no client's
+        // to recover.
+        let mut orphan_waits: BTreeMap<NodeId, usize> = BTreeMap::new();
         for (c, client) in self.clients.iter().enumerate() {
             // A launcher whose bit the client doesn't hold is executable only as the user made
             // it here (§1): never as it came from the drive.
@@ -547,6 +551,7 @@ impl Sim {
                 })
             };
             let mut kept: BTreeSet<NodeId> = BTreeSet::new();
+            let mut orphan_out: BTreeSet<NodeId> = BTreeSet::new();
             let reaches = |aside: &BTreeSet<NodeId>, kept: &BTreeSet<NodeId>, mut at: NodeId| {
                 for _ in 0..=visible.len() {
                     if aside.contains(&at) && !kept.contains(&at) {
@@ -563,6 +568,50 @@ impl Sim {
             };
             loop {
                 let before = (aside.len(), kept.len());
+                // An orphan on the drive (its folder nowhere there: a stale create landed
+                // after the folder went for good) whose folder the client knows, by its item
+                // here or else its base, in a chain of such folders up to one that waits: the
+                // engine brings that folder back for it (§6.3, with the id it had), into the
+                // one that waits, so both wait, as they are on this client: the folders it
+                // has stay, and the orphan isn't fetched. (Not for a client whose filter or
+                // scope leaves the place out, a read-only one, or a member: none of those is
+                // in a property that moves nodes into a folder no client reads.)
+                let orphans: Vec<(NodeId, NodeId)> = (drive.iter())
+                    .filter(|(n, s)| {
+                        !aside.contains(n)
+                            && !orphan_out.contains(n)
+                            && !s.parent.is_root()
+                            && !drive.contains(s.parent)
+                            && !self.server.removed.contains_key(&s.parent)
+                    })
+                    .map(|(n, s)| (n, s.parent))
+                    .collect();
+                for (n, mut at) in orphans {
+                    let mut chain = Vec::new();
+                    let waits = loop {
+                        if aside.contains(&at) || waiting.contains(&at) {
+                            break true;
+                        }
+                        if at.is_root() || synced.contains(at) || chain.len() > 64 {
+                            break false;
+                        }
+                        let known = client.local.get(at).or(client.base.get(at));
+                        let Some(known) = known.filter(|k| k.kind == NodeKind::Folder) else {
+                            break false;
+                        };
+                        chain.push(at);
+                        at = known.parent;
+                    };
+                    if waits {
+                        *orphan_waits.entry(n).or_default() += 1;
+                        for k in std::iter::once(n).chain(chain) {
+                            orphan_out.insert(k);
+                            if visible.contains(k) {
+                                aside.insert(k);
+                            }
+                        }
+                    }
+                }
                 let joins: Vec<NodeId> = (visible.iter())
                     .filter(|(k, _)| !aside.contains(k) || kept.contains(k))
                     .filter(|(k, here)| match synced.get(*k) {
@@ -603,6 +652,10 @@ impl Sim {
                 if (aside.len(), kept.len()) == before {
                     break;
                 }
+            }
+            for &n in &orphan_out {
+                synced.remove(n);
+                base.remove(n);
             }
             for &n in &aside {
                 base.remove(n);
@@ -760,7 +813,8 @@ impl Sim {
             .filter(|v| {
                 !matches!(v, Violation::Orphan { node, parent }
                     if self.server.unreadable_on_drive().any(|(n, _)| n == parent)
-                        || waits_on_drive.contains(node))
+                        || waits_on_drive.contains(node)
+                        || orphan_waits.get(node) == Some(&self.clients.len()))
             })
             // One in a file stays there while no client that writes syncs it (a member has it
             // at the top where the file isn't shared with it, and repairs nothing: §13).
