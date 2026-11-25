@@ -126,7 +126,7 @@ Use the unified **V2** API under `/api/v2`, as chat-kmp does **[verified]**
   `/owner/appupdate` with `p`, which adds them to the ones it has, a key it holds a second time
   too, shown to the owner as more access (`ExtendAppPermissions.tsx`): ask only for what it
   lacks. Device tokens gain them without signing in again (`AppRegistrationService`, from its
-  code).
+  code; **[verified]** live 2026-11-25: a running daemon wrote with the token it had).
   The security context lists them per permission group (`permissionContext.permissionGroups[]
   .permissionSet.keys`). Filesync asks for `UseTransitRead` (305) since shared-folder sync, for
   the identity's `/api/v2/peer/...` routes, and for `UseTransitWrite` (210) since it changes
@@ -134,7 +134,10 @@ Use the unified **V2** API under `/api/v2`, as chat-kmp does **[verified]**
   registration (that the page reads two keys so: **[verified]** odin-js
   `permissionParamToPermissionSet`; the consent with both: **[inferred]**, not seen live
   yet). An install from before it asked for one lacks that one until the owner approves
-  the update, which asks for the keys lacking alone (`p=210` for one that reads already). 210 is
+  the update, which asks for the keys lacking alone (`p=210` for one that reads already:
+  **[verified]** live 2026-11-25, odin-core b79aefa99. The page says "Update existing app",
+  that the app "has requested extra access on your identity", and under its details
+  `UseTransitWrite`; its buttons are Allow and Cancel). 210 is
   the server's one key for sending to other identities: with it an app may also send to
   any drive of another identity that their circles let this identity write to, read such
   a drive's public key and what became of a send, and relay live to peers, which sets up
@@ -740,7 +743,10 @@ server answers the rest, to a token their server made for this identity's connec
   read-only subset (`Bench::shared`) checks the fake now (a member that writes,
   `FakeRemote::writing`, passes its editing subset, `Bench::editing`: what it changes of what
   is shared with it for editing, and that it deletes nothing). Live it needs a sharer that writes
-  share rows, which this client doesn't do yet (the chat app shares): until it does, the
+  share rows, which this client doesn't do yet (the chat app shares; a file this client's
+  owner side adds to a shared folder, or moves into one, gets none and reaches no member:
+  **[verified]** live 2026-11-25, a new file in a folder shared for editing, not on the
+  member's computer 30 s later, its server not told): until it does, the
   live check is the daemon syncing what the chat app shared (**[verified]** 2026-11-20 on
   the dev server: a folder with a subfolder and 20 files, a member's token kept and reused). Refusals: 401 the token (unknown,
   the connection gone, their keys invalid), 403 a file not (or no longer) shared, 404 none
@@ -842,9 +848,12 @@ asked for it syncs a share read-only until its owner approves. **[verified]** li
   `{publicKeyJwk, publicKeyCrc32, callerMayWrite, isZeroKnowledge, sharingModel}`, asked
   once per share and run. The new file's id on their drive isn't in any answer: the client
   reads it by `GET /drives/{alias}/files/by-uid/{uniqueId}/header` on their server (one
-  request). All **[verified]** live; the circles of the folder the member isn't in get their
-  rows from a device of the owner's (**[verified]** chat-kmp `FilesyncShareUpkeep`; this
-  client's owner side doesn't do that).
+  request). All **[verified]** live. The circles of the folder the member isn't in get no
+  row for the file from anyone: their server stores the rows sent and adds none
+  (**[verified]** odin-core `PeerDriveIncomingTransferService`), and no client writes them
+  (**[verified]** chat-kmp 0ff83254c: `FilesyncShareUpkeep` seals circle keys and keeps the
+  editors' circle, `FilesyncSharing.inherit` runs after that app's own uploads alone; this
+  client's owner side writes no rows at all). So members of those circles don't see it.
 - **The version a new file lands as** is made by their server (**[verified]** odin-core
   efc317ad4, `PeerFileWriter`: `CreateVersionTag`; live: never the send's `newVersionTag`),
   and told in one place only, the socket's word of the delivery (`versionTag`, below;
@@ -884,6 +893,30 @@ asked for it syncs a share read-only until its owner approves. **[verified]** li
   retried. Measured live, the whole write with the socket connected: 20 to 40 ms for a
   header, 60 to 120 ms with bytes or for a new file; without a socket, the first wait and one
   read more.
+- **What a member's write costs.** Measured live 2026-11-25 (odin-core b79aefa99, a daemon
+  on each side, both servers on one computer, requests counted in the server's log and
+  bytes on the loopback interface):
+  - *Requests, the member's.* A change to a file: one header read from their server (the
+    file's key, its version, whether it is shared for editing: read before every send, so
+    10 files changed at once are 10 reads and 10 sends) and one `PATCH` to its own server.
+    A new file: one `POST` to its own server and two reads of the node from theirs (the
+    word that it landed carries no file id); their drive's public key is asked for once a
+    run.
+    A removal: as a change. Its own server sends each on with one request to theirs.
+  - *The echo.* Their server tells the member's own write on its socket like any other
+    (no `excludeOwnWrites` on a peer connection): one feed read of the share for a burst
+    of writes, not one a write (10 files: 1).
+  - *Bytes.* A new file of 1 MiB: 2.03 MiB in all (the member to its own server, that one
+    to theirs), a change of 1 MiB the same; an own upload of 1 MiB: 1.01 MiB. The member's
+    own connection carries the bytes once. A change of a file of 86 bytes: 31 kB in all,
+    the echo's feed read with it.
+  - *Time.* On the sharer's disk 2.4 to 3.0 s after the member saved the file, as the
+    other way round (the receiving daemon reads the feed 2 s after it is told, `hold_back`);
+    the member's sync with its sends took 60 ms (a rename) to 880 ms (10 files with bytes).
+  - *Idle.* With both sockets connected neither daemon made a request in 60 s.
+  - *Both edit one file at the same moment.* The member's send is refused for its version
+    (their server answers its server 400), the member keeps its bytes as a conflict copy
+    and sends that as a new file: both sides held both files 5.4 s after.
 - **A new file that is there already.** A node found on their drive where a new one was
   sent is that send's only by its `globalTransitId`. With another's, an earlier send of the
   node landed (one from before a restart, or one this run stopped waiting for), and their
