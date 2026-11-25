@@ -743,7 +743,10 @@ server answers the rest, to a token their server made for this identity's connec
   read-only subset (`Bench::shared`) checks the fake now (a member that writes,
   `FakeRemote::writing`, passes its editing subset, `Bench::editing`: what it changes of what
   is shared with it for editing, and that it deletes nothing). Live it needs a sharer that writes
-  share rows, which this client doesn't do yet (the chat app shares): until it does, the
+  share rows, which this client doesn't do yet (the chat app shares; a file this client's
+  owner side adds to a shared folder, or moves into one, gets none and reaches no member:
+  **[verified]** live 2026-11-25, a new file in a folder shared for editing, not on the
+  member's computer 30 s later, its server not told): until it does, the
   live check is the daemon syncing what the chat app shared (**[verified]** 2026-11-20 on
   the dev server: a folder with a subfolder and 20 files, a member's token kept and reused). Refusals: 401 the token (unknown,
   the connection gone, their keys invalid), 403 a file not (or no longer) shared, 404 none
@@ -845,9 +848,12 @@ asked for it syncs a share read-only until its owner approves. **[verified]** li
   `{publicKeyJwk, publicKeyCrc32, callerMayWrite, isZeroKnowledge, sharingModel}`, asked
   once per share and run. The new file's id on their drive isn't in any answer: the client
   reads it by `GET /drives/{alias}/files/by-uid/{uniqueId}/header` on their server (one
-  request). All **[verified]** live; the circles of the folder the member isn't in get their
-  rows from a device of the owner's (**[verified]** chat-kmp `FilesyncShareUpkeep`; this
-  client's owner side doesn't do that).
+  request). All **[verified]** live. The circles of the folder the member isn't in get no
+  row for the file from anyone: their server stores the rows sent and adds none
+  (**[verified]** odin-core `PeerDriveIncomingTransferService`), and no client writes them
+  (**[verified]** chat-kmp 0ff83254c: `FilesyncShareUpkeep` seals circle keys and keeps the
+  editors' circle, `FilesyncSharing.inherit` runs after that app's own uploads alone; this
+  client's owner side writes no rows at all). So members of those circles don't see it.
 - **The version a new file lands as** is made by their server (**[verified]** odin-core
   efc317ad4, `PeerFileWriter`: `CreateVersionTag`; live: never the send's `newVersionTag`),
   and told in one place only, the socket's word of the delivery (`versionTag`, below;
