@@ -435,6 +435,11 @@ pub struct FolderStatus {
     /// and never the main folder. Left out for the account's own drive.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sharer: Option<Identity>,
+    /// Such a folder writes to what is shared with the account for editing (sync semantics
+    /// §13, "What may be changed is told per item"): a change of such an item goes to its
+    /// owner, a delete of one to their Recently deleted. The rest of it is read-only still.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub writes: bool,
     pub state: State,
     /// Until when a pause lasts (Unix seconds); `None` while not paused or until resumed.
     pub paused_until: Option<u64>,
@@ -492,6 +497,13 @@ impl FolderStatus {
         self.kind == RootKind::Main && self.sharer.is_none()
     }
 
+    /// Whether `held`, deletes held in this folder, can be answered with a put back: not what
+    /// another identity removed from what they share (theirs alone to change); a share that
+    /// writes there holds its own deletes too, which can.
+    pub fn puts_back(&self, held: &HeldDeletes) -> bool {
+        self.sharer.is_none() || (self.writes && held.here > 0)
+    }
+
     /// Whether all that isn't in sync yet is a change on its way to another identity's
     /// server ([`FolderStatus::on_their_way`]): this computer has nothing left to do, and
     /// shows as up to date, saying so.
@@ -524,6 +536,7 @@ impl FolderStatus {
             path: path.to_path_buf(),
             kind: RootKind::Main,
             sharer: None,
+            writes: false,
             state: State::Starting,
             paused_until: None,
             progress: None,

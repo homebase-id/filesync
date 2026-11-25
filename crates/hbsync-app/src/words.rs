@@ -314,10 +314,28 @@ pub fn last_name(path: &str) -> &str {
 pub const NO_PUT_BACK: &str = "This folder is read-only: what it holds back can't be put back \
                                on Homebase, only deleted here or left held";
 
+/// The same of a folder that writes to what is shared with the account, where nothing held
+/// is its own delete: what its owner removed, or no longer shares, isn't this identity's to
+/// put back.
+pub const NO_PUT_BACK_THEIRS: &str = "These were removed by their owner, or are no longer \
+                                      shared with you: they can't be put back on Homebase, \
+                                      only deleted here or left held";
+
+/// Why a put back is refused in what another identity shares, by whether the folder writes
+/// there ([`NO_PUT_BACK_THEIRS`]) or is read-only ([`NO_PUT_BACK`]).
+pub fn no_put_back(writes: bool) -> &'static str {
+    match writes {
+        true => NO_PUT_BACK_THEIRS,
+        false => NO_PUT_BACK,
+    }
+}
+
 /// What the held deletes `held` are and what each answer does, a paragraph for each way:
 /// `delete` and `put_back` name the answers as the user gives them (the tray's buttons, the
-/// CLI's commands). `sharer`: whose share the folder is of, where it is one's: read-only, so
-/// its deletes are only ever its sharer's, and there is no putting back.
+/// CLI's commands). `sharer`: whose share the folder is of, where it is one's: what its
+/// sharer removed (or no longer shares) can't be put back. A folder that writes there holds
+/// its own deletes too (`held.here`, none in a read-only one): those go to the sharer's
+/// Recently deleted, or are put back.
 pub fn held_deletes(
     held: &HeldDeletes,
     sharer: Option<&crate::Identity>,
@@ -325,13 +343,33 @@ pub fn held_deletes(
     put_back: &str,
 ) -> Vec<String> {
     if let Some(sharer) = sharer {
-        return vec![format!(
-            "Everything here was removed by {sharer}, or is no longer shared with you: {}. \
-             {delete} removes them from this computer too. They can't be put back: only \
-             {sharer} can change what they share with you. To keep any of them, copy them to \
-             another folder first.",
-            items(held.total())
-        )];
+        let mut out = Vec::new();
+        if held.here > 0 {
+            let were = if held.here == 1 { "was" } else { "were" };
+            out.push(format!(
+                "{} that {sharer} shares with you {were} deleted on this computer. {delete} \
+                 removes them for {sharer} too: their Recently deleted keeps them, and only \
+                 {sharer} can restore them from there. {put_back} brings them back to this \
+                 computer.",
+                items(held.here)
+            ));
+        }
+        let theirs = held.total().saturating_sub(held.here);
+        if theirs > 0 {
+            let all = if held.here == 0 {
+                "Everything here"
+            } else {
+                "The rest"
+            };
+            out.push(format!(
+                "{all} was removed by {sharer}, or is no longer shared with you: {}. \
+                 {delete} removes them from this computer too. They can't be put back: only \
+                 {sharer} can change what they share with you. To keep any of them, copy \
+                 them to another folder first.",
+                items(theirs)
+            ));
+        }
+        return out;
     }
     let mut out = Vec::new();
     if held.here > 0 {
@@ -596,6 +634,27 @@ mod tests {
               1,200 items. Delete removes them from this computer too. They can't be put \
               back: only tom.example can change what they share with you. To keep any of \
               them, copy them to another folder first."
+            ]
+        );
+        // A share that writes holds its own deletes too: those go to the sharer's Recently
+        // deleted, or come back; the rest is the sharer's, as before.
+        let own = HeldDeletes {
+            here: 2,
+            remotely: 5,
+            ..elsewhere.clone()
+        };
+        let mixed = held_deletes(&own, Some(&tom), "Delete", "Put them back");
+        assert_eq!(
+            mixed,
+            [
+                "2 items that tom.example shares with you were deleted on this computer. \
+              Delete removes them for tom.example too: their Recently deleted keeps them, \
+              and only tom.example can restore them from there. Put them back brings them \
+              back to this computer.",
+                "The rest was removed by tom.example, or is no longer shared with you: 5 \
+              items. Delete removes them from this computer too. They can't be put back: \
+              only tom.example can change what they share with you. To keep any of them, \
+              copy them to another folder first."
             ]
         );
         let unfinished = HeldDeletes {

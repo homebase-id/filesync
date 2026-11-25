@@ -6,8 +6,8 @@ use hbsync_app::{HeldAnswer, State};
 use super::*;
 
 /// The page to review `held`, the deletes held in `status`'s folder, its answers posted to
-/// `url`. What another identity shares is read-only: deleted here or left held, with no
-/// button to put it back.
+/// `url`. What another identity removed from what they share is deleted here or left held,
+/// with no button to put it back; a folder that writes there has one for its own deletes.
 fn held_page(status: &FolderStatus, held: &HeldDeletes, url: &str) -> String {
     let sharer = status.sharer.as_ref();
     let what: String = words::held_deletes(held, sharer, "Delete", "Put them back")
@@ -24,9 +24,9 @@ fn held_page(status: &FolderStatus, held: &HeldDeletes, url: &str) -> String {
     } else {
         ""
     };
-    let put_back = match sharer {
-        Some(_) => "",
-        None => " <button name=answer value=put_back>Put them back</button>",
+    let put_back = match status.puts_back(held) {
+        true => " <button name=answer value=put_back>Put them back</button>",
+        false => "",
     };
     format!(
         "<h1>{} deletions to review</h1>\
@@ -303,6 +303,18 @@ mod tests {
         let theirs = held_page(&status, &held, "/deletions");
         assert!(!theirs.contains("put_back") && theirs.contains("value=delete"));
         assert!(theirs.contains("removed by tom.example"), "{theirs}");
+        // A share that writes: no button either for what its sharer removed; one where it
+        // holds deletes of its own.
+        status.writes = true;
+        let theirs = held_page(&status, &held, "/deletions");
+        assert!(!theirs.contains("put_back"), "{theirs}");
+        let mixed = HeldDeletes { here: 2, ..held };
+        let own = held_page(&status, &mixed, "/deletions");
+        assert!(own.contains("value=put_back"), "{own}");
+        assert!(
+            own.contains("2 items that tom.example shares with you"),
+            "{own}"
+        );
     }
 
     /// Empty is offered only when emptying takes something; else the page says why not.
