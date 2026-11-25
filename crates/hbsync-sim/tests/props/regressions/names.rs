@@ -1697,3 +1697,33 @@ fn what_waits_holds_its_name_and_one_renamed_to_it_stays_as_it_was() {
     assert_eq!(sim.local_paths(1), ["c.txt"]);
     assert_eq!(sim.item(1, "c.txt"), Some(a));
 }
+
+/// A file edited on two computers, the first edit on the drive, then moved there into a
+/// folder no client reads: the second computer's file waits as it is, its edit in it, and no
+/// conflict copy is made meanwhile. (Its copy was sent at every sync, with no item here to
+/// send it from: the fork of what waits wasn't undone.)
+#[test]
+fn a_file_edited_on_both_sides_that_waits_makes_no_copy_meanwhile() {
+    use super::{act, settle, top};
+    use Action::*;
+    let mut sim = Sim::new(2);
+    let parent = top(&sim, 0);
+    sim.run(&[act(0, CreateFile { parent, name: 3 })]);
+    settle(&mut sim);
+    let f = sim.item(1, "c.txt").expect("on c1");
+    let file = sim.file_pick(0, f).expect("on c0");
+    sim.run(&[act(0, Edit { file }), Event::Plan { client: 0 }]);
+    while !sim.planned(0).is_empty() {
+        sim.run(&[Event::Step { client: 0 }]);
+    }
+    let file = sim.file_pick(1, f).expect("on c1");
+    sim.run(&[act(1, Edit { file }), act(1, NewerFolder { name: 1 })]);
+    let (pick, folder) = sim.newer_move_picks(f, "b").expect("on the drive");
+    sim.run(&[act(1, IntoNewer { pick, folder })]);
+    let moved_at = sim.drive_version(f);
+    settle(&mut sim);
+    assert_eq!(sim.server_paths(), ["b", "b/a", "b/c.txt"]);
+    assert_eq!(sim.drive_version(f), moved_at, "not written in place");
+    assert_eq!(sim.local_paths(1), ["c.txt"]);
+    assert_ne!(sim.local_hash(1, f), sim.drive_hash(f), "its edit is in it");
+}

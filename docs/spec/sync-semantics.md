@@ -793,6 +793,10 @@ expected fingerprint is treated as done.
     made here): renamed, moved or tagged here and no more, it goes with its folder, and
     comes back as the drive has it once the folder reads. (On an identity's own drive:
     read-only, a change here moves out instead, §13.)
+  - Edited on both sides, what waits so makes no conflict copy meanwhile (§6.3): it
+    stays as it is here, its edit in it, nothing sent for it, and a folder gone there
+    isn't made again there for the copy. The two edits are told apart once its folder
+    reads, both kept then as ever.
   - What waits so is still here, on its name, and a folder kept for it on its own: those
     names are taken here till the wait ends. What the drive has under one meanwhile
     (another made there since, one renamed to it) is left out here and told so, planned

@@ -210,6 +210,10 @@ struct Reconciler<'a> {
     /// and put back where it is here ([`Reconciler::leave_out`]). Changed here, each keeps the
     /// folders it is in ([`Reconciler::keep_for_what_is_out`]).
     out_here: BTreeSet<NodeId>,
+    /// The folders gone there that [`Reconciler::fix_orphans`] brought back for a live node in
+    /// them: one brought back for a conflict copy alone goes again where the copy isn't made
+    /// after all ([`Reconciler::unfork`]).
+    brought_back: BTreeSet<NodeId>,
     /// The nodes this identity may change on another identity's drive that follow it in this
     /// plan all the same (§13, `one_way`): one gone there or here, or edited on both sides
     /// where no copy of it may be added (the merge's); one a repair gave its place (an orphan let go of, a cycle's move
@@ -290,6 +294,7 @@ impl<'a> Reconciler<'a> {
             left: BTreeSet::new(),
             held_waiting: HashMap::new(),
             out_here: BTreeSet::new(),
+            brought_back: BTreeSet::new(),
             follows: HashSet::new(),
             adds: HashSet::new(),
             removals: HashMap::new(),

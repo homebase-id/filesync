@@ -453,6 +453,7 @@ impl Reconciler<'_> {
                         }
                     }
                     self.retarget(parent, state);
+                    self.brought_back.insert(parent);
                     queue.push(parent);
                 }
                 Parent::Recover => {
@@ -520,6 +521,11 @@ impl Reconciler<'_> {
                     if let Some(original) = self.forked_into(node) {
                         self.fork_waits(original);
                     }
+                    // And one edited on both sides that waits itself makes no copy meanwhile:
+                    // it stays as it is here, edit and all, judged again once its folder
+                    // reads. (Its copy stayed in the plan and was sent, with no item here to
+                    // send, at every sync: found by the simulator.)
+                    self.unfork(node);
                 }
             }
         }
@@ -737,6 +743,28 @@ impl Reconciler<'_> {
         self.waits.contains(&node) || self.waiters.contains(&node)
     }
 
+    /// `node` leaves the plan as it is here: its fork, if any, is undone with what it told
+    /// (edited on both sides: found again once the node is planned).
+    fn unfork(&mut self, node: NodeId) {
+        let Some(copy) = self.forks.get(&node).copied() else {
+            return;
+        };
+        let copied = |c: &Conflict| matches!(c, Conflict::EditEdit { node: n, .. } if *n == node);
+        self.plan.conflicts.retain(|c| !copied(c));
+        let mut folder = self.merged.get(copy).map(|s| s.parent);
+        self.drop_fork(node);
+        // A folder gone there that was brought back for the copy alone goes again, with those
+        // above it brought back for it: not made again there for a copy that isn't made.
+        // (Planned as before it was brought back; what else keeps it here does so after.)
+        while let Some(f) = folder.filter(|f| self.brought_back.contains(f)) {
+            if self.merged.children(f).next().is_some() {
+                break;
+            }
+            self.brought_back.remove(&f);
+            folder = self.merged.remove(f).map(|s| s.parent);
+        }
+    }
+
     /// The fork of `node`, if any, is undone: its copy isn't made.
     pub(super) fn drop_fork(&mut self, node: NodeId) {
         if let Some(copy) = self.forks.remove(&node) {
@@ -787,12 +815,7 @@ impl Reconciler<'_> {
             // free), and where it is put back here it may keep its folders
             // ([`Reconciler::keep_for_what_is_out`]).
             if !self.masking.read_only {
-                if self.forks.contains_key(&n) {
-                    let copied =
-                        |c: &Conflict| matches!(c, Conflict::EditEdit { node, .. } if *node == n);
-                    self.plan.conflicts.retain(|c| !copied(c));
-                    self.drop_fork(n);
-                }
+                self.unfork(n);
                 // A conflict copy left out with the folder it is to be made in, its original
                 // elsewhere (the drive moved that one out): the original waits with it.
                 if let Some(original) = self.forked_into(n) {
