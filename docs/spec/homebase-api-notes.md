@@ -132,12 +132,20 @@ Use the unified **V2** API under `/api/v2`, as chat-kmp does **[verified]**
   the identity's `/api/v2/peer/...` routes, and for `UseTransitWrite` (210) since it changes
   what others share for editing ("Writing to what others share"): `p=305,210` at
   registration (that the page reads two keys so: **[verified]** odin-js
-  `permissionParamToPermissionSet`; the consent with both: **[inferred]**, not seen live
-  yet). An install from before it asked for one lacks that one until the owner approves
+  `permissionParamToPermissionSet`; the consent with both: **[verified]** live 2026-11-25
+  on an identity without the app, odin-core b79aefa99: the page says "Create new app", that
+  the app "is not registered on your identity", and lists `UseTransitRead` and
+  `UseTransitWrite`, the drive and the circle; after Allow comes the device's own "Login
+  to" page). An install from before it asked for one lacks that one until the owner approves
   the update, which asks for the keys lacking alone (`p=210` for one that reads already:
   **[verified]** live 2026-11-25, odin-core b79aefa99. The page says "Update existing app",
   that the app "has requested extra access on your identity", and under its details
-  `UseTransitWrite`; its buttons are Allow and Cancel). 210 is
+  `UseTransitWrite`; its buttons are Allow and Cancel). The owner takes a key away on the
+  app's page of the owner console ("Permissions", where 210 is "Send data to other
+  identities on my behalf" and 305 "Receive data from other identities on my behalf";
+  `appmanagement/register/updateapppermissions`): the next send through the app's token is
+  refused with a 403 (**[verified]** live 2026-11-25), and the update page gives the key
+  back like any other it lacks (**[verified]** live). 210 is
   the server's one key for sending to other identities: with it an app may also send to
   any drive of another identity that their circles let this identity write to, read such
   a drive's public key and what became of a send, and relay live to peers, which sets up

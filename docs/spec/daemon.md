@@ -575,7 +575,11 @@ included (service managers restart it then).
   - **Taken away**, the folder is read-only as a whole again, and a change waiting there
     moves out. Homebase tells this by refusing a send: that write is told as refused (as are
     the others of that sync, before they send anything), and the sync after it opens the
-    folder read-only.
+    folder read-only. (**[verified]** live 2026-11-25: with the permission taken away in
+    the owner console, an edit's send was refused, 5 s later the running daemon opened
+    the share read-only, moved the edited file out to the top of the sync folder and
+    wrote the sharer's version back; `hbsync status` said so and named `hbsync approve`,
+    and after that approval the same daemon wrote to the share again.)
   - **A drive that can't say** (its own server doesn't answer) leaves the folder as it is;
     one opened meanwhile is opened as it last synced (the engine's record of it), so a
     folder that wrote isn't made read-only, its waiting changes moved out, for want of an
