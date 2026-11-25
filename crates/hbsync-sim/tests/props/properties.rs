@@ -369,6 +369,23 @@ proptest! {
         run_with(3, None, with_a_tree_and_a_newer_folder, &events)?;
     }
 
+    /// [`what_waits_for_a_folder_no_client_reads_keeps_its_edit`], client 0's user also making
+    /// files and folders ([`naming_waiting_event`]): what waits holds its name where it waits,
+    /// and what the drive has under that name meanwhile is left out there, not renamed on the
+    /// drive (sync semantics §8a).
+    /// Ignored: the oracle doesn't follow an orphan on the drive (its folder deleted for good)
+    /// whose folder a client knows in a folder that waits: the engine waits it there (the
+    /// folder comes back for it, into one that waits; also where that client ignores the
+    /// orphan, or knows the folder from its base alone), the oracle wants it in Recovered
+    /// files (seed 948000c1).
+    #[test]
+    #[ignore = "the oracle doesn't follow an orphan whose known folder waits (seed 948000c1)"]
+    fn what_waits_holds_its_name_while_a_user_makes_items(
+        events in proptest::collection::vec(naming_waiting_event(3), 0..120)
+    ) {
+        run_with(3, None, with_a_tree_and_a_newer_folder, &events)?;
+    }
+
     /// A download fetches, then puts in place and commits a step later: meanwhile the drive
     /// moves on or removes the node, the users work, the folder's other device syncs; and a
     /// client dies between a download put in place and its commit, recovering at its next

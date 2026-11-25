@@ -593,8 +593,9 @@ pub enum Conflict {
     EditDelete { node: NodeId },
     /// A name clash; `node` was renamed.
     NameClash { node: NodeId },
-    /// A name clash in a read-only folder (§13): `node` can't be renamed on the drive, so it
-    /// isn't synced here while another item there has its name.
+    /// A name clash where nothing is renamed on the drive for it: in a read-only folder
+    /// (§13), or with what waits here for a folder this device can't read (§8a). `node` isn't
+    /// synced here while the other item has its name.
     NameTaken { node: NodeId },
     /// A move would have created a cycle and was undone.
     Cycle { node: NodeId },

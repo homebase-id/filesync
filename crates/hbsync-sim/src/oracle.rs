@@ -543,6 +543,16 @@ impl Sim {
                 let local_hash = client.extra.get(&k).and_then(|e| e.local_hash);
                 changed_here(here, had, local_hash, server.get(k))
             };
+            // Whether the merge places `n` where it is here: made here, or moved here where the
+            // drive has it where its base does (or not at all).
+            let placed_here = |n: NodeId| {
+                let Some(here) = client.local.get(n) else {
+                    return false;
+                };
+                client.base.get(n).is_none_or(|b| {
+                    !b.same_place(here) && server.get(n).is_none_or(|d| d.same_place(b))
+                })
+            };
             let mut kept: BTreeSet<NodeId> = BTreeSet::new();
             let reaches = |aside: &BTreeSet<NodeId>, kept: &BTreeSet<NodeId>, mut at: NodeId| {
                 for _ in 0..=visible.len() {
@@ -567,7 +577,15 @@ impl Sim {
                             aside.contains(&t.parent) && !kept.contains(&t.parent)
                         }
                         Some(_) => reaches(&aside, &kept, here.parent),
-                        None => changed(*k) && reaches(&aside, &kept, here.parent),
+                        // Gone there (or never there): kept where it changed or moved here
+                        // (an edit or a move wins over a delete, §4), or holds what waits that
+                        // the merge places in it (a live child keeps its folder, §6.3).
+                        None => {
+                            let moved = (client.base.get(*k)).is_some_and(|b| !b.same_place(here));
+                            let holds = (client.local.children(*k))
+                                .any(|c| aside.contains(&c) && placed_here(c));
+                            (changed(*k) || moved || holds) && reaches(&aside, &kept, here.parent)
+                        }
                     })
                     .map(|(k, _)| k)
                     .collect();
@@ -603,6 +621,28 @@ impl Sim {
                 {
                     kept_here.insert(*blob);
                 }
+            }
+            // What waits holds its name here, and so does a folder kept for it, till the wait
+            // ends (sync semantics §8a): what the drive has under one of those names in that
+            // folder (made there since, or renamed to it) is left out here meanwhile, with
+            // what is in it. Not brought here (one here before, renamed there, stays as it is).
+            let key = |s: &NodeState| (s.parent, hbsync_platform::name::name_key(&s.name));
+            let held: BTreeSet<_> = (aside.iter())
+                .filter_map(|n| client.local.get(*n).map(key))
+                .collect();
+            let newcomers: Vec<NodeId> = (synced.iter())
+                .filter(|(_, s)| held.contains(&key(s)))
+                .map(|(n, _)| n)
+                .collect();
+            for n in newcomers {
+                if visible.contains(n) && !client.base.contains(n) {
+                    return Err(format!(
+                        "{}: {n:?} was put in place, though what waits holds its name",
+                        client.name
+                    ));
+                }
+                let blobs = (&ledger.blobs, &mut kept_here);
+                set_aside(n, &mut visible, &mut synced, &mut base, blobs);
             }
             // No client writes a tag change on what waits, nor on a folder it keeps here (gone
             // there); one synced that waits with it here is live on the drive, where another

@@ -352,6 +352,25 @@ impl Reconciler<'_> {
             }
         }
 
+        // On an identity's own drive nothing moves out before a delete here: what one would
+        // take that changed here and is out of the plan has kept its folder by now
+        // ([`Reconciler::keep_for_what_is_out`]). (Not asked of a plan that is made again,
+        // with what waits for a name or a place waiting: [`reconcile`].)
+        debug_assert!(
+            self.masking.read_only
+                || !self.waiters.is_empty()
+                || !self.placed.is_empty()
+                || deletes.iter().all(|op| match op {
+                    Op::LocalDelete { subtree, .. } => (subtree.iter()).all(|n| {
+                        self.scope.contains(n)
+                            || self.masks.masked.contains(n)
+                            || !self.loses_here(*n)
+                    }),
+                    _ => true,
+                }),
+            "a delete here would take a change made here that the plan doesn't have"
+        );
+
         self.plan.ops.extend(
             self.masks
                 .detached
