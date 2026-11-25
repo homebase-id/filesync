@@ -4731,8 +4731,83 @@ fn read_only_one_left_out_for_its_name_makes_no_conflict_copy_meanwhile() {
     assert!(plan.deferred.contains(&f));
 }
 
-/// An item that may be changed moves between two folders this identity may add to; a move
-/// out of one into a folder it may only read, or to the top, is undone.
+/// The same of a file in a folder left out for its name: no copy of it either, and nothing
+/// told of one. And where the drive moved the file out of that folder besides, its copy
+/// would be made in the folder left out: the file waits as it is here, and says so.
+#[test]
+fn read_only_a_folder_left_out_for_its_name_makes_no_conflict_copy_in_it() {
+    let [c, x, f, e] = ids(4)[..] else {
+        unreachable!()
+    };
+    let world = |moved_out: bool| {
+        let mut w = read_only();
+        w.synced(c, file(ROOT, "taken", "c"))
+            .synced(e, folder(ROOT, "e"))
+            .synced(x, folder(ROOT, "x"))
+            .synced(f, file(x, "a.txt", "a"));
+        editing(&mut w);
+        let there = if moved_out { e } else { x };
+        w.local(f, Some(file(x, "a.txt", "mine")))
+            .remote(x, Some(folder(ROOT, "taken")))
+            .remote(f, Some(file(there, "a.txt", "theirs")));
+        w
+    };
+    let plan = world(false).plan();
+    assert!(!plan.writes_drive(), "{:?}", plan.ops);
+    assert!(plan.ops.is_empty(), "{:?}", plan.ops);
+    assert_eq!(plan.conflicts, [Conflict::NameTaken { node: x }]);
+    assert!(plan.deferred.contains(&f));
+
+    let plan = world(true).plan();
+    assert!(!plan.writes_drive(), "{:?}", plan.ops);
+    assert!(plan.ops.is_empty(), "{:?}", plan.ops);
+    assert!(
+        plan.conflicts.contains(&Conflict::NameTaken { node: x }),
+        "{:?}",
+        plan.conflicts
+    );
+    assert!(
+        plan.conflicts.contains(&Conflict::CopyWaits { node: f }),
+        "{:?}",
+        plan.conflicts
+    );
+    assert!(plan.deferred.contains(&f));
+}
+
+/// The copy's own name taken where it was to be made, and the file left out: nothing is told
+/// of a copy that isn't made (it was: renamed, as the name was taken).
+#[test]
+fn read_only_one_left_out_tells_nothing_of_the_copy_it_doesnt_make() {
+    let [c, d, f, other] = ids(4)[..] else {
+        unreachable!()
+    };
+    let world = |left_out: bool, taken: Option<&str>| {
+        let mut w = read_only();
+        w.synced(c, file(ROOT, "a.txt", "c"))
+            .synced(d, folder(ROOT, "d"))
+            .synced(f, file(d, "a.txt", "a"));
+        if let Some(name) = taken {
+            w.synced(other, file(d, name, "o"));
+        }
+        editing(&mut w);
+        let there = if left_out { ROOT } else { d };
+        w.local(f, Some(file(d, "a.txt", "mine")))
+            .remote(f, Some(file(there, "a.txt", "theirs")));
+        w
+    };
+    // The name its copy gets, from a plan that makes one.
+    let made = world(false, None).plan();
+    let name = (made.ops.iter())
+        .find_map(|op| match op {
+            Op::RemoteCreate { name, .. } => Some(name.clone()),
+            _ => None,
+        })
+        .expect("a copy");
+    let plan = world(true, Some(&name)).plan();
+    assert!(plan.ops.is_empty(), "{:?}", plan.ops);
+    assert_eq!(plan.conflicts, [Conflict::NameTaken { node: f }]);
+}
+
 #[test]
 fn read_only_a_move_between_folders_that_may_be_changed_goes_up() {
     let [from, to, to_read, moved, into_read, to_top] = ids(6)[..] else {

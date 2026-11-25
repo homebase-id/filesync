@@ -759,8 +759,12 @@ impl Reconciler<'_> {
         let Some(copy) = self.forks.get(&node).copied() else {
             return;
         };
+        // What was told of the copy goes too (its name taken where it was to be made: it
+        // isn't renamed, it isn't made).
         let copied = |c: &Conflict| matches!(c, Conflict::EditEdit { node: n, .. } if *n == node);
-        self.plan.conflicts.retain(|c| !copied(c));
+        self.plan
+            .conflicts
+            .retain(|c| !copied(c) && c.node() != copy);
         let mut folder = self.merged.get(copy).map(|s| s.parent);
         self.drop_fork(node);
         // A folder gone there that was brought back for the copy alone goes again, with those
