@@ -470,3 +470,149 @@ fn a_members_delete_of_a_folder_it_may_not_empty_is_undone() -> R {
     nothing_moved_out(&out)?;
     Ok(())
 }
+
+/// A member's write that is on its way to the sharer's server waits alone: the sync goes on,
+/// what the sharer changed comes down in it, and the folder isn't stopped. Asked again, the
+/// write waits as it is; delivered, it lands once: one edit there, no copy, nothing moved
+/// out. (The whole share waited a minute for each such write.)
+#[test]
+fn a_members_write_on_its_way_waits_alone_and_lands_once() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    a.write("d/mine.txt", "one")?;
+    a.write("d/theirs.txt", "one")?;
+    a.sync()?;
+    for name in ["d", "mine.txt", "theirs.txt"] {
+        share_to_edit(&a, &server, name)?;
+    }
+    let (mut b, out) = writing_member(&server, "b")?;
+    b.sync()?;
+
+    b.remote.faults().on_their_way = true;
+    b.write("d/mine.txt", "the member's edit")?;
+    a.write("d/theirs.txt", "the sharer's edit")?;
+    a.sync()?;
+    // One sync (the helper's `sync` is several, till one does nothing). Their server is
+    // asked once in it: the rounds after the first leave the write as it is.
+    b.engine.scan_local()?;
+    let report = b.engine.sync("2026-10-08", true)?;
+    assert!(report.rounds > 1, "{} round(s)", report.rounds);
+    let left = format!("{:?}", report.skipped);
+    assert_eq!(
+        left.matches("to take a change of yours").count(),
+        1,
+        "{left}"
+    );
+    assert!(
+        report
+            .skipped
+            .iter()
+            .all(|(op, _)| op.node() == report.skipped[0].0.node())
+    );
+    assert!(report.unfinished);
+    assert_eq!(report.not_before, Some(std::time::Duration::from_secs(60)));
+    assert_eq!(b.read("d/theirs.txt")?, b"the sharer's edit");
+    a.sync()?;
+    assert_eq!(a.read("d/mine.txt")?, b"one", "not there yet");
+
+    // Asked again at the next sync: it waits as it is, nothing sent a second time.
+    let report = b.engine.sync("2026-10-08", true)?;
+    let left = format!("{:?}", report.skipped);
+    assert_eq!(
+        left.matches("to take a change of yours").count(),
+        1,
+        "{left}"
+    );
+    let delivered = b.remote.deliver();
+    assert!(matches!(delivered.as_slice(), [Ok(_)]), "{delivered:?}");
+    b.remote.faults().on_their_way = false;
+    let report = b.sync()?;
+    assert!(report.skipped.is_empty(), "{:?}", report.skipped);
+    assert!(!report.unfinished);
+    a.sync()?;
+    let both = [
+        "d/",
+        "d/mine.txt = the member's edit",
+        "d/theirs.txt = the sharer's edit",
+    ];
+    assert_eq!(a.tree_text(""), both);
+    assert_eq!(b.tree_text(""), both);
+    nothing_moved_out(&out)
+}
+
+/// What is made in a new folder whose own create is on its way waits for it, told so: it
+/// isn't refused as going into a folder that is read-only, and nothing moves out. The folder
+/// delivered, what is in it goes up at the next sync.
+#[test]
+fn what_is_in_a_new_folder_on_its_way_waits_for_it() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    a.write("d/theirs.txt", "one")?;
+    a.sync()?;
+    share_to_edit(&a, &server, "d")?;
+    share_to_edit(&a, &server, "theirs.txt")?;
+    let (mut b, out) = writing_member(&server, "b")?;
+    b.sync()?;
+
+    b.remote.faults().on_their_way = true;
+    b.write("d/New/below.txt", "below")?;
+    let report = b.sync()?;
+    let left = format!("{:?}", report.skipped);
+    assert_eq!(report.skipped.len(), 2, "{left}");
+    assert!(left.contains("to take a change of yours"), "{left}");
+    assert!(left.contains("its folder is on its way"), "{left}");
+    assert!(!left.contains("read-only"), "{left}");
+    assert!(report.refused.is_empty(), "{:?}", report.refused);
+    nothing_moved_out(&out)?;
+
+    let delivered = b.remote.deliver();
+    assert!(matches!(delivered.as_slice(), [Ok(_)]), "{delivered:?}");
+    b.remote.faults().on_their_way = false;
+    b.sync()?;
+    b.sync()?;
+    a.sync()?;
+    let both = [
+        "d/",
+        "d/New/",
+        "d/New/below.txt = below",
+        "d/theirs.txt = one",
+    ];
+    assert_eq!(a.tree_text(""), both);
+    assert_eq!(b.tree_text(""), both);
+    nothing_moved_out(&out)
+}
+
+/// Their server taking none of the member's writes, the run's other writes are held after
+/// the first few that waited: not sent, each to wait for an answer that won't come. All of
+/// them go up once it takes them again.
+#[test]
+fn writes_on_their_way_hold_the_runs_other_writes_after_a_few() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    a.write("d/theirs.txt", "one")?;
+    a.sync()?;
+    share_to_edit(&a, &server, "d")?;
+    share_to_edit(&a, &server, "theirs.txt")?;
+    let (mut b, out) = writing_member(&server, "b")?;
+    b.sync()?;
+
+    b.remote.faults().on_their_way = true;
+    let made = 24;
+    for n in 0..made {
+        b.write(&format!("d/new-{n:02}.txt"), "new")?;
+    }
+    let report = b.sync()?;
+    assert_eq!(report.skipped.len(), made, "{:?}", report.skipped);
+    let left = format!("{:?}", report.skipped);
+    assert!(left.contains("held: "), "{left}");
+    let sent = b.remote.deliver().len();
+    assert!((3..made).contains(&sent), "{sent} of {made} were sent");
+
+    b.remote.faults().on_their_way = false;
+    b.sync()?;
+    b.sync()?;
+    a.sync()?;
+    assert_eq!(a.tree_text("").len(), made + 2, "{:?}", a.tree_text(""));
+    assert_eq!(a.tree_text(""), b.tree_text(""));
+    nothing_moved_out(&out)
+}

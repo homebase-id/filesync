@@ -502,6 +502,17 @@ pub enum RemoteError {
         why: String,
         retry_after: std::time::Duration,
     },
+    /// A write to another identity's drive is on its way there: this identity's server took
+    /// it and theirs hasn't yet (a member's write goes through its own server). No failure,
+    /// and this one write's alone: it is asked again after `retry_after` (asked again as it
+    /// was, it is answered from what was sent, nothing sent twice), and everything else of
+    /// the drive goes on meanwhile. Whose server is waited for, in words for the user
+    /// (`why`). Not [`RemoteError::Waiting`], which is the whole share's.
+    #[error("{why}")]
+    OnItsWay {
+        why: String,
+        retry_after: std::time::Duration,
+    },
     /// Reading the local upload source or writing the download sink failed.
     #[error(transparent)]
     Io(#[from] std::io::Error),
@@ -647,7 +658,9 @@ impl RemoteError {
         match self {
             RemoteError::Transient(_) => ErrorClass::Transient,
             // (Asked again when it says, as a busy server is.)
-            RemoteError::Later { .. } | RemoteError::Waiting { .. } => ErrorClass::RateLimited,
+            RemoteError::Later { .. }
+            | RemoteError::Waiting { .. }
+            | RemoteError::OnItsWay { .. } => ErrorClass::RateLimited,
             RemoteError::Denied(..) => ErrorClass::Denied,
             RemoteError::Full { .. } => ErrorClass::Full,
             // The remote moved on, or rejected the bytes (changed mid-upload), or the file grew
@@ -691,9 +704,9 @@ impl RemoteError {
     /// When the server said to ask again (`Retry-After`).
     pub fn retry_after(&self) -> Option<std::time::Duration> {
         match self {
-            RemoteError::Later { retry_after, .. } | RemoteError::Waiting { retry_after, .. } => {
-                Some(*retry_after)
-            }
+            RemoteError::Later { retry_after, .. }
+            | RemoteError::Waiting { retry_after, .. }
+            | RemoteError::OnItsWay { retry_after, .. } => Some(*retry_after),
             RemoteError::Full { retry_after, .. } => *retry_after,
             _ => None,
         }
@@ -718,6 +731,10 @@ impl RemoteError {
                 retry_after: *retry_after,
             },
             RemoteError::Waiting { why, retry_after } => RemoteError::Waiting {
+                why: why.clone(),
+                retry_after: *retry_after,
+            },
+            RemoteError::OnItsWay { why, retry_after } => RemoteError::OnItsWay {
                 why: why.clone(),
                 retry_after: *retry_after,
             },

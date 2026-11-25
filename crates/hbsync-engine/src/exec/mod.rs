@@ -98,6 +98,12 @@ pub(crate) struct Executor<'a> {
     parents: HashMap<NodeId, bool>,
     /// The folder's refusals of the operations planned ([`crate::refused`]).
     refusals: Refusals,
+    /// The nodes whose write to another identity's drive is on its way there or was held, in
+    /// this run or an earlier one of this sync ([`Outcome::Wait`]), and what was left for
+    /// one of those as its folder. None is asked again in this sync (their server said
+    /// when), and what is to go into one waits for it, told so (it isn't refused: the folder
+    /// isn't there yet).
+    on_its_way: HashSet<NodeId>,
     /// The sync root, written only through it.
     disk: Disk<'a>,
     /// Where what moved out of a read-only folder is told (§13), whatever the run's end
@@ -114,14 +120,31 @@ struct Heard {
     /// The files the drive has in a version this device can't read
     /// ([`ReadTx::unreadable_files`]), read at the run's first write to an existing file.
     unreadable: Option<HashSet<hbsync_types::RemoteFileId>>,
+    /// Writes to another identity's drive that ended on their way there, in a row
+    /// ([`Outcome::Wait`]): none taken between them.
+    waits: u32,
 }
 
+/// So many writes on their way in a row, and the run's other writes to that drive are held:
+/// their server isn't taking any, and each more would cost the adapter's wait for it (and a
+/// file its upload) to learn the same.
+const WAIT_HOLD: u32 = 3;
+
 impl Heard {
-    /// Notes what an operation's `outcome` told of the drive: it is full.
-    fn ended(&mut self, outcome: &Outcome) {
-        if matches!(outcome, Outcome::Full(_)) {
-            self.full = true;
+    /// Notes what `op`'s `outcome` told of the drive: it is full; its owner's server takes
+    /// this identity's writes, or doesn't for now.
+    fn ended(&mut self, op: &Op, outcome: &Outcome) {
+        match outcome {
+            Outcome::Full(_) => self.full = true,
+            Outcome::Wait(..) => self.waits += 1,
+            Outcome::Done | Outcome::Settled if op.writes_remote() => self.waits = 0,
+            _ => {}
         }
+    }
+
+    /// Whether the run's writes to another identity's drive are held ([`WAIT_HOLD`]).
+    fn holds_writes(&self) -> bool {
+        self.waits >= WAIT_HOLD
     }
 }
 
@@ -191,6 +214,7 @@ impl<'a> Executor<'a> {
             counted: HashSet::new(),
             parents: HashMap::new(),
             refusals: Refusals::default(),
+            on_its_way: HashSet::new(),
             disk: Disk::new(folder, &cfg.hooks),
             moved_out: None,
         }
@@ -245,9 +269,16 @@ impl<'a> Executor<'a> {
         self
     }
 
+    /// With the nodes whose write was on its way, or held, in the sync's earlier runs.
+    pub(crate) fn with_on_its_way(mut self, nodes: HashSet<NodeId>) -> Self {
+        self.on_its_way = nodes;
+        self
+    }
+
     /// Runs a plan's operations, in order.
     pub(crate) fn run(mut self, ops: Vec<Op>) -> Result<ExecReport, StateError> {
         self.run_ops(ops)?;
+        self.report.on_its_way = self.on_its_way;
         Ok(self.report)
     }
 
@@ -288,10 +319,30 @@ impl<'a> Executor<'a> {
             // Read-only (§13): nothing goes to the drive, whatever planned it, but what this
             // identity may write there. Asked once what the op waits for in the batch ran (a
             // folder made there: what is made in it is asked of that folder's row).
-            if self.folder.read_only.is_some() && op.writes_remote() && !self.may_change(&op)? {
-                let never = Outcome::unsyncable("the folder is read-only: the drive isn't written");
-                self.handle(op, attempts, never, None)?;
-                continue;
+            if self.folder.read_only.is_some() && op.writes_remote() {
+                // What is to go into a folder whose own write is on its way waits for it (it
+                // has no row to ask yet), and what is in that with it. And where their
+                // server took none of the last few writes, the rest wait unsent.
+                let held = if self.on_its_way.contains(&op.node()) {
+                    Some("on its way to the drive: asked again later")
+                } else if self.goes_into_one_on_its_way(&op)? {
+                    Some("its folder is on its way to the drive")
+                } else if self.heard.holds_writes() {
+                    Some("held: the drive's server isn't taking changes for now")
+                } else {
+                    None
+                };
+                if let Some(why) = held {
+                    self.on_its_way.insert(op.node());
+                    self.handle(op, attempts, Outcome::waiting(why), None)?;
+                    continue;
+                }
+                if !self.may_change(&op)? {
+                    let never =
+                        Outcome::unsyncable("the folder is read-only: the drive isn't written");
+                    self.handle(op, attempts, never, None)?;
+                    continue;
+                }
             }
             // A folder temporarily inside its own destination waits for the move that takes
             // the destination out (§8a): moved now, the drive would hold a cycle.
@@ -351,6 +402,20 @@ impl<'a> Executor<'a> {
     /// is; a folder this run made there is one); a node it may change removed (to its
     /// owner's Recently deleted). Nothing made at or moved to or from the top, and nothing
     /// deleted for good.
+    /// Whether `op` puts its node into a folder whose own write to the drive is on its way
+    /// there, or was held, in this run ([`Executor::on_its_way`]): one the store has no row
+    /// of yet.
+    fn goes_into_one_on_its_way(&mut self, op: &Op) -> Result<bool, StateError> {
+        let into = match op {
+            Op::RemoteCreate { parent, .. } | Op::RemoteUpdate { parent, .. } => *parent,
+            _ => return Ok(false),
+        };
+        if !self.on_its_way.contains(&into) {
+            return Ok(false);
+        }
+        Ok(self.db.read(|s| s.get_mirror(into))?.is_none())
+    }
+
     fn may_change(&mut self, op: &Op) -> Result<bool, StateError> {
         if !self.folder.writes {
             return Ok(false);
@@ -451,7 +516,7 @@ impl<'a> Executor<'a> {
         let (outcome, mut record) = self.refusals_after(&op, outcome)?;
         self.placement_ended(&op, &outcome)?;
         self.schedule.ended(&op, &outcome);
-        self.heard.ended(&outcome);
+        self.heard.ended(&op, &outcome);
         match outcome {
             Outcome::Done => {
                 self.record(&op, gone)?;
@@ -506,6 +571,16 @@ impl<'a> Executor<'a> {
                 let node = op.node();
                 self.db.write(|s| s.folder().mark_dirty(node))?;
                 self.report.news.full = Some(crate::time::full_hold(after));
+            }
+            // Left for a later plan, as it is: the same write asked again is answered from
+            // what was sent. (Not behind: its landing is announced, as any change there.)
+            Outcome::Wait(why, after) => {
+                let node = op.node();
+                self.db.write(|s| s.folder().mark_dirty(node))?;
+                self.on_its_way.insert(node);
+                let soonest = self.report.not_before.map_or(after, |s| s.min(after));
+                self.report.not_before = Some(soonest);
+                self.report.skipped.push((op, Skip::Waiting(why)));
             }
             Outcome::Fatal(e) => return Err(e),
         }
@@ -658,7 +733,10 @@ impl<'a> Executor<'a> {
                 if let Err(e) = self.commit_ran(ran, &mut pending) {
                     first_error = Some(e);
                 }
-                first_error.is_none() && !self.should_stop() && !self.schedule.backing_off()
+                first_error.is_none()
+                    && !self.should_stop()
+                    && !self.schedule.backing_off()
+                    && !self.heard.holds_writes()
             },
         );
         // What never started leaves no record (one that runs later writes its own).

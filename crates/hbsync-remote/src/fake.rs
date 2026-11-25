@@ -1188,7 +1188,7 @@ type Received = Option<(hbsync_types::ContentHash, Vec<u8>)>;
 /// The answer to a write of the member's that is still on its way to the owner's drive, as
 /// the Homebase adapter gives it (`PeerRemote`: asked again in a minute).
 fn on_its_way() -> RemoteError {
-    RemoteError::Waiting {
+    RemoteError::OnItsWay {
         why: "waiting for the owner's server to take a change of yours".into(),
         retry_after: Duration::from_secs(60),
     }

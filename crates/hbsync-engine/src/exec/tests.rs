@@ -4618,6 +4618,17 @@ fn errors_go_through_the_policy() {
         }
         other => panic!("{other:?}"),
     }
+    // A write on its way to another identity's drive is this operation's wait alone: the
+    // run isn't stopped.
+    let on_its_way = remote_outcome(RemoteError::OnItsWay {
+        why: "waiting for tom's server".into(),
+        retry_after: Duration::from_secs(60),
+    });
+    assert!(
+        matches!(&on_its_way, Outcome::Wait(why, after)
+            if why == "waiting for tom's server" && *after == Duration::from_secs(60)),
+        "{on_its_way:?}"
+    );
     let token = hbsync_remote::Refusal::Token;
     let refused = remote_outcome(RemoteError::Denied("no more".into(), token));
     match refused {

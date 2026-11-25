@@ -113,11 +113,11 @@ fn a_members_writes_on_their_way_are_its_servers() -> R {
     one.faults().on_their_way = true;
     assert!(matches!(
         create_file(&one, &new, b"1"),
-        Err(RemoteError::Waiting { .. })
+        Err(RemoteError::OnItsWay { .. })
     ));
     assert!(matches!(
         create_file(&other, &new, b"1"),
-        Err(RemoteError::Waiting { .. })
+        Err(RemoteError::OnItsWay { .. })
     ));
     let delivered = other.deliver();
     assert!(matches!(delivered.as_slice(), [Ok(_)]), "{delivered:?}");
@@ -129,7 +129,7 @@ fn a_members_writes_on_their_way_are_its_servers() -> R {
 /// The answer of a write still on its way.
 fn waits<T: std::fmt::Debug>(answer: Result<T, RemoteError>) {
     assert!(
-        matches!(answer, Err(RemoteError::Waiting { .. })),
+        matches!(answer, Err(RemoteError::OnItsWay { .. })),
         "{answer:?}"
     );
 }
@@ -164,7 +164,10 @@ fn a_members_write_on_its_way_lands_when_it_is_delivered() -> R {
     waits(create_file(&member, &new, b"2"));
     let stopped = member.set_removed(std::slice::from_ref(&target), true)?;
     assert!(stopped.answers.is_empty());
-    assert!(matches!(stopped.stopped, Some(RemoteError::Waiting { .. })));
+    assert!(matches!(
+        stopped.stopped,
+        Some(RemoteError::OnItsWay { .. })
+    ));
     // Nothing is written yet.
     assert_eq!(sharer.header(at.file_id)?.version, at.version);
     assert_eq!(sharer.server().live_names(), ["shared", "theirs"]);
@@ -480,7 +483,10 @@ fn a_members_removals_stop_at_the_one_on_its_way() -> R {
     member.faults().on_their_way = true;
     let stopped = member.set_removed(&targets(&[0, 1, 2]), true)?;
     assert!(stopped.answers.is_empty(), "{stopped:?}");
-    assert!(matches!(stopped.stopped, Some(RemoteError::Waiting { .. })));
+    assert!(matches!(
+        stopped.stopped,
+        Some(RemoteError::OnItsWay { .. })
+    ));
     member.faults().on_their_way = false;
     assert_eq!(member.deliver().len(), 1);
     assert_eq!(
@@ -495,7 +501,7 @@ fn a_members_removals_stop_at_the_one_on_its_way() -> R {
     waits(member.update(&made[2].1, &renamed(&made[2].0), None));
     member.faults().on_their_way = false;
     let mixed = member.set_removed(&targets(&[3, 1, 2, 0]), true)?;
-    assert!(matches!(mixed.stopped, Some(RemoteError::Waiting { .. })));
+    assert!(matches!(mixed.stopped, Some(RemoteError::OnItsWay { .. })));
     assert!(
         matches!(
             mixed.answers.as_slice(),

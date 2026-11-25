@@ -736,7 +736,7 @@ impl PeerRemote {
     }
 
     fn on_its_way(&self) -> RemoteError {
-        RemoteError::Waiting {
+        RemoteError::OnItsWay {
             why: format!(
                 "waiting for {}'s server to take a change of yours",
                 self.owner()
@@ -919,7 +919,7 @@ mod tests {
         assert!(earlier(&a, false, over).is_none());
         let waiting = sam.waits(SENT, &a, over, None, false);
         assert!(
-            matches!(waiting, RemoteError::Waiting { retry_after, .. } if retry_after == ASK_AGAIN)
+            matches!(waiting, RemoteError::OnItsWay { retry_after, .. } if retry_after == ASK_AGAIN)
         );
         let found = earlier(&a, false, over).expect("found");
         assert_eq!(found.sent.version, SENT.version);
@@ -1138,7 +1138,8 @@ mod tests {
         let (meta, content) = sent_file();
         let remembers = || sam.writes.earlier(&meta, true, None).is_some();
         let mine = || their_header(Some(SENT.global_transit_id));
-        // Their file not read: remembered, as the send it was.
+        // Their file not read: remembered, as the send it was. (The whole share's wait: their
+        // key isn't opened yet.)
         let unread = sam.added(mine(), SENT, None, &meta, (content, true));
         assert!(
             matches!(unread, Err(RemoteError::Waiting { .. })),
@@ -1329,16 +1330,12 @@ mod tests {
             );
             assert!(sam.own.drive_key.lock().sends);
         }
-        // An earlier send of the node staged still, and not connected: waited for.
-        for waited in [
-            api(400, Some("existingFileWithUniqueId")),
-            api(400, Some("notAConnectedIdentity")),
-        ] {
-            assert!(matches!(
-                sam.send_error(waited),
-                RemoteError::Waiting { .. }
-            ));
-        }
+        // An earlier send of the node staged still: this write's own wait. Not connected:
+        // the whole share's.
+        let staged = sam.send_error(api(400, Some("existingFileWithUniqueId")));
+        assert!(matches!(staged, RemoteError::OnItsWay { .. }), "{staged:?}");
+        let apart = sam.send_error(api(400, Some("notAConnectedIdentity")));
+        assert!(matches!(apart, RemoteError::Waiting { .. }), "{apart:?}");
         Ok(())
     }
 

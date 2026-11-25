@@ -1352,6 +1352,7 @@ impl Runner {
                     } else if report.unfinished {
                         Synced::Unfinished {
                             progressed: report.ops_done > 0,
+                            not_before: report.not_before,
                         }
                     } else {
                         Synced::Done
