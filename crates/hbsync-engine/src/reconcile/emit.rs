@@ -343,7 +343,7 @@ impl Reconciler<'_> {
                     Op::LocalDelete { subtree, .. } => (subtree.iter()).all(|n| {
                         self.scope.contains(n)
                             || self.masks.masked.contains(n)
-                            || !self.loses_here(*n)
+                            || (i.base.contains(*n) && !self.loses_here(*n))
                     }),
                     _ => true,
                 }),

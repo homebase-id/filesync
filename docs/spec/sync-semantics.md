@@ -789,9 +789,11 @@ expected fingerprint is treated as done.
     deleted there isn't deleted here (the delete would take the change, which nothing
     sends while the node waits) nor made again there, and is planned again with it, until
     the folder reads; what else is in it and is gone there goes item by item. So does one
-    that waits while the drive's picture isn't whole (§6.3). Changed means its bytes (or
-    made here): renamed, moved or tagged here and no more, it goes with its folder, and
-    comes back as the drive has it once the folder reads. (On an identity's own drive:
+    that waits while the drive's picture isn't whole (§6.3). Changed means its bytes, or
+    made here (no version synced here yet, whatever the drive has of it: §7, nothing is
+    unlinked here that isn't the version synced): renamed, moved or tagged here and no
+    more, it goes with its folder, and comes back as the drive has it once the folder
+    reads. (On an identity's own drive:
     read-only, a change here moves out instead, §13.)
   - Edited on both sides, what waits so makes no conflict copy meanwhile (§6.3): it
     stays as it is here, its edit in it, nothing sent for it, and a folder gone there

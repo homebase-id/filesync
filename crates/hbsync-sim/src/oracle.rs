@@ -1724,7 +1724,7 @@ fn changed_here(
         r.kind == here.kind && (here.content.zip(r.content)).is_none_or(|(l, r)| l.hash == r.hash)
     });
     match base {
-        None => !drives,
+        None => true,
         Some(b) if b.kind != here.kind => true,
         Some(b) => match (b.content, here.content) {
             (Some(bc), Some(lc)) => local_hash.unwrap_or(bc.hash) != lc.hash && !drives,
