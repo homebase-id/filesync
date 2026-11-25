@@ -192,13 +192,46 @@ pub(crate) const USE_TRANSIT_READ: u32 = 305;
 /// odin-core's `UseTransitWrite` (210, **[verified]** `PermissionKeys`; live: without it a send
 /// answers 403 "Sending, updating or deleting files on a peer requires UseTransitWrite"): to
 /// send to other identities' drives through this one's server, which a change to what they
-/// share with this identity is. Not asked for yet ([`PERMISSION_KEYS`]): a share is written to
-/// only where the app holds it.
+/// share with this identity is: a share is written to only where the app holds it. It is the
+/// server's one key for sending to others, so it lets the app send more than that (what the
+/// owner's circles let it write on other identities' drives; live relays): the owner's
+/// consent page says it as the server names it.
 pub(crate) const USE_TRANSIT_WRITE: u32 = 210;
 
-/// The keys the app asks for as the owner app reads them (`p`, odin-js
-/// `permissionParamToPermissionSet`: numbers joined by commas): [`USE_TRANSIT_READ`].
-const PERMISSION_KEYS: &str = "305";
+/// Which of the permission keys the app asks for ([`USE_TRANSIT_READ`],
+/// [`USE_TRANSIT_WRITE`]) it doesn't hold: an install from before it asked for one lacks
+/// that one until the owner approves it ([`update_url`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Lacks {
+    /// [`USE_TRANSIT_READ`]: what others share with this identity isn't read.
+    pub reads: bool,
+    /// [`USE_TRANSIT_WRITE`]: what they share for editing isn't changed.
+    pub sends: bool,
+}
+
+impl Lacks {
+    /// Both: what a new registration asks for.
+    pub const ALL: Lacks = Lacks {
+        reads: true,
+        sends: true,
+    };
+
+    /// The app holds every key it asks for.
+    pub fn none(self) -> bool {
+        self == Lacks::default()
+    }
+
+    /// The keys lacking as the owner app reads them (`p`, odin-js
+    /// `permissionParamToPermissionSet`: numbers joined by commas).
+    fn keys(self) -> String {
+        let keys = [
+            self.reads.then_some(USE_TRANSIT_READ),
+            self.sends.then_some(USE_TRANSIT_WRITE),
+        ];
+        let keys: Vec<String> = keys.iter().flatten().map(u32::to_string).collect();
+        keys.join(",")
+    }
+}
 
 /// The YouAuth `permission_request` for registering the app (or authorizing a new device).
 /// `friendly_name` names this device in the owner's list of the app's clients.
@@ -214,7 +247,7 @@ pub(crate) fn permission_request(friendly_name: &str, return_url: &str) -> serde
         // Read when the app registers; an installed app gets it on `/owner/appupdate`
         // ([`update_url`]), as a sign-in never adds permissions (odin-core
         // `AppNeedsRegistration`, verified).
-        "p": PERMISSION_KEYS,
+        "p": Lacks::ALL.keys(),
         // Created with the app when it is installed; only the install reads it.
         "ac": serde_json::to_string(&[circle_declaration()]).unwrap_or_default(),
         "return": return_url,
@@ -227,10 +260,10 @@ pub enum Update {
     /// [`SYNC_DRIVE`], made when it is missing, owned by the app (one that exists is only
     /// granted: `ensureAppOwnedDrives`, `ensureDrive`, verified): for [`HomebaseError::NoDrive`].
     Drive,
-    /// [`USE_TRANSIT_READ`], for an install from before the app asked for it. Only when it
-    /// lacks it: the page adds the keys it is asked for to the ones the app has, a second
-    /// copy too, and tells the owner of it as more access (odin-js, verified).
-    Permission,
+    /// The permission keys an install from before the app asked for them lacks. Only those:
+    /// the page adds the keys it is asked for to the ones the app has, a second copy too,
+    /// and tells the owner of it as more access (odin-js, verified).
+    Permission(Lacks),
 }
 
 /// The owner app's page that gives the installed app more (`/owner/appupdate`, odin-js
@@ -239,9 +272,13 @@ pub enum Update {
 pub fn update_url(identity: &str, return_url: &str, what: Update) -> String {
     let app_id = APP_ID.simple().to_string();
     let drives = json!([drive_request(&SYNC_DRIVE)]).to_string();
+    let keys;
     let asked = match what {
         Update::Drive => ("d", drives.as_str()),
-        Update::Permission => ("p", PERMISSION_KEYS),
+        Update::Permission(lacks) => {
+            keys = lacks.keys();
+            ("p", keys.as_str())
+        }
     };
     let query = crate::query(&[
         ("appId", &app_id),
@@ -331,14 +368,27 @@ mod tests {
         assert_eq!(params["d"], registered["d"].as_str().ok_or("no d")?);
         // The drive alone: a key the app holds would be stored twice.
         assert!(!params.contains_key("p"));
-        let (_, params) = query_of(&update_url(
-            "anna.example.com",
-            "http://x/b",
-            Update::Permission,
-        ))?;
+        // The keys, only those it lacks: all of them are what registration asks for.
+        let asked = |lacks| {
+            let url = update_url("anna.example.com", "http://x/b", Update::Permission(lacks));
+            query_of(&url).map(|(_, params)| params)
+        };
+        let params = asked(Lacks::ALL)?;
         assert_eq!(params["p"], registered["p"].as_str().ok_or("no p")?);
-        assert_eq!(params["p"], USE_TRANSIT_READ.to_string());
+        assert_eq!(params["p"], "305,210");
         assert!(!params.contains_key("d"));
+        let (reads, sends) = (true, true);
+        let only_reads = Lacks {
+            reads,
+            ..Lacks::default()
+        };
+        let only_sends = Lacks {
+            sends,
+            ..Lacks::default()
+        };
+        assert_eq!(asked(only_reads)?["p"], "305");
+        assert_eq!(asked(only_sends)?["p"], "210");
+        assert!(Lacks::default().none() && !only_sends.none());
         Ok(())
     }
 

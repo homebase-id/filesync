@@ -565,8 +565,8 @@ included (service managers restart it then).
   for the account's own folder; `hbsync status` shows a share with `->`, and it is never
   the folder shown first).
   **A share is written to where the app may send to other identities** (Homebase: it holds
-  the permission `UseTransitWrite`, `homebase-api-notes.md`, "The permission"; no install
-  holds it until the app asks for it). Its runner asks its drive (`Remote::writes`) as the
+  the permission `UseTransitWrite`, `homebase-api-notes.md`, "The permission"; asked for at
+  registration, and by `hbsync approve` for an install from before that). Its runner asks its drive (`Remote::writes`) as the
   folder opens and as each sync is due, and opens the folder again where the answer changed:
   - **Given the permission**, what is shared for editing is written to from the next sync
     on, and files that may be changed become writable on disk.
@@ -939,8 +939,12 @@ with a capital):
   waits for it. The account's status says so (`needs_approval`), whichever share met it:
   one that can't be opened (it has no folder in the status) or one that is synced. The
   tray shows the warning dot, and a line saying why where no share's line does. Both ask
-  through one function (`setup::approve`): the owner's app-update page for that one
-  permission (`/owner/appupdate?p=305`), which comes back to this computer as the page
+  through one function (`setup::approve`): the owner's app-update page for the permissions
+  the app lacks, of the two it asks for (`/owner/appupdate?p=305,210`: to read what others
+  share, and to change what they share for editing; `p=210` alone for an install that reads
+  already, which `hbsync approve` asks for though nothing waits: its shares are read-only
+  until then), and says what was given in those words ("… may now change what others share
+  with you for editing on anna.example.com."). The page comes back to this computer as the page
   that gives the drive back does (`--paste` and `--browser` as `hbsync login`; in the tray,
   the page that follows along, which can start over); given, Sync now tries what waited at
   once (a daemon that isn't running reads the permission as it starts). Where the app may

@@ -170,18 +170,9 @@ impl Server {
         let identity = lock(&self.pages.shared).identity.clone();
         let paths = self.paths.clone();
         self.run_login(identity.clone(), true, move |owner| {
-            let asked = setup::approve(&paths, &hbsync_app::Identity::new(&identity), owner);
-            match asked.map_err(|e| e.to_string())? {
-                setup::Approved::Already => Ok(format!(
-                    "{APP_NAME} may already read what others share with you on {identity}."
-                )),
-                setup::Approved::Given => Ok(format!(
-                    "{APP_NAME} may now read what others share with you on {identity}."
-                )),
-                setup::Approved::Declined => Err(format!(
-                    "{APP_NAME} wasn't given the permission to read what others share with you."
-                )),
-            }
+            let identity = hbsync_app::Identity::new(&identity);
+            let asked = setup::approve(&paths, &identity, owner);
+            asked.map_err(|e| e.to_string())?.said(&identity)
         })
     }
 
@@ -348,8 +339,12 @@ impl setup::Owner for InTray {
         self.ask(setup::begin_restore(identity)?)
     }
 
-    fn approve_sharing(&mut self, identity: &str) -> Result<bool, setup::HomebaseError> {
-        self.ask(setup::begin_approval(identity)?)
+    fn approve_sharing(
+        &mut self,
+        identity: &str,
+        lacks: setup::Lacks,
+    ) -> Result<bool, setup::HomebaseError> {
+        self.ask(setup::begin_approval(identity, lacks)?)
     }
 }
 

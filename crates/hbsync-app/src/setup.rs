@@ -9,9 +9,10 @@ use std::time::Duration;
 
 pub use crate::login::{Asked, Paste};
 use hbsync_engine::root::{RootError, SyncRoot};
+/// What an [`Owner`] answers with.
+pub use hbsync_homebase::app::Lacks;
 use hbsync_homebase::drive::HomebaseRemote;
 use hbsync_homebase::{Client, app};
-/// What an [`Owner`] answers with.
 pub use hbsync_homebase::{Credentials, HomebaseError};
 use hbsync_remote::Remote;
 
@@ -80,23 +81,25 @@ pub fn begin_restore(identity: &str) -> Result<crate::login::Asked, HomebaseErro
     crate::login::begin_restore(identity)
 }
 
-/// Starts asking the owner of `identity` to let the app read what others share with them
-/// (an install from before the app asked for that lacks the permission: what others share
-/// waits for it, [`crate::protocol::FolderStatus::needs_approval`]). The caller takes the
-/// browser to `url` and waits with `finish_unless` ([`APPROVAL_TIMEOUT`]).
-pub fn begin_approval(identity: &str) -> Result<crate::login::Asked, HomebaseError> {
-    crate::login::begin_approval(identity)
+/// Starts asking the owner of `identity` for the permissions the app `lacks` ([`lacking`]):
+/// to read what others share with them (an install from before the app asked for that
+/// lacks it: what others share waits for it,
+/// [`crate::protocol::FolderStatus::needs_approval`]), to change what they share for editing
+/// (one from before it asked for that: what is shared is read-only meanwhile). The caller
+/// takes the browser to `url` and waits with `finish_unless` ([`APPROVAL_TIMEOUT`]).
+pub fn begin_approval(identity: &str, lacks: Lacks) -> Result<crate::login::Asked, HomebaseError> {
+    crate::login::begin_approval(identity, lacks)
 }
 
-/// Whether the app may read what others share with `identity` now, by this computer's
+/// Which of the permissions it asks for the app lacks on `identity` now, by this computer's
 /// login: asked before the owner is (the page adds a permission the app holds a second
 /// time). One request.
-pub fn sharing_approved(paths: &Paths, identity: &Identity) -> crate::Result<bool> {
+pub fn lacking(paths: &Paths, identity: &Identity) -> crate::Result<Lacks> {
     let Some((creds, _)) = CredentialStore::open(paths).load(identity)? else {
         let none = format!("this computer isn't signed in on {identity}: `hbsync setup` does");
         return Err(Refusal::No(none).into());
     };
-    match hbsync_homebase::drive::reads_shared(&Client::new(&creds)?) {
+    match hbsync_homebase::drive::lacks(&Client::new(&creds)?) {
         // The login is what is refused: an approval asked for now would be for nothing.
         Err(e) if e.refusal().is_some() => {
             let again = format!(
@@ -105,39 +108,60 @@ pub fn sharing_approved(paths: &Paths, identity: &Identity) -> crate::Result<boo
             );
             Err(Refusal::No(again).into())
         }
-        approved => Ok(approved?),
+        lacks => Ok(lacks?),
     }
 }
 
-/// How the owner's approval of the app's reading what others share came out ([`approve`]).
+/// How the owner's approval of what the app does with what others share came out
+/// ([`approve`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Approved {
     /// The app may already (approved elsewhere since): nothing was asked.
     Already,
-    /// The owner gave it just now.
-    Given,
-    /// The owner said no.
-    Declined,
+    /// The owner gave it just now: these.
+    Given(Lacks),
+    /// The owner said no to these.
+    Declined(Lacks),
 }
 
-/// Has the owner of `identity` let the app read what others share with them, through
+impl Approved {
+    /// The outcome in a sentence, for whoever asked (the CLI, the tray's page): `Err` where
+    /// the owner said no.
+    pub fn said(self, identity: &Identity) -> Result<String, String> {
+        match self {
+            Approved::Already => Ok(format!(
+                "{APP_NAME} may already {} on {identity}.",
+                crate::words::permitted(Lacks::ALL)
+            )),
+            Approved::Given(lacks) => Ok(format!(
+                "{APP_NAME} may now {} on {identity}.",
+                crate::words::permitted(lacks)
+            )),
+            Approved::Declined(lacks) => Err(crate::words::not_permitted(lacks)),
+        }
+    }
+}
+
+/// Has the owner of `identity` let the app read what others share with them and change what
+/// they share for editing (whichever of the two it lacks), through
 /// `owner` (the browser), and what waited for it tried: Sync now, where a daemon runs (one
 /// that doesn't reads the permission as it starts; one that refuses the sync, its account
 /// still connecting, looks again by itself within the hour; a paused account tries once it
 /// syncs again). Nothing is asked where
-/// the app may already ([`sharing_approved`]): the page would store the permission a second
+/// the app may already ([`lacking`]): the page would store the permission a second
 /// time. Whoever asks for the approval comes through here.
 pub fn approve(
     paths: &Paths,
     identity: &Identity,
     owner: &mut dyn Owner,
 ) -> crate::Result<Approved> {
-    let approved = if sharing_approved(paths, identity)? {
+    let lacks = lacking(paths, identity)?;
+    let approved = if lacks.none() {
         Approved::Already
-    } else if owner.approve_sharing(identity)? {
-        Approved::Given
+    } else if owner.approve_sharing(identity, lacks)? {
+        Approved::Given(lacks)
     } else {
-        return Ok(Approved::Declined);
+        return Ok(Approved::Declined(lacks));
     };
     if let Err(e) = control::daemon(paths, crate::protocol::DaemonControl::SyncNow)
         && !e.is::<control::NotRunning>()
@@ -153,9 +177,10 @@ pub trait Owner {
     fn authorize(&mut self, identity: &str, device: &str) -> Result<Credentials, HomebaseError>;
     /// Asks for the app's drive on `identity` again, waiting for the answer (`false`: no).
     fn restore_drive(&mut self, identity: &str) -> Result<bool, HomebaseError>;
-    /// Asks the owner of `identity` to let the app read what others share with them, waiting
-    /// for the answer (`false`: no).
-    fn approve_sharing(&mut self, identity: &str) -> Result<bool, HomebaseError>;
+    /// Asks the owner of `identity` for the permissions the app `lacks` (to read what others
+    /// share with them, to change what they share for editing), waiting for the answer
+    /// (`false`: no).
+    fn approve_sharing(&mut self, identity: &str, lacks: Lacks) -> Result<bool, HomebaseError>;
 }
 
 /// The owner's answers in the browser, for the command line: each page opened as `opens`
@@ -256,9 +281,10 @@ impl Owner for InBrowser<'_> {
         self.ask(&what, begin_restore(identity)?)
     }
 
-    fn approve_sharing(&mut self, identity: &str) -> Result<bool, HomebaseError> {
-        let what = format!("let {APP_NAME} read what others share with you on {identity}");
-        self.ask(&what, begin_approval(identity)?)
+    fn approve_sharing(&mut self, identity: &str, lacks: Lacks) -> Result<bool, HomebaseError> {
+        let may = crate::words::permitted(lacks);
+        let what = format!("let {APP_NAME} {may} on {identity}");
+        self.ask(&what, begin_approval(identity, lacks)?)
     }
 }
 
@@ -869,9 +895,52 @@ mod tests {
             Ok(self.0)
         }
 
-        fn approve_sharing(&mut self, _: &str) -> Result<bool, HomebaseError> {
+        fn approve_sharing(&mut self, _: &str, _: Lacks) -> Result<bool, HomebaseError> {
             Ok(self.0)
         }
+    }
+
+    /// The outcome of an approval is said by what was asked for: only what the app lacked.
+    #[test]
+    fn an_approval_is_said_by_what_was_asked_for() {
+        let anna = Identity::new("anna.example.com");
+        let (reads, sends) = (true, true);
+        let only_sends = Lacks {
+            sends,
+            ..Lacks::default()
+        };
+        let only_reads = Lacks {
+            reads,
+            ..Lacks::default()
+        };
+        let said = |approved: Approved| approved.said(&anna);
+        assert_eq!(
+            said(Approved::Given(only_sends)),
+            Ok(format!(
+                "{APP_NAME} may now change what others share with you for editing on \
+                 anna.example.com."
+            ))
+        );
+        assert_eq!(
+            said(Approved::Given(only_reads)),
+            Ok(format!(
+                "{APP_NAME} may now read what others share with you on anna.example.com."
+            ))
+        );
+        assert_eq!(
+            said(Approved::Already),
+            Ok(format!(
+                "{APP_NAME} may already read what others share with you, and change what \
+                 they share for editing on anna.example.com."
+            ))
+        );
+        assert_eq!(
+            said(Approved::Declined(Lacks::ALL)),
+            Err(format!(
+                "{APP_NAME} wasn't given the permission to read what others share with you, \
+                 and change what they share for editing."
+            ))
+        );
     }
 
     /// The owner is asked, and their no is a refusal.
