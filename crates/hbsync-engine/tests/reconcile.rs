@@ -5598,6 +5598,14 @@ fn a_folder_let_go_keeps_its_base_while_what_waits_has_its_below_it() {
     let [b, f, q] = ids(3)[..] else {
         unreachable!()
     };
+    let forgotten = |plan: &hbsync_engine::Plan| {
+        let mut nodes: Vec<NodeId> = (plan.ops.iter())
+            .filter(|op| matches!(op, Op::Forget { .. }))
+            .map(Op::node)
+            .collect();
+        nodes.sort();
+        nodes
+    };
     for waits in [true, false] {
         let mut w = World {
             filter: ignoring("d\n"),
@@ -5614,18 +5622,46 @@ fn a_folder_let_go_keeps_its_base_while_what_waits_has_its_below_it() {
         }
         let plan = w.plan();
         assert!(!plan.writes_drive(), "{waits}: {:?}", plan.ops);
-        let mut forgotten: Vec<NodeId> = (plan.ops.iter())
-            .filter(|op| matches!(op, Op::Forget { .. }))
-            .map(Op::node)
-            .collect();
-        forgotten.sort();
         let mut want = match waits {
             true => vec![],
             false => vec![b, f],
         };
         want.sort();
-        assert_eq!(forgotten, want, "{waits}: {:?}", plan.ops);
+        assert_eq!(forgotten(&plan), want, "{waits}: {:?}", plan.ops);
+        // Planned again while it waits: the folder isn't told done.
+        assert!(!waits || !plan.clean.contains(&b), "{:?}", plan.clean);
     }
+}
+
+/// A tree let go whole is forgotten in one plan, every level of it: nothing below it is out
+/// of the plan.
+#[test]
+fn a_tree_let_go_whole_is_forgotten_in_one_plan() {
+    let [top, mid, leaf, other] = ids(4)[..] else {
+        unreachable!()
+    };
+    let mut w = World {
+        filter: ignoring("gone\n"),
+        ..World::default()
+    };
+    w.synced(top, folder(ROOT, "b"))
+        .synced(mid, folder(top, "m"))
+        .synced(leaf, file(mid, "c.txt", "x"))
+        .synced(other, file(top, "o.txt", "y"));
+    for node in [top, mid, leaf, other] {
+        w.local(node, None);
+    }
+    w.remote(top, Some(folder(ROOT, "gone")));
+    let plan = w.plan();
+    assert!(!plan.writes_drive(), "{:?}", plan.ops);
+    let mut forgotten: Vec<NodeId> = (plan.ops.iter())
+        .filter(|op| matches!(op, Op::Forget { .. }))
+        .map(Op::node)
+        .collect();
+    forgotten.sort();
+    let mut want = vec![top, mid, leaf, other];
+    want.sort();
+    assert_eq!(forgotten, want, "{:?}", plan.ops);
 }
 
 /// Read-only, two of the drive's items on one name, both synced here: the one on the name on

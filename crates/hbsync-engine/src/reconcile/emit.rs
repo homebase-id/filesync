@@ -5,7 +5,8 @@ use super::*;
 impl Reconciler<'_> {
     // ---- 4: operations ----
 
-    /// Whether a base below `node` stays after this plan: one out of the plan.
+    /// Whether a base below `node` stays after this plan: one out of the plan, but for what
+    /// is left to other devices, whose base goes in this plan ([`Reconciler::released`]).
     /// Each node's children are asked once a plan (`known`): a tree let go whole (a folder
     /// newly ignored, with all that is in it) costs one look per node.
     fn base_kept_below(&self, node: NodeId, known: &mut HashMap<NodeId, bool>) -> bool {
@@ -15,9 +16,11 @@ impl Reconciler<'_> {
         // (A cycle of bases, as a cycle on the drive leaves them, ends here.)
         known.insert(node, false);
         let children: Vec<NodeId> = self.input.base.children(node).collect();
-        let kept = children
-            .into_iter()
-            .any(|child| !self.scope.contains(&child) || self.base_kept_below(child, known));
+        let kept = children.into_iter().any(|child| {
+            let goes = self.scope.contains(&child)
+                || (self.released.contains(&child) && !self.merged.exists(child));
+            !goes || self.base_kept_below(child, known)
+        });
         known.insert(node, kept);
         kept
     }

@@ -813,7 +813,8 @@ expected fingerprint is treated as done.
     numbered name and goes up, as any clash's loser (§6.3).
   - The record of what waits (its base) is kept where it was, deleted here or not. A
     folder above it that this device lets go meanwhile (no longer synced here: renamed
-    there to a name it ignores, §10, and gone here) keeps its own record with it: a
+    there to a name it ignores, §10, or no longer shared with it, §13, and gone here)
+    keeps its own record with it: a
     folder's is forgotten after those below it, so its forgetting isn't planned while one
     below it is out of the plan (planned all the same, it was held at every sync for as
     long as the wait lasted). Forgotten once that one is planned again (plan
