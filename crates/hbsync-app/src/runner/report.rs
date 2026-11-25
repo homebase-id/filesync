@@ -253,6 +253,7 @@ pub(super) fn record(
     s.error = None;
     s.retry_at = None;
     s.pending = report.pending;
+    s.on_their_way = report.on_their_way;
     s.last_sync = Some(LastSync {
         at,
         millis: took.as_millis() as u64,

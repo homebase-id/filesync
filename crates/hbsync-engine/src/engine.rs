@@ -127,6 +127,9 @@ pub struct SyncReport {
     /// Writes on their way to another identity's drive were left for a later sync: the work
     /// left isn't tried again before this (their server is asked again no sooner).
     pub not_before: Option<Duration>,
+    /// How many items have a change on its way to another identity's drive at the sync's
+    /// end, or held with those: sent, or to be, and not taken there yet. Among `pending`.
+    pub on_their_way: u64,
     /// Nothing was planned: an item at the top of the drive has the name of the folder of
     /// shares, which is to give way first ([`Engine::yield_shares`]). The folder is opened
     /// again ([`SyncRoot::place_shares`]).
@@ -159,6 +162,7 @@ impl SyncReport {
         self.left_aside = later.left_aside;
         self.unfinished = later.unfinished;
         self.not_before = crate::time::sooner(self.not_before, later.not_before);
+        self.on_their_way = later.on_their_way;
     }
 }
 
@@ -785,7 +789,10 @@ impl Engine {
         // at most the sync in progress (sync semantics §8a).
         self.db.flush()?;
         self.on_their_way = crate::exec::OnTheirWay::default();
-        let synced = self.sync_pass(date, pulled);
+        let synced = self.sync_pass(date, pulled).map(|mut report| {
+            report.on_their_way = self.on_their_way.count() as u64;
+            report
+        });
         // Best effort: a failure here leaves what was done undone in no way, and the next
         // sync's opening flush reports it.
         let _ = self.db.flush();

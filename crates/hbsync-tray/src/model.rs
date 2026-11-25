@@ -201,6 +201,8 @@ fn folder_look(s: &FolderStatus) -> Look {
         State::Waiting => Look::UpToDate,
         State::Paused | State::Offline | State::Stopped => Look::Quiet,
         State::Starting | State::Syncing => Look::Busy,
+        // What is left is with another identity's server: this computer is done.
+        State::Idle if s.all_on_their_way() => Look::UpToDate,
         State::Idle if s.pending > 0 => Look::Busy,
         State::Idle => Look::UpToDate,
     }
@@ -835,6 +837,21 @@ mod tests {
         let v = view(&d, &[]);
         assert_eq!(look(&v), Look::Busy);
         assert_eq!(status_line(&v), "Syncing 1,234 of 19,000 files");
+
+        // Items waiting: busy. All of them on their way to another identity's server: this
+        // computer is done.
+        let mut s = status(State::Idle);
+        s.pending = 3;
+        assert_eq!(look(&view(&running(s.clone()), &[])), Look::Busy);
+        s.on_their_way = 3;
+        let d = running(s);
+        let v = view(&d, &[]);
+        assert_eq!(look(&v), Look::UpToDate);
+        assert!(
+            status_line(&v).contains("3 changes on their way"),
+            "{}",
+            status_line(&v)
+        );
     }
 
     #[test]

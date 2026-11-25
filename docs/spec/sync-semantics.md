@@ -1896,6 +1896,12 @@ rules hold too:
     was, the write is answered from what was sent (landed, or still on its way): nothing
     is sent twice. Their server is asked once a sync for it, not once a round, and the
     sync, ending with work left, isn't tried again before the minute is over.
+  - It is told: the sync's report counts the items whose change is on its way, or held
+    with those (`SyncReport::on_their_way`), and the folder's status has the count. Where
+    that is all that is left, the folder shows as up to date and says where the rest is
+    ("Up to date · 3 changes on their way to tom.example.com"); the tray's icon is the
+    quiet one, not the busy one. With other items waiting too, it says how many wait, as
+    ever.
   - Another write of the same item meanwhile (edited again) is another write: it waits
     behind the first (the member's server stages one write of an item at a time), and
     once the first has landed it meets that version: the second edit is then kept as an
