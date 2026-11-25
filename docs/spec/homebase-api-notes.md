@@ -879,7 +879,11 @@ it for editing. Built, and not turned on: a share is still read-only in the prod
 - **One write of a node at a time.** The staged copy carries the node's `uniqueId`, unique
   on the transient drive too: a second write of the node while the first is still in the
   outbox answers `400 existingFileWithUniqueId` (**[verified]** live for a stray copy;
-  **[inferred]** for one still on its way), taken as "still on its way".
+  **[inferred]** for one still on its way), taken as "still on its way". A new file is
+  refused so at its metadata part, before its bytes are read (**[verified]** odin-core
+  `FileSystemStreamWriterBase.AddMetadata`, PR #2019, from v0.1.968): a write asked again
+  with bytes while the earlier one is staged doesn't cost their upload there. (Not looked
+  at: how much of the body this client has sent by the time it reads that answer.)
 - **Not used:** a member's delete. `POST …/files/senddeleterequest` (with
   `expectedVersionTag`, odin-core PR #2140) writes a tombstone; this client moves a member's
   delete to the owner's Recently deleted instead (`archivalStatus` 2, above), and deletes
