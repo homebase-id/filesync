@@ -39,6 +39,7 @@ mod ids;
 mod model;
 mod narrow;
 mod oracle;
+mod outbox;
 mod tagbook;
 mod trace;
 mod world;
@@ -88,6 +89,8 @@ pub struct Sim {
     read: Option<exec::Read>,
     /// The faults it plays, and what they keep ([`Faults`]).
     faults: Faults,
+    /// The writing member's server's writes on their way ([`Sim::with_writes_on_their_way`]).
+    outbox: outbox::Outbox,
 }
 
 impl Sim {
@@ -117,6 +120,7 @@ impl Sim {
             computers: Vec::new(),
             faults: Faults::default(),
             read: None,
+            outbox: outbox::Outbox::default(),
         }
     }
 
@@ -357,6 +361,15 @@ impl Sim {
         self
     }
 
+    /// The writing member's writes are held on their way to the drive (its own server holds
+    /// each: the adapter's answer is that it is on its way, `RemoteError::OnItsWay`), till
+    /// the sharer's server takes them ([`Event::Deliver`], and every one before the clients
+    /// settle: [`Sim::quiesce`]): as `hbsync_remote`'s fake (`Faults::on_their_way`).
+    pub fn with_writes_on_their_way(mut self) -> Self {
+        self.faults.on_their_way = true;
+        self
+    }
+
     /// Client `c` is a member ([`Sim::with_member`]) that writes to what is shared with it for
     /// editing ([`Action::Editable`]): its change of such an item, where the item is, reaches
     /// the drive (an edit, a rename in its folder, tags), and so do what it makes in such a
@@ -487,6 +500,12 @@ impl Sim {
                 }
                 Event::PutBack { client } => self.put_back(client % self.clients.len()),
                 Event::Crash { client } => self.crash(client % self.clients.len()),
+                Event::Deliver { pick } => {
+                    let held = self.outbox.held.len();
+                    if held > 0 {
+                        self.deliver(1 + pick % held);
+                    }
+                }
             }
         }
     }
@@ -620,6 +639,17 @@ impl Sim {
         self.stopped_folders().iter().position(|n| *n == node)
     }
 
+    /// For scripted tests: the bytes client `c`'s item of `node` holds, as their hash.
+    pub fn local_hash(&self, c: usize, node: NodeId) -> Option<hbsync_types::ContentHash> {
+        self.clients[c].local.get(node)?.content.map(|c| c.hash)
+    }
+
+    /// For scripted tests: the bytes the drive has of `node`, live or in Recently deleted, as
+    /// their hash.
+    pub fn drive_hash(&self, node: NodeId) -> Option<hbsync_types::ContentHash> {
+        self.server.node(node)?.0.state.content.map(|c| c.hash)
+    }
+
     /// Whether `node` is in Recently deleted.
     pub fn is_removed(&self, node: NodeId) -> bool {
         self.server.removed.contains_key(&node)
@@ -741,6 +771,10 @@ impl Sim {
         for client in &mut self.clients {
             client.locked.clear();
         }
+        // The member's server takes what it holds, and holds no more: the drive's answers
+        // come, as they do in time.
+        self.faults.on_their_way = false;
+        self.deliver(usize::MAX);
         // A Desktop not added yet is added before the clients settle: then everything syncs.
         while self.add_desktop() {}
     }

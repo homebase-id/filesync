@@ -193,6 +193,92 @@ pub(crate) fn guarded_event(clients: usize) -> impl Strategy<Value = Event> {
     ]
 }
 
+/// `events`, with the sharer's server taking some of the member's writes held on their way
+/// now and then ([`Event::Deliver`]), and a client dying now and then ([`Event::Crash`]).
+pub(crate) fn delivering(
+    clients: usize,
+    events: impl Strategy<Value = Event>,
+) -> impl Strategy<Value = Event> {
+    prop_oneof![
+        8 => with_crashes(clients, events),
+        2 => (0usize..4).prop_map(|pick| Event::Deliver { pick }),
+    ]
+}
+
+/// The users' actions, the owner turning shares to editing and back ([`Action::Editable`]),
+/// as often as [`editing_action`] does; but not sharing or withdrawing shares
+/// ([`Action::Share`]): for a drive shared whole ([`with_all_shared_for_editing`]), within a
+/// known engine gap (a file the member edited in a folder whose share was withdrawn, shared
+/// again at the member's top where another of its name is, is deleted with that folder: see
+/// `a_left_out_edit_in_a_withdrawn_folder_is_deleted_with_it`).
+pub(crate) fn on_its_way_action() -> impl Strategy<Value = Action> + Clone {
+    prop_oneof![
+        12 => action(),
+        1 => (0usize..16, any::<bool>()).prop_map(|(pick, below)| Action::Editable { pick, below }),
+    ]
+}
+
+/// Events on three clients with [`on_its_way_action`], the owner's two computers moving,
+/// deleting and ignoring nothing, nor changing a node under another's write
+/// ([`Action::Meanwhile`]): such an action of theirs is a plan instead.
+/// - within another known engine gap: a file the sharer moved out of what is shared, at the
+///   member's top where another of its name is, edited there and here, has its conflict copy
+///   planned up at every sync, never made;
+/// - and one not settled: a new node of the member's that landed and that the sharer removed
+///   before the member heard is asked again; the simulator's member restores it (a breach),
+///   and answered "it exists", as the adapter answers, it would be asked again at every sync
+///   (the executor settles an `AlreadyExists` against the mirror, which has it in Recently
+///   deleted).
+pub(crate) fn on_its_way_event() -> impl Strategy<Value = Event> {
+    events_of(3, on_its_way_action()).prop_map(|e| match e {
+        Event::Act {
+            client,
+            action:
+                Action::Move { .. }
+                | Action::Delete { .. }
+                | Action::ToggleIgnore
+                | Action::Meanwhile { .. },
+        } if client != 2 => Event::Plan { client },
+        e => e,
+    })
+}
+
+/// Client 2 a member that writes, with the owner's folder `b` holding `b/c.txt` and `b/a`,
+/// and `a` at the top, all shared with it for editing and synced; its writes from then on
+/// held on their way ([`Sim::with_writes_on_their_way`]).
+pub(crate) fn with_all_shared_for_editing(sim: Sim) -> Sim {
+    use Action::*;
+    let mut sim = sim.with_writing_member(2);
+    let act = |action| Event::Act { client: 0, action };
+    let top = sim.pick(0, NodeId::ROOT, true).expect("the top");
+    sim.run(&[
+        act(CreateFile {
+            parent: top,
+            name: 0,
+        }),
+        act(CreateFolder {
+            parent: top,
+            name: 1,
+        }),
+    ]);
+    let b = sim.item(0, "b").expect("b");
+    let parent = sim.pick(0, b, true).expect("b's pick");
+    sim.run(&[
+        act(CreateFile { parent, name: 3 }),
+        act(CreateFile { parent, name: 0 }),
+    ]);
+    assert!(sim.quiesce(30), "no convergence");
+    let (folders, files) = sim.server_counts();
+    let pick = folders + files;
+    sim.run(&[
+        act(Share { pick, below: true }),
+        act(Editable { pick, below: true }),
+    ]);
+    assert!(sim.quiesce(30), "no convergence");
+    sim.hold_member_writes(true);
+    sim
+}
+
 /// Events with a client dying now and then ([`Event::Crash`]).
 pub(crate) fn crashing_event(clients: usize) -> impl Strategy<Value = Event> {
     with_crashes(clients, event(clients))
@@ -501,5 +587,6 @@ pub(crate) fn on_clients(event: Event, clients: usize) -> Event {
         Event::Confirm { client } => Event::Confirm { client: on(client) },
         Event::PutBack { client } => Event::PutBack { client: on(client) },
         Event::Crash { client } => Event::Crash { client: on(client) },
+        Event::Deliver { pick } => Event::Deliver { pick },
     }
 }

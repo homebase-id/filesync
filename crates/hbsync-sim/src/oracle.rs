@@ -94,6 +94,10 @@ pub(crate) struct Ledger {
     /// reads the item as deleted there; where the drive has it so (a restore since, a folder's
     /// removal that took it along), it removes it, as a user's delete of it would.
     commit_lost: BTreeMap<(usize, NodeId), Seen>,
+    /// The sends of a member's writes on their way that landed ([`Ledger::landed`]), and the
+    /// first one that landed twice.
+    landed_sends: BTreeSet<u64>,
+    landed_twice: Option<String>,
 }
 
 /// An item as a user saw it on the drive, but for its tags (a tag change loses to a delete):
@@ -147,6 +151,20 @@ impl Ledger {
             self.commit_lost.remove(&(c, node));
         }
         lost
+    }
+
+    /// Whether client `c`'s removal of `node`, as the drive has it now, is the one a delete's
+    /// lost commit makes ([`Ledger::commit_lost`]), without taking it: a removal on its way
+    /// asks when it is sent, and takes it when it lands.
+    pub(crate) fn lost_commit_removes(&self, c: usize, node: NodeId, now: &Seen) -> bool {
+        self.commit_lost.get(&(c, node)) == Some(now)
+    }
+
+    /// A member's write held on its way (send `send`) landed: `what`, if it landed before.
+    pub(crate) fn landed(&mut self, send: u64, what: impl FnOnce() -> String) {
+        if !self.landed_sends.insert(send) {
+            first(&mut self.landed_twice, || Some(what()));
+        }
     }
 
     /// A user listed Recently deleted: `rows`, each node at its version.
@@ -379,6 +397,9 @@ impl Sim {
         }
         if let Some(what) = &ledger.held_after_put_back {
             return Err(format!("after a put back: {what}"));
+        }
+        if let Some(what) = &ledger.landed_twice {
+            return Err(format!("a member's write landed twice: {what}"));
         }
         if let Some(what) = &ledger.answer_undid {
             return Err(format!("a write's answer was recorded wrongly: {what}"));

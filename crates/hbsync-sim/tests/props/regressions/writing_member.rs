@@ -232,3 +232,150 @@ fn a_move_between_folders_shared_for_editing_reaches_the_drive() {
     assert_eq!(sim.local_paths(2), ["b", "c.txt", "d", "d/b"]);
     assert!(sim.moved_out(2).is_empty());
 }
+
+/// The member's sync: planned and run till its plan is done (what waits is left for the
+/// next).
+fn sync_member(sim: &mut Sim) {
+    sim.run(&[Event::Plan { client: 2 }]);
+    while !sim.planned(2).is_empty() {
+        sim.run(&[Event::Step { client: 2 }]);
+    }
+}
+
+/// The sharer's server takes every write the member's server holds on its way, in order.
+fn deliver_all(sim: &mut Sim) {
+    while sim.writes_on_their_way() > 0 {
+        sim.run(&[Event::Deliver { pick: 0 }]);
+    }
+}
+
+/// An edit on its way (the member's server holds it) waits: asked again, it is on its way
+/// still, nothing sent twice. Delivered, it lands once, and the member settles on it:
+/// nothing moves out.
+#[test]
+fn an_edit_on_its_way_lands_once() {
+    let mut sim = owned(&["a"]);
+    sim.hold_member_writes(true);
+    let a = sim.item(2, "a").expect("a");
+    let before = sim.drive_hash(a);
+    edit(&mut sim, "a");
+    sync_member(&mut sim);
+    assert_eq!(sim.writes_on_their_way(), 1);
+    assert_eq!(sim.drive_hash(a), before, "not on the drive yet");
+    sync_member(&mut sim);
+    assert_eq!(sim.writes_on_their_way(), 1, "asked again, not sent twice");
+    deliver_all(&mut sim);
+    assert_eq!(sim.drive_hash(a), sim.local_hash(2, a), "landed");
+    sync_member(&mut sim);
+    settle(&mut sim);
+    assert_eq!(sim.drive_hash(a), sim.local_hash(2, a));
+    assert_eq!(sim.local_hash(0, a), sim.local_hash(2, a));
+    assert!(sim.moved_out(2).is_empty(), "{:?}", sim.moved_out(2));
+    assert_eq!(sim.local_paths(2), ["a"]);
+}
+
+/// An edit on its way, and the sharer edits the file meanwhile: delivered, the member's
+/// write isn't taken (the file is at another version), which is no breach. The member ends
+/// with the sharer's version, its own edit moved out (the file is at its top, where it may
+/// add nothing: no conflict copy there); the oracle checks the edit's bytes are kept.
+#[test]
+fn an_edit_on_its_way_over_the_sharers_edit_is_not_taken() {
+    let mut sim = owned(&["a"]);
+    sim.hold_member_writes(true);
+    let a = sim.item(2, "a").expect("a");
+    edit(&mut sim, "a");
+    sync_member(&mut sim);
+    assert_eq!(sim.writes_on_their_way(), 1);
+    let file = sim.file_pick(0, a).expect("on the owner's device");
+    sim.run(&[act(0, Action::Edit { file })]);
+    for _ in 0..4 {
+        sim.run(&[Event::Plan { client: 0 }, Event::Step { client: 0 }]);
+    }
+    let theirs = sim.local_hash(0, a);
+    assert_eq!(sim.drive_hash(a), theirs);
+    deliver_all(&mut sim);
+    assert_eq!(sim.drive_hash(a), theirs, "not taken");
+    settle(&mut sim);
+    assert_eq!(sim.drive_hash(a), theirs);
+    assert_eq!(sim.local_paths(2), ["a"]);
+    assert_eq!(sim.local_hash(2, a), theirs);
+    assert_eq!(sim.moved_out(2), ["a"], "the member's edit kept");
+}
+
+/// A new folder with a file in it, both the member's: the folder's write is on its way, and
+/// the file's waits for it unsent (its folder is on its way to the drive). Delivered, the
+/// folder is answered as written, the file goes, and both land.
+#[test]
+fn a_file_in_a_new_folder_on_its_way_waits_for_it() {
+    let mut sim = owned(&["b"]);
+    sim.hold_member_writes(true);
+    let b = sim.item(2, "b").expect("b");
+    let parent = sim.pick(2, b, true).expect("b's pick");
+    sim.run(&[act(2, Action::CreateFolder { parent, name: 5 })]);
+    make(&mut sim, "b/d", 3);
+    sync_member(&mut sim);
+    assert_eq!(sim.writes_on_their_way(), 1, "the folder's alone");
+    deliver_all(&mut sim);
+    assert_eq!(sim.server_paths(), ["a", "b", "b/a", "b/d"]);
+    sync_member(&mut sim);
+    assert_eq!(sim.writes_on_their_way(), 1, "the file's, sent now");
+    deliver_all(&mut sim);
+    settle(&mut sim);
+    assert_eq!(sim.server_paths(), ["a", "b", "b/a", "b/d", "b/d/c.txt"]);
+    assert_eq!(sim.local_paths(0), ["a", "b", "b/a", "b/d", "b/d/c.txt"]);
+    assert_eq!(sim.local_paths(2), ["b", "b/d", "b/d/c.txt"]);
+    assert!(sim.moved_out(2).is_empty());
+}
+
+/// The member's process dies while its edit is on its way: started again, it doesn't
+/// remember the send, and asks again: the edit waits behind the one held, unsent. Delivered,
+/// the edit has landed once; the member, refused on the version it planned over, settles on
+/// the drive's (its own edit): nothing is copied or moved out.
+#[test]
+fn an_edit_on_its_way_through_a_crash_lands_once() {
+    let mut sim = owned(&["a"]);
+    sim.hold_member_writes(true);
+    let a = sim.item(2, "a").expect("a");
+    edit(&mut sim, "a");
+    sync_member(&mut sim);
+    assert_eq!(sim.writes_on_their_way(), 1);
+    sim.run(&[Event::Crash { client: 2 }]);
+    sync_member(&mut sim);
+    assert_eq!(
+        sim.writes_on_their_way(),
+        1,
+        "waits behind the one held, unsent"
+    );
+    deliver_all(&mut sim);
+    assert_eq!(sim.drive_hash(a), sim.local_hash(2, a));
+    settle(&mut sim);
+    assert_eq!(sim.drive_hash(a), sim.local_hash(2, a));
+    assert_eq!(sim.local_paths(2), ["a"]);
+    assert!(sim.moved_out(2).is_empty());
+}
+
+/// The member's delete on its way, and the sharer edits the file meanwhile: delivered, the
+/// removal isn't taken; the edit wins, nothing goes to Recently deleted, and the member has
+/// the sharer's version back.
+#[test]
+fn a_removal_on_its_way_loses_to_the_sharers_edit() {
+    let mut sim = owned(&["a"]);
+    sim.hold_member_writes(true);
+    let a = sim.item(2, "a").expect("a");
+    let node = sim.pick(2, a, false).expect("its pick");
+    sim.run(&[act(2, Action::Delete { node })]);
+    sync_member(&mut sim);
+    assert_eq!(sim.writes_on_their_way(), 1);
+    let file = sim.file_pick(0, a).expect("on the owner's device");
+    sim.run(&[act(0, Action::Edit { file })]);
+    for _ in 0..4 {
+        sim.run(&[Event::Plan { client: 0 }, Event::Step { client: 0 }]);
+    }
+    let theirs = sim.local_hash(0, a);
+    deliver_all(&mut sim);
+    assert!(!sim.is_removed(a), "not taken");
+    settle(&mut sim);
+    assert!(!sim.is_removed(a));
+    assert_eq!(sim.local_paths(2), ["a"]);
+    assert_eq!(sim.local_hash(2, a), theirs);
+}

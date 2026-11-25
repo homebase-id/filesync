@@ -234,6 +234,16 @@ pub(crate) struct Client {
     /// What moved out of it, read-only, to keep what changed here: each item with what was
     /// below it (`Op::LocalEvict`).
     pub(crate) moved_out: Vec<Tree>,
+    /// A member that writes, its writes on their way ([`crate::Sim::with_writes_on_their_way`]):
+    /// what it remembers of the sends it had no answer to, each its write and send (the
+    /// adapter's memory, gone with a crash).
+    pub(crate) sent: BTreeMap<NodeId, (crate::outbox::Write, u64)>,
+    /// The nodes whose write was on its way, or held, in this sync so far, and what was left
+    /// for one as its folder: not asked again in the sync (the engine's `Engine::on_its_way`).
+    pub(crate) on_its_way: BTreeSet<NodeId>,
+    /// Writes on their way in a row in this run, none taken between them: from the third,
+    /// the run's other writes are held (the engine's `Heard::waits`, `WAIT_HOLD`).
+    pub(crate) waits: u32,
 }
 
 impl Client {
@@ -322,6 +332,9 @@ impl Client {
             member: false,
             writes: false,
             ended: false,
+            sent: BTreeMap::new(),
+            on_its_way: BTreeSet::new(),
+            waits: 0,
             moved_out: Vec::new(),
         }
     }
