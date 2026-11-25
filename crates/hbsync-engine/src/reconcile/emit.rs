@@ -5,6 +5,23 @@ use super::*;
 impl Reconciler<'_> {
     // ---- 4: operations ----
 
+    /// Whether a base below `node` stays after this plan: one out of the plan.
+    /// Each node's children are asked once a plan (`known`): a tree let go whole (a folder
+    /// newly ignored, with all that is in it) costs one look per node.
+    fn base_kept_below(&self, node: NodeId, known: &mut HashMap<NodeId, bool>) -> bool {
+        if let Some(&kept) = known.get(&node) {
+            return kept;
+        }
+        // (A cycle of bases, as a cycle on the drive leaves them, ends here.)
+        known.insert(node, false);
+        let children: Vec<NodeId> = self.input.base.children(node).collect();
+        let kept = children
+            .into_iter()
+            .any(|child| !self.scope.contains(&child) || self.base_kept_below(child, known));
+        known.insert(node, kept);
+        kept
+    }
+
     pub(super) fn emit(&mut self) {
         let i = self.input;
         let mut forks = Vec::new();
@@ -19,6 +36,8 @@ impl Reconciler<'_> {
         // once only the topmost of them is left.
         let mut gone_here: HashSet<NodeId> = HashSet::new();
         let mut settles = Vec::new();
+        // Whether a base below a node stays after this plan ([`Reconciler::base_kept_below`]).
+        let mut kept_below: HashMap<NodeId, bool> = HashMap::new();
 
         let scope: Vec<NodeId> = self.scope.iter().copied().collect();
         let fork_copies: HashSet<NodeId> = self.forks.values().copied().collect();
@@ -235,13 +254,10 @@ impl Reconciler<'_> {
                     // plan: its base is kept where it is): the executor holds a folder's
                     // forgetting till its children's bases are gone, and held it at every
                     // sync, for as long as the wait lasted. Forgotten once that one is
-                    // planned again. (A walk of the base below the node, where one is let
-                    // go.)
-                    let kept_below = || {
-                        let below = i.base.subtree(node);
-                        below.iter().any(|n| *n != node && !self.scope.contains(n))
-                    };
-                    if !self.masks.detached.contains_key(&node) && !kept_below() {
+                    // planned again.
+                    if !self.masks.detached.contains_key(&node)
+                        && !self.base_kept_below(node, &mut kept_below)
+                    {
                         let op = Op::Forget {
                             node,
                             subtree: Vec::new(),
