@@ -169,6 +169,10 @@ pub(crate) mod tests {
     pub(crate) const GTID: &str = "12345678-9abc-def0-1234-56789abcdef0";
     pub(crate) const CIRCLE: &str = "bbbbbbbb-cccc-dddd-eeee-ffffffffffff";
     pub(crate) const MEMBER: &str = "Sam.DotYou.Cloud";
+    /// The app's zero-knowledge key of the vectors, and [`CIRCLE`]'s key locked with it.
+    pub(crate) const APP_KEY: &str = "QEFCQ0RFRkdISUpLTE1OTw==";
+    pub(crate) const LOCKED_CIRCLE_KEY: &str =
+        "AmBhYmNkZWZnaGlqa8AlHXzCApsgaEfKX1KFpSBA7DLsgycVGxPm/K9OaD6A";
     pub(crate) const LOCKED: &str = "AlBRUlNUVVZXWFlaWyNALFXaUVoKLLDbDk0g5bIydyRsCSpKQjTVXgru8mq5";
     pub(crate) const LOCKED_BY_GTID: &str =
         "A1BRUlNUVVZXWFlaWyNALFXaUVoKLLDbDk0g5bID6/ZsXceCKma5R4GJLiTG";
@@ -248,9 +252,6 @@ pub(crate) mod tests {
     /// odin-core `SelectiveShareKeyVectorTests.AnAppKeyLockedShareKeyIsTheCircleKeyUnderTheAppsKey`.
     #[test]
     fn a_circles_key_opens_with_the_apps_key() {
-        const APP_KEY: &str = "QEFCQ0RFRkdISUpLTE1OTw==";
-        const LOCKED_CIRCLE_KEY: &str =
-            "AmBhYmNkZWZnaGlqa8AlHXzCApsgaEfKX1KFpSBA7DLsgycVGxPm/K9OaD6A";
         let app_key = key_of(&bytes(APP_KEY), "vector").expect("16 bytes");
         let locked = bytes(LOCKED_CIRCLE_KEY);
         let own =

@@ -2094,11 +2094,13 @@ it tomorrow. So a computer of the owner's shares what it adds itself:
   and one moved out stays shared: the shares don't follow a move yet. A node put back from
   Recently deleted, or written again, keeps the shares it has; one made again after it went
   for good is a new file, shared as its folder is then.
-- **A share that can't be given holds the upload** (how the folder is shared not read, a
-  circle's key not read or not opening): the file stays here and is tried again. Sent
-  without it, nothing would share it later.
+- **The file goes up whatever becomes of its shares.** A share that can't be given (one
+  that doesn't read, a circle's key not to be had, one that ends before the upload can be
+  up) is left out, and said in the log. An upload the server refuses with its shares is
+  sent again without them, and what is added to that folder goes up unshared for an hour,
+  or until the folder changes. Nothing shares such a file later; but it is on the drive.
 - **By what this computer last heard.** How a folder is shared is read when something is
-  first added to it, and gone by until the server says the folder changed: while the
-  notifications stay connected, their word of it; else the feed's, 10 minutes at most. So
-  a file added within seconds of a share's withdrawal may go up shared all the same, and
-  one added within seconds of a folder first being shared may go up unshared.
+  first added to it, and gone by for as long as a change of it would be told: by the
+  notifications while they stay connected; else by the feed, 10 minutes at most. So a file
+  added within seconds of a share's withdrawal may go up shared all the same, and one added
+  within seconds of a folder first being shared may go up unshared.

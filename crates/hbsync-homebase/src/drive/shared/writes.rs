@@ -517,7 +517,7 @@ impl PeerRemote {
         let given = (folder.shares.iter().flatten())
             .filter(|row| row.permissions != 0)
             .filter_map(|row| Some((row.circle_id?, row.permissions, row.expires_at)));
-        let shares = new_shares(&key, given, |circle| self.circle_key(circle))?;
+        let shares = new_shares(&key, given, |circle| self.circle_key(circle).map(Some))?;
         let global_transit_id = shares.global_transit_id;
         // Without a share it would be its owner's alone: this identity couldn't read what
         // it added.

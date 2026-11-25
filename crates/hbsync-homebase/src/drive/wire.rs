@@ -22,7 +22,7 @@ use crate::HomebaseError;
 use crate::crypto::{Key, WriteOnlyKey, aes_cbc_encrypt};
 use crate::drive::sealed::{KeyHeader, SealedKeyHeader, checked_sealed_len, iv16, sealed_len};
 use crate::drive::share_keys::CircleKey;
-use crate::drive::shared_as::Fed;
+use crate::drive::shared_as::{Fed, Share};
 
 pub(crate) const CONTENT_TYPE: &str = "application/octet-stream";
 
@@ -55,7 +55,8 @@ pub struct FileHeader {
     pub shared_secret_encrypted_key_header: Option<SealedKeyHeader>,
     /// To a member, the live shares the file reaches them through, by circle id: its key header
     /// is the first one's (**[verified]** odin-core `CallerShares.LiveRowsOf`,
-    /// `DriveFileUtility.CreateClientFileHeader`). None on this identity's own drive.
+    /// `DriveFileUtility.CreateClientFileHeader`). None on this identity's own drive, where
+    /// only a folder asked about with its shares has them, read strictly ([`shared_folder`]).
     #[serde(default, deserialize_with = "share_rows")]
     pub shares: Option<Vec<ShareRow>>,
 }
@@ -473,6 +474,73 @@ pub(crate) fn query(
 pub fn feed_query(cursor: Option<&str>, limit: usize, shape: Shape) -> Value {
     let params = json!({ "fileType": [FILE_TYPE_FOLDER, FILE_TYPE_FILE] });
     query(params, cursor, limit, shape, Order::Changes)
+}
+
+/// A folder of this identity's own drive, as far as its shares go ([`shared_folder`]).
+#[derive(Debug)]
+pub(crate) struct SharedFolder {
+    pub at: RemoteRef,
+    /// Deleted for good: its tombstone still lists the rows it had (**[verified]** live).
+    pub deleted: bool,
+    /// The live shares that read: its manager is sent the live rows alone (**[verified]**
+    /// odin-core `DriveStorageServiceBase.AttachSharesAsync`), and one without the right to
+    /// read is a withdrawn one.
+    pub shares: Vec<Share>,
+    /// The rows that don't read: not given to what is added to the folder.
+    pub unread: usize,
+}
+
+/// A folder's row of [`shares_query`], read for its shares alone, each row strictly: one
+/// whose circle, permissions or end doesn't read is counted, not guessed at (a share with
+/// an end that doesn't read would be given without one). A row with no `shares` at all has
+/// none: the server leaves them out on a drive that has no shares.
+pub(crate) fn shared_folder(row: &str) -> Result<SharedFolder, serde_json::Error> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Row {
+        file_id: Uuid,
+        file_state: String,
+        file_metadata: Meta,
+        #[serde(default)]
+        shares: Option<Vec<Value>>,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Meta {
+        version_tag: Uuid,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Shared {
+        circle_id: Uuid,
+        #[serde(deserialize_with = "permissions")]
+        permissions: u32,
+        #[serde(default)]
+        expires_at: Option<i64>,
+    }
+    let row: Row = serde_json::from_str(row)?;
+    let rows = row.shares.unwrap_or_default();
+    let read: Vec<Shared> = (rows.iter())
+        .filter_map(|row| Shared::deserialize(row).ok())
+        .collect();
+    let unread = rows.len() - read.len();
+    let shares = (read.into_iter())
+        .filter(|share| share.permissions & crate::app::READ != 0)
+        .map(|share| Share {
+            circle: share.circle_id,
+            permissions: share.permissions,
+            expires_at: share.expires_at,
+        })
+        .collect();
+    Ok(SharedFolder {
+        at: RemoteRef {
+            file_id: RemoteFileId(row.file_id),
+            version: VersionTag(row.file_metadata.version_tag),
+        },
+        deleted: row.file_state == "deleted",
+        shares,
+        unread,
+    })
 }
 
 /// The `query-batch` body for the folder `node` alone, with its live shares (`includeShares`:
@@ -1743,6 +1811,60 @@ mod tests {
         let plain = open(metadata(&meta, None, SHARED, &transfer_iv, &kh, None))?;
         let sent = plain.as_object().ok_or("an object")?;
         assert!(!sent.contains_key("shares") && !sent.contains_key("globalTransitId"));
+        Ok(())
+    }
+
+    /// A folder's shares are read strictly: the live ones that read are its shares, a
+    /// withdrawn one is none, and one that doesn't read is counted, never guessed at.
+    #[test]
+    fn a_folders_shares_are_read_strictly() -> R {
+        const FILE: &str = "11111111-1111-1111-1111-111111111111";
+        const VERSION: &str = "22222222-2222-2222-2222-222222222222";
+        let circle = |n: u128| Uuid::from_u128(n);
+        let folder = |state: &str, shares: Value| {
+            let row = json!({
+                "fileId": FILE, "fileState": state, "shares": shares,
+                "fileMetadata": { "versionTag": VERSION, "appData": { "content": 7 } },
+            });
+            shared_folder(&row.to_string())
+        };
+        let read = folder(
+            "active",
+            json!([
+                { "circleId": circle(1), "permissions": "readWrite", "expiresAt": 5_000 },
+                { "circleId": circle(2), "permissions": "read", "expiresAt": null },
+                { "circleId": circle(3), "permissions": 1 },
+                // Withdrawn: no bits.
+                { "circleId": circle(4), "permissions": 0 },
+                // These don't read: an end that isn't a time, no circle, no permissions.
+                { "circleId": circle(5), "permissions": "read", "expiresAt": "soon" },
+                { "circleId": "x", "permissions": "read" },
+                { "circleId": circle(6) },
+                "a row",
+            ]),
+        )?;
+        assert_eq!(
+            (read.at.file_id.0, read.at.version.0),
+            (FILE.parse()?, VERSION.parse()?)
+        );
+        assert!(!read.deleted);
+        let shares: Vec<_> = (read.shares.iter())
+            .map(|s| (s.circle, s.permissions, s.expires_at))
+            .collect();
+        assert_eq!(
+            shares,
+            [
+                (circle(1), 15, Some(5_000)),
+                (circle(2), 1, None),
+                (circle(3), 1, None)
+            ]
+        );
+        assert_eq!(read.unread, 4);
+        // No shares at all on the row: none, and nothing unread.
+        let none = folder("active", Value::Null)?;
+        assert!(none.shares.is_empty() && none.unread == 0);
+        assert!(folder("deleted", json!([]))?.deleted);
+        assert!(shared_folder("{}").is_err(), "not a folder's row");
         Ok(())
     }
 

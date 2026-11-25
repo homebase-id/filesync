@@ -453,6 +453,24 @@ impl<'a> Bench<'a> {
         Ok(self.keep(written.target))
     }
 
+    /// A create in the shared folder `folder` that isn't shared itself, remembered for
+    /// cleanup: made while the folder's share is withdrawn, which is given again then (a
+    /// folder shared later doesn't share what is in it). As a node moved into a shared
+    /// folder is.
+    fn create_unshared_in(
+        &self,
+        folder: RemoteFileId,
+        meta: &NodeMeta,
+        data: Option<&[u8]>,
+    ) -> Result<RemoteRef, RemoteError> {
+        if let Some(shared) = self.shared {
+            shared.shares.withdraw(folder)?;
+        }
+        let at = self.create_as_added(meta, data)?;
+        self.share(folder)?;
+        Ok(at)
+    }
+
     /// Shares `file_id` with the member, on a shared bench: for editing where the member
     /// writes ([`Bench::editing`]).
     fn share(&self, file_id: RemoteFileId) -> Result<(), RemoteError> {
@@ -1481,12 +1499,13 @@ fn a_child_of_a_folder_not_shared(b: &Bench) -> Outcome {
 }
 
 /// A file not shared isn't in the feed, and its header and payload are refused: not as gone
-/// (the file is there), nor as a refusal of the member (the rest is still shared).
+/// (the file is there), nor as a refusal of the member (the rest is still shared). In a
+/// shared folder too.
 fn what_isnt_shared_is_refused(b: &Bench) -> Outcome {
     let cursor = b.cursor_now()?;
-    // At the top: in the scratch folder it would be shared as that is.
-    let private = file(&unshared_name("private"), NodeId::ROOT, b"mine");
-    let w = b.create_as_added(&private, Some(b"mine"))?;
+    let (dir, dir_at) = b.folder("holds a private one")?;
+    let private = file("private", dir.node, b"mine");
+    let w = b.create_unshared_in(dir_at.file_id, &private, Some(b"mine"))?;
     ensure!(
         b.changes_to(&cursor, &[w.file_id])?.is_empty(),
         "a file not shared is in the feed"
@@ -1615,11 +1634,8 @@ fn the_member_writes_nothing(b: &Bench) -> Outcome {
 fn a_member_holds_only_what_is_shared(b: &Bench) -> Outcome {
     let (dir, dir_at) = b.folder("held")?;
     let (other, _) = b.folder("withdrawn")?;
-    // Made while its folder isn't shared (in a shared one it would be shared as that is):
-    // a folder shared later doesn't share what is in it.
-    shares(b)?.withdraw(dir_at.file_id)?;
-    let private = b.create_as_added(&file("private", dir.node, b"1"), Some(b"1"))?;
-    b.share(dir_at.file_id)?;
+    let private = file("private", dir.node, b"1");
+    let private = b.create_unshared_in(dir_at.file_id, &private, Some(b"1"))?;
     let w = b.create(&file("w", other.node, b"2"), Some(b"2"))?;
     shares(b)?.withdraw(w.file_id)?;
     let folders = [dir.node, other.node];

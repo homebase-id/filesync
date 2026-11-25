@@ -967,8 +967,14 @@ shares a folder writes the rows of what is in it then (**[verified]** chat-kmp
   (encryption spec, "Files shared with you"). Any other write (an update, an overwrite) is
   refused with `shares` or a `globalTransitId` (**[verified]**
   `FileSystemStreamWriterBase.AssertNoSharesNorGlobalTransitId`): it keeps the rows the file
-  has. A share whose end has passed refuses the whole upload (**[verified]**
-  `DriveShareService.AssertShape`): one that ends within a minute isn't given.
+  has. The server checks the shares once the file's bytes are in (**[verified]**
+  `StandardFileStreamWriter.ValidateUnpackedData`, at the upload's end), and one it refuses
+  refuses the whole upload, as a 400 `argumentError` that names no cause in a code: a share
+  whose end has passed (`DriveShareService.AssertShape`), a circle disabled or no longer
+  granting the drive what the share gives (`AssertCircleFitsAsync`), more than 100 shares
+  (`MaxSharesPerRequest`); a row stays live through the last three. So this client gives no
+  share that ends before the upload can be up (a minute, and the file's size at 4 Mbit/s),
+  and no more than 100.
 - **How a folder is shared is read with `includeShares`**: `query-batch` with `queryParams
   {clientUniqueIdAtLeastOne: [folder], fileType: [7101]}` and `resultOptionsRequest
   {maxRecords: 1, includeShares: true}` gives the folder's header with `shares`, the live
@@ -989,20 +995,37 @@ shares a folder writes the rows of what is in it then (**[verified]** chat-kmp
   one there, and everything added to a folder this computer made itself: nothing (a new
   folder with a folder and four files in it went up in its six uploads; **[verified]**
   live). At the top of the drive, and on a drive that isn't private, nothing is asked.
-- **How long what was read is gone by.** Until something says the folder changed: for as
-  long as the notifications have been connected all the while since, else 10 minutes at
-  most (the feed is read every 5 minutes while they are down, and as they connect). A share
-  given or withdrawn keeps the folder's version and moves its `updated` alone; it is
-  announced to the owner's other devices as a change of the folder at the version it has.
-  This client takes such a notice without reading the feed (a version it knows), so the
-  notice itself drops what was read of that folder; a feed row of the folder at another
-  version, or with `updated` past `versionUpdated`, does too (what the notifications
-  missed). **[verified]** live: a folder's share withdrawn by another device, and a file
-  added there 3 s later went up with no share, after one new read. A login's own writes
-  aren't announced to it (`excludeOwnWrites`): a share written with this computer's own
-  token isn't heard here (seen live; nothing of this client writes one, but with a new
-  node). Of the uploads that go into one folder at once, one reads and the others wait for
-  it.
+- **How long what was read is gone by: while a change would be told.** A share given or
+  withdrawn keeps the folder's version and moves its `updated` alone; it is announced to
+  the owner's other devices as a change of the folder at the version it has. This client
+  takes such a notice without reading the feed (a version it knows), so the notice itself
+  drops what was read of that folder; a feed row of the folder at another version, or with
+  `updated` past `versionUpdated`, does too. **[verified]** live: a folder's share
+  withdrawn by another device, and a file added there 3 s later went up with no share,
+  after one new read. So:
+  - what was learnt while the notifications are connected is gone by for as long as that
+    connection holds;
+  - what was learnt otherwise, for 10 minutes at most (by the steady clock and the wall's:
+    a sleep counts): the feed is read every 5 minutes while they are down;
+  - after they connect again, what they missed is in the feed: once a feed read begun 2.5 s
+    after the connection (twice what the feed holds back) has reached its end, all that is
+    still known is as the drive has it, and gone by under the new connection. Until then
+    a folder added to is read again;
+  - a read is kept only if nothing was said of its folder while it was on its way (a
+    notice of its file, a feed row of it, the notifications connecting);
+  - a login's own writes aren't announced to it (`excludeOwnWrites`): a share written with
+    this computer's own token isn't heard here (seen live; nothing of this client writes
+    one, but with a new node).
+  Of the uploads that go into one folder at once, one reads and the others wait for it.
+- **The file goes up whatever becomes of its shares.**
+  - A share that doesn't read (its circle, its permissions or its end) isn't given, nor one
+    whose circle's key isn't to be had (none set, one that doesn't open): said in the log,
+    once per circle and run.
+  - An upload the server refuses with shares is sent again a few seconds later without
+    them (twice the bytes, once), and what is added to that folder goes up unshared for an
+    hour, or until the folder changes: said in the log. Nothing shares those files later.
+  - How the folder is shared not read because the server isn't reached fails the upload as
+    the upload itself would fail.
 - **Limits.**
   - A node this computer **moves** into a shared folder, or out of one, keeps the rows it
     has: moved in, it reaches no member; moved out, it stays shared. Rows can't ride on an
@@ -1012,13 +1035,13 @@ shares a folder writes the rows of what is in it then (**[verified]** chat-kmp
     folder was shared before: one added just after a withdrawal stays shared, one added
     just after a folder is first shared isn't (the app that shared wrote the rows of what
     was there then). With the notifications down, until the feed is next read, 10 minutes
-    at most; a notice the server never sent would not be made up for while they stay
-    connected (as for any other change it didn't announce).
+    at most. A notice the server never sent isn't made up for while they stay connected
+    (as for any other change it didn't announce); nor is a change made while this computer
+    slept, in the seconds between its waking and the notifications connecting again.
   - The folder's other circles get no row for what a **member** adds ("Writing to what
     others share").
-  - A share that can't be given (the folder's shares or a circle's key not read, a key that
-    doesn't open) fails the upload: it is tried again, the file staying on the computer.
-    One that went up without it would stay unshared, as nothing shares it later.
+  - What was learnt of the folders is this run's: after a start, the first add to each
+    folder reads it again.
 
 ## Conventions
 - camelCase JSON, enums as camelCase strings, bytes as standard base64, times as Unix ms.
