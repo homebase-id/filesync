@@ -39,7 +39,7 @@ const MAY_NOT_SEND: &str = "your Homebase cloud hasn't given Filesync the permis
                             what others share with you yet";
 
 /// How long a write waits for the socket's word between its own looks at their file: 15
-/// seconds in all, then it says it is waiting ([`RemoteError::Waiting`]). The word comes in
+/// seconds in all, then it says the write is on its way ([`RemoteError::OnItsWay`]). The word comes in
 /// well under the first wait where both servers are up (20 to 120 ms measured for the whole
 /// write): no look is made then. Without a socket (a sync run once, by hand) a write takes
 /// the first wait and one look.
@@ -373,8 +373,9 @@ impl PeerRemote {
             RemoteError::Fatal(format!("file {}: no global transit id", header.file_id))
         })?;
         let bytes = payload.is_some();
+        let known = payload.as_ref().and_then(|p| p.hash.known());
         // This very write, sent before: landed since, still on its way, or gone.
-        if let Some(earlier) = self.writes.earlier(meta, bytes, Some(version)) {
+        if let Some(earlier) = self.writes.earlier(meta, (bytes, known), Some(version)) {
             let word = self.heard(earlier.sent);
             let landed = match &word {
                 Some(told) => told.delivered(),
@@ -481,9 +482,10 @@ impl PeerRemote {
         }
         self.may_send()?;
         let bytes = payload.is_some();
+        let known = payload.as_ref().and_then(|p| p.hash.known());
         // This very write, sent before. Its file's id is in no word: their file is read
         // either way, after the outbox is asked (it may land between the two).
-        if let Some(earlier) = self.writes.earlier(meta, bytes, None) {
+        if let Some(earlier) = self.writes.earlier(meta, (bytes, known), None) {
             let word = self.heard(earlier.sent);
             let pending = word.is_none() && self.pending(earlier.sent)?;
             match self.their_node(meta.node)? {
@@ -736,7 +738,7 @@ impl PeerRemote {
     }
 
     fn on_its_way(&self) -> RemoteError {
-        RemoteError::Waiting {
+        RemoteError::OnItsWay {
             why: format!(
                 "waiting for {}'s server to take a change of yours",
                 self.owner()
@@ -807,11 +809,23 @@ impl PeerRemote {
 }
 
 impl Writes {
-    /// The send of `meta`'s node not known to have ended, if it wrote the same.
-    fn earlier(&self, meta: &NodeMeta, bytes: bool, over: Option<VersionTag>) -> Option<OnItsWay> {
+    /// The send of `meta`'s node not known to have ended, if it wrote the same: the same
+    /// `meta` over the same version, with bytes or not, and where their hash is known
+    /// before they are sent (`bytes.1`), the same bytes. (An edit that keeps the file's size
+    /// within its time's grain is another write: answered as the earlier one, it was
+    /// recorded as sent and never went up.)
+    fn earlier(
+        &self,
+        meta: &NodeMeta,
+        (bytes, known): (bool, Option<ContentHash>),
+        over: Option<VersionTag>,
+    ) -> Option<OnItsWay> {
+        let same_bytes = |sent: &OnItsWay| {
+            sent.bytes == bytes && known.is_none_or(|hash| sent.content == Some(hash))
+        };
         locked(&self.on_their_way)
             .get(&meta.node)
-            .filter(|sent| sent.meta == *meta && sent.bytes == bytes && sent.over == over)
+            .filter(|sent| sent.meta == *meta && sent.over == over && same_bytes(sent))
             .cloned()
     }
 
@@ -915,11 +929,11 @@ mod tests {
         let sam = sam()?;
         let a = folder("A", NodeId::ROOT);
         let over = Some(VersionTag(Uuid::from_u128(7)));
-        let earlier = |meta: &NodeMeta, bytes, over| sam.writes.earlier(meta, bytes, over);
+        let earlier = |meta: &NodeMeta, bytes, over| sam.writes.earlier(meta, (bytes, None), over);
         assert!(earlier(&a, false, over).is_none());
         let waiting = sam.waits(SENT, &a, over, None, false);
         assert!(
-            matches!(waiting, RemoteError::Waiting { retry_after, .. } if retry_after == ASK_AGAIN)
+            matches!(waiting, RemoteError::OnItsWay { retry_after, .. } if retry_after == ASK_AGAIN)
         );
         let found = earlier(&a, false, over).expect("found");
         assert_eq!(found.sent.version, SENT.version);
@@ -1129,6 +1143,25 @@ mod tests {
         }
     }
 
+    /// The same file written again with other bytes is another write, though its name, its
+    /// size and its time are the same: their hash is known before they are sent, and it
+    /// isn't the one that was. (Hashed as it is sent, it isn't known: the write found is
+    /// the one asked, as far as can be told.)
+    #[test]
+    fn a_write_of_other_bytes_isnt_the_one_on_its_way() -> std::result::Result<(), HomebaseError> {
+        let sam = sam()?;
+        let (meta, content) = sent_file();
+        assert!(content.is_some());
+        let over = Some(VersionTag(Uuid::from_u128(7)));
+        let _ = sam.waits(SENT, &meta, over, content, true);
+        let other = hash(b"other bytes");
+        let earlier = |known| sam.writes.earlier(&meta, (true, known), over);
+        assert!(earlier(content).is_some());
+        assert!(earlier(None).is_some());
+        assert!(earlier(Some(other)).is_none());
+        Ok(())
+    }
+
     /// With the answer to a new file the send is over. Where their file couldn't be read
     /// (here: its header names no circle whose key opens it), the send stays remembered: the
     /// write asked again looks once more, and isn't sent a second time.
@@ -1136,16 +1169,20 @@ mod tests {
     fn a_new_files_send_is_over_with_its_answer() -> std::result::Result<(), HomebaseError> {
         let sam = sam()?;
         let (meta, content) = sent_file();
-        let remembers = || sam.writes.earlier(&meta, true, None).is_some();
+        let remembers = || sam.writes.earlier(&meta, (true, None), None).is_some();
         let mine = || their_header(Some(SENT.global_transit_id));
-        // Their file not read: remembered, as the send it was.
+        // Their file not read: remembered, as the send it was. (The whole share's wait: their
+        // key isn't opened yet.)
         let unread = sam.added(mine(), SENT, None, &meta, (content, true));
         assert!(
             matches!(unread, Err(RemoteError::Waiting { .. })),
             "{unread:?}"
         );
         assert!(remembers());
-        let kept = sam.writes.earlier(&meta, true, None).expect("remembered");
+        let kept = sam
+            .writes
+            .earlier(&meta, (true, None), None)
+            .expect("remembered");
         assert_eq!(
             (kept.sent.global_transit_id, kept.sent.version, kept.content),
             (SENT.global_transit_id, SENT.version, content)
@@ -1329,16 +1366,12 @@ mod tests {
             );
             assert!(sam.own.drive_key.lock().sends);
         }
-        // An earlier send of the node staged still, and not connected: waited for.
-        for waited in [
-            api(400, Some("existingFileWithUniqueId")),
-            api(400, Some("notAConnectedIdentity")),
-        ] {
-            assert!(matches!(
-                sam.send_error(waited),
-                RemoteError::Waiting { .. }
-            ));
-        }
+        // An earlier send of the node staged still: this write's own wait. Not connected:
+        // the whole share's.
+        let staged = sam.send_error(api(400, Some("existingFileWithUniqueId")));
+        assert!(matches!(staged, RemoteError::OnItsWay { .. }), "{staged:?}");
+        let apart = sam.send_error(api(400, Some("notAConnectedIdentity")));
+        assert!(matches!(apart, RemoteError::Waiting { .. }), "{apart:?}");
         Ok(())
     }
 

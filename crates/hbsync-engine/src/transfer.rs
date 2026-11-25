@@ -367,7 +367,12 @@ pub(crate) fn run_jobs_while(
                     });
                     for in_run in failed {
                         match in_run {
-                            // The next would fail the same way.
+                            // The next would fail the same way. (A write on its way to
+                            // another identity's drive ends its batch so too: what didn't
+                            // start is looked at again, the writes against the hold of them
+                            // after a few in a row, and what comes down starts anew. The
+                            // workers are ahead of the commits: left to those, a whole
+                            // batch of writes is sent before the hold is heard of.)
                             InRun::Backoff => out.store(true, Ordering::Relaxed),
                             // Out of storage: no other upload sends its bytes to hear so too
                             // (they go back to the caller, which holds them).
