@@ -372,12 +372,12 @@ proptest! {
     /// [`what_waits_for_a_folder_no_client_reads_keeps_its_edit`], every client's user editing
     /// ([`waiting_event_all_editing`]): a file edited on two devices that then waits stays as
     /// it is on each, its edit in it, and no conflict copy of it is made or sent meanwhile.
-    /// Ignored: it found the item made here that waits (fixed; its seed stays) and an orphan
-    /// on the drive whose folder a client knows in one that waits, which the oracle follows
-    /// now; and then another end with a client and the oracle apart, not told apart yet
-    /// (the last seed of its name in the regressions file).
+    /// It found the item made here that waits (fixed; its seed stays). The rest it found
+    /// were the oracle's: an orphan on the drive whose folder a client knows in one that
+    /// waits; a file edited on both sides whose copy would be made in a folder that waits,
+    /// which rightly stays as it is here (`CopyWaits`) where the drive moved it meanwhile;
+    /// and a tag set on what waits or is left out on a client, not sent meanwhile.
     #[test]
-    #[ignore = "a client and the oracle apart on what waits after stopped deletes, purges and restores: not told apart yet"]
     fn what_waits_edited_on_several_devices_makes_no_copy_meanwhile(
         events in proptest::collection::vec(waiting_event_all_editing(3), 0..120)
     ) {
@@ -388,13 +388,12 @@ proptest! {
     /// files and folders ([`naming_waiting_event`]): what waits holds its name where it waits,
     /// and what the drive has under that name meanwhile is left out there, not renamed on the
     /// drive (sync semantics §8a).
-    /// Ignored: an orphan on the drive, its folder deleted for good, whose folder a client
-    /// knows in one that waits, waits there with that folder, and the oracle follows that
-    /// where every client knows the folder. Where one doesn't (it never had it), the orphan
-    /// is left on the drive for the clients that wait for it, and the oracle calls it an
-    /// orphan no one recovered (seed in the regressions file): not modelled yet.
+    /// An orphan on the drive, its folder deleted for good, whose folder a client knows in
+    /// one that waits, waits there with that folder; a client that never had the folder
+    /// doesn't sync the orphan. It is no client's to recover where every client is one or
+    /// the other (the oracle counted only those that wait for it: seed in the regressions
+    /// file).
     #[test]
-    #[ignore = "an orphan that waits on some clients and not on others isn't modelled by the oracle yet"]
     fn what_waits_holds_its_name_while_a_user_makes_items(
         events in proptest::collection::vec(naming_waiting_event(3), 0..120)
     ) {
