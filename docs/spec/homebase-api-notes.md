@@ -774,7 +774,7 @@ yet: until it does, a share is read-only in the product. **[verified]** live mea
   refused has uploaded its bytes for nothing. A share's folder goes by the same answer
   (`Remote::writes`, `docs/spec/daemon.md`): it writes to what is shared for editing only
   while the app holds 210, and is read-only as a whole otherwise (it asks again once an
-  hour at most, and at once where the user asked for a sync). The app doesn't ask for it
+  hour at most; where the user asked for a sync, once the last answer is two seconds old). The app doesn't ask for it
   at registration yet.
 - **Whether it may.** Their server asks drive `Write` and, for a file there already, a live
   share row with `Write` on it (**[verified]** odin-core

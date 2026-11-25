@@ -2392,7 +2392,8 @@ fn a_share_is_written_to_where_the_app_may_send() -> R {
     // moves out, and nothing of it reaches the owner.
     let before = header_named(&server, "edit.txt").ok_or("there")?.version;
     b.remote.faults().may_not_send = true;
-    std::fs::write(&file, "four")?;
+    // (Written whatever the file's bit: a look in between may have made it read-only.)
+    b.write("edit.txt", "four")?;
     b.handle.send(Command::SyncNow);
     wait_until("it writes no more", || !b.status().writes)?;
     let out = b.root.with_file_name("moved out").join("edit.txt");
