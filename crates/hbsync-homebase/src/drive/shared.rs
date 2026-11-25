@@ -553,9 +553,10 @@ mod tests {
     }
 
     /// A share says that it is written to where it is one that writes and the app may send
-    /// to other identities. A no read a moment ago stands (asking would fail here: the
-    /// identity can't be reached); one two seconds old is asked again where the user asked
-    /// for the sync, and otherwise not within the minute.
+    /// to other identities. A no stands for the hour (a share's folder asks as its syncs
+    /// are due), and for two seconds where the user asked for the sync; older than that, it
+    /// is asked again (here the identity can't be reached: no answer), and that try counts
+    /// as a read just now, so the next one asked at once makes no request of its own.
     #[test]
     fn a_share_is_written_to_where_the_app_may_send() -> Result<(), HomebaseError> {
         let reading = sam()?;
@@ -571,10 +572,26 @@ mod tests {
         sam.own.may_not_send();
         assert_eq!(sam.writes(false).ok(), Some(false));
         assert_eq!(sam.writes(true).ok(), Some(false), "read just now");
-        let earlier = std::time::Instant::now().checked_sub(std::time::Duration::from_secs(3));
-        sam.own.drive_key.lock().sends_read = earlier;
-        assert_eq!(sam.writes(false).ok(), Some(false));
+        let now = std::time::Instant::now();
+        let Some(earlier) = now.checked_sub(std::time::Duration::from_secs(3)) else {
+            // (A clock that started less than that ago.)
+            return Ok(());
+        };
+        sam.own.drive_key.lock().sends_read = Some(earlier);
+        assert_eq!(
+            sam.writes(false).ok(),
+            Some(false),
+            "not asked again within the hour"
+        );
         assert!(sam.writes(true).is_err(), "asked again, and not answered");
+        assert_eq!(sam.writes(true).ok(), Some(false), "tried just now");
+        assert!(
+            sam.own
+                .drive_key
+                .lock()
+                .sends_read
+                .is_some_and(|at| at >= now)
+        );
         Ok(())
     }
 

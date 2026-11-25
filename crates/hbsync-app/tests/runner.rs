@@ -2369,15 +2369,42 @@ fn a_share_is_written_to_where_the_app_may_send() -> R {
         std::fs::read_to_string(a.root.join("edit.txt")).is_ok_and(|text| text == "two")
     })?;
 
-    // Taken away: read-only again, the file too.
+    // Whether it may can't be asked (its own server doesn't answer), and the folder is opened
+    // again meanwhile, for its ignore rules: it stays as it last synced, writing, and a
+    // change goes to its owner still.
+    b.remote.faults().sends_unknown = true;
+    let rules = b.status().rules;
+    b.write(".hbsync/ignore", "*.tmp\n")?;
+    b.handle.send(Command::SyncNow);
+    wait_until("opened again with the rule", || b.status().rules > rules)?;
+    b.wait_idle()?;
+    assert!(b.status().writes && !is_read_only(&file));
+    let before = header_named(&server, "edit.txt").ok_or("there")?.version;
+    std::fs::write(&file, "three")?;
+    b.handle.send(Command::SyncNow);
+    wait_until("this change went too", || {
+        header_named(&server, "edit.txt").is_some_and(|h| h.version != before)
+    })?;
+    b.wait_idle()?;
+    b.remote.faults().sends_unknown = false;
+
+    // Taken away, with a change waiting here: read-only again as a whole, so the change
+    // moves out, and nothing of it reaches the owner.
+    let before = header_named(&server, "edit.txt").ok_or("there")?.version;
     b.remote.faults().may_not_send = true;
+    std::fs::write(&file, "four")?;
     b.handle.send(Command::SyncNow);
     wait_until("it writes no more", || !b.status().writes)?;
-    wait_until("the file is read-only again", || is_read_only(&file))?;
-    assert!(
-        !b.has("../moved out/edit.txt"),
-        "nothing changed here: nothing moved out"
-    );
+    let out = b.root.with_file_name("moved out").join("edit.txt");
+    wait_until("the change moved out", || {
+        std::fs::read_to_string(&out).is_ok_and(|text| text == "four")
+    })?;
+    wait_until("the owner's is back, read-only", || {
+        std::fs::read_to_string(&file).is_ok_and(|text| text == "three") && is_read_only(&file)
+    })?;
+    b.wait_idle()?;
+    let now = header_named(&server, "edit.txt").ok_or("there")?.version;
+    assert_eq!(now, before, "nothing was sent");
     Ok(())
 }
 

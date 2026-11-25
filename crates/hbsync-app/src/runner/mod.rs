@@ -871,9 +871,18 @@ impl Runner {
         }
         cfg.folder.read_only.clone_from(&self.cfg.read_only);
         // What another identity shares is written to (what they share for editing) where the
-        // app may send to other identities, as its drive says now; one that can't say is
-        // read-only until it can ([`Runner::writes_changed`] asks as each sync is due).
-        cfg.folder.writes = self.writes().unwrap_or(false);
+        // app may send to other identities, as its drive says now. One that can't say leaves
+        // the folder as it last synced (read-only, where that can't be read either):
+        // opened read-only for want of an answer, a folder that wrote would have its files
+        // made read-only and a change waiting there moved out, only to write again at the
+        // next answer ([`Runner::writes_changed`] asks as each sync is due).
+        cfg.folder.writes = match self.writes() {
+            Ok(writes) => writes,
+            Err(e) => {
+                tracing::debug!("whether the app may send to other identities isn't known: {e}");
+                self.drive.shared() && sync_root.wrote().unwrap_or(false)
+            }
+        };
         if let Some(tweak) = self.cfg.tweak {
             tweak(&mut cfg);
         }

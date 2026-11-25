@@ -1054,6 +1054,9 @@ pub struct Faults {
     /// or lost it): a writing member's writes are refused with [`RemoteError::Fatal`] before
     /// anything is sent, and it says that it doesn't write ([`Remote::writes`]).
     pub may_not_send: bool,
+    /// Whether the member's app may send can't be asked just now ([`Remote::writes`] fails:
+    /// its own server doesn't answer).
+    pub sends_unknown: bool,
     /// Creates, updates, deletes and share changes are refused with [`RemoteError::Denied`]
     /// (the app lost write access to the drive); reads still work.
     pub deny_writes: bool,
@@ -1776,7 +1779,13 @@ impl Remote for FakeRemote {
     }
 
     fn writes(&self, _asked: bool) -> Result<bool> {
-        Ok(!self.is_member() || (self.writes && !self.faults().may_not_send))
+        let faults = self.faults();
+        if self.is_member() && faults.sends_unknown {
+            return Err(RemoteError::Transient(
+                "its own server doesn't answer".into(),
+            ));
+        }
+        Ok(!self.is_member() || (self.writes && !faults.may_not_send))
     }
 
     fn create(&self, node: &NodeMeta, payload: Option<Upload<'_>>) -> Result<Written> {
