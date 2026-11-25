@@ -371,7 +371,8 @@ proptest! {
 
     /// [`what_waits_for_a_folder_no_client_reads_keeps_its_edit`], every client's user editing
     /// ([`waiting_event_all_editing`]): a file edited on two devices that then waits stays as
-    /// it is on each, its edit in it, and no conflict copy of it is made or sent meanwhile.
+    /// it is on each, its edit in it, and no conflict copy of it is sent meanwhile (not
+    /// checked: one made here, in the folder that waits, and kept there).
     /// It found the item made here that waits (fixed; its seed stays). The rest it found
     /// were the oracle's: an orphan on the drive whose folder a client knows in one that
     /// waits; a file edited on both sides whose copy would be made in a folder that waits,
@@ -389,10 +390,11 @@ proptest! {
     /// and what the drive has under that name meanwhile is left out there, not renamed on the
     /// drive (sync semantics §8a).
     /// An orphan on the drive, its folder deleted for good, whose folder a client knows in
-    /// one that waits, waits there with that folder; a client that never had the folder
-    /// doesn't sync the orphan. It is no client's to recover where every client is one or
-    /// the other (the oracle counted only those that wait for it: seed in the regressions
-    /// file).
+    /// one that waits, waits there with that folder; a client that holds nothing of it and
+    /// doesn't sync its place in Recovered files leaves it. It is no client's to recover
+    /// where every client is one or the other (the oracle counted only those that wait for
+    /// it: seed in the regressions file). And a tag this client's user sets on what is left
+    /// out here for a held name isn't sent meanwhile (its seed too).
     #[test]
     fn what_waits_holds_its_name_while_a_user_makes_items(
         events in proptest::collection::vec(naming_waiting_event(3), 0..120)

@@ -456,8 +456,9 @@ impl Sim {
         // (§6.3): no client writes it to the drive, a tag changed on it neither.
         let mut stays_waiting: BTreeSet<NodeId> = BTreeSet::new();
         // What waits on a client, or is left out there, by the end: that client's tag changes
-        // of it aren't sent meanwhile (another's stand). Not checked: one made before it began
-        // to wait, that could have been sent then.
+        // of it aren't sent meanwhile (another's stand; an add that was sent and is lost
+        // since isn't excused). Not checked: one made before it began to wait, that could
+        // have been sent then and wasn't (the oracle doesn't know when a node began to wait).
         let mut waits_on: BTreeSet<(usize, NodeId)> = BTreeSet::new();
         // What waits for a folder no client reads on the drive, through folders in Recently
         // deleted too.
@@ -506,9 +507,10 @@ impl Sim {
             if !client.read_only {
                 written_somewhere.extend(synced.ids());
             }
-            // The drive's orphans this client doesn't sync (it ignores their name, or leaves
-            // them where it holds nothing of them: `Sim::left_orphans`): none of its to
-            // recover, as one that waits on it isn't (`orphan_waits`).
+            // The drive's orphans this client doesn't sync (out of its scope, or left where
+            // it holds nothing of them and doesn't sync their place in Recovered files
+            // either: `Sim::left_orphans`): none of its to recover, as one that waits on it
+            // isn't (`orphan_waits`). One it is to recover is in `synced`, and doesn't count.
             let unsynced: BTreeSet<NodeId> = (server.iter())
                 .filter(|(n, s)| {
                     !s.parent.is_root() && !server.contains(s.parent) && !synced.contains(*n)
@@ -564,10 +566,16 @@ impl Sim {
             // copy is made where the item is here (§5). Where that folder waits, or is gone there
             // and in one that waits, the copy isn't made, and the node waits with it (the
             // engine's `CopyWaits`): where the drive has it, it isn't followed meanwhile.
+            // (Bytes alone: a change of the executable bit forks in the engine too, which
+            // no property of what waits makes.)
             let forks = |k: NodeId| {
+                let file = client
+                    .local
+                    .get(k)
+                    .is_some_and(|l| l.kind == NodeKind::File);
                 let had = client.base.get(k).and_then(|b| b.content).map(|c| c.hash);
                 let there = server.get(k).and_then(|d| d.content).map(|c| c.hash);
-                changed(k) && there.is_some() && there != had
+                file && changed(k) && there.is_some() && there != had
             };
             // Whether the merge places `n` where it is here: made here, or moved here where the
             // drive has it where its base does (or not at all).

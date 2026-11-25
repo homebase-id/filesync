@@ -394,7 +394,8 @@ impl TagBook {
     /// does: an add stands unless the node was deleted (and the removed version didn't hold
     /// the tag: `held_at_removal`), or a removal made after it, or under way then, won. Nodes
     /// in `refused` are left as they are, and so are those in `waits_on` for the client they
-    /// wait on (what waits there isn't written, its tags neither).
+    /// wait on, where the add was never sent (what waits there isn't written, its tags
+    /// neither; one that went up and is gone since is lost).
     pub(crate) fn lost(
         &self,
         server: &Tree,
@@ -405,10 +406,10 @@ impl TagBook {
         let mut lost = Vec::new();
         // A tag change loses to a delete (§11), unless the removed version held the tag: then
         // what brings it back keeps it.
-        for ((c, node, name), made, _) in self.adds() {
+        for ((c, node, name), made, sent) in self.adds() {
             if let Some(s) = server.get(*node)
                 && !refused.contains(node)
-                && !waits_on.contains(&(*c, *node))
+                && !(sent.is_none() && waits_on.contains(&(*c, *node)))
                 && !made.concurrent
                 && !self.removed_since(*node, name, made.at)
                 && (!self.deleted.contains(node) || held_at_removal(*node, name).is_some())
