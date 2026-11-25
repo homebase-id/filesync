@@ -564,9 +564,19 @@ included (service managers restart it then).
   another identity's, and only then: one that doesn't isn't started (a share never passes
   for the account's own folder; `hbsync status` shows a share with `->`, and it is never
   the folder shown first).
-  A share that writes to what is shared with the account for editing (`RunnerConfig::writes`,
-  the status's `writes`; sync semantics §13, "What may be changed is told per item"; nothing
-  sets it yet) is read-only for the rest of what it holds, and says so differently:
+  **A share is written to where the app may send to other identities** (Homebase: it holds
+  the permission `UseTransitWrite`, `homebase-api-notes.md`, "The permission"; no install
+  holds it until the app asks for it). Its runner asks its drive (`Remote::writes`) as the
+  folder opens and as each sync is due, and opens the folder again where the answer changed:
+  given the permission, what is shared for editing is written to from the next sync on
+  (files that may be changed become writable on disk); taken away, the folder is read-only
+  as a whole again, and a change waiting there moves out. The cost: no request while the app
+  may; while it may not, one read of the security context at most once a minute, and only
+  as a share's sync is due (or two seconds after the last, where the user asked for the
+  sync: an approval given just now is found by the sync that follows it); one opening of
+  the folder for each change. A drive that can't say leaves the folder as it is.
+  A share that writes (the status's `writes`; sync semantics §13, "What may be changed is
+  told per item") is read-only for the rest of what it holds, and says so differently:
   `hbsync status` shows it with `<->`; what moves out is told as that item's ("report.txt:
   moved to …, as it can't be synced to tom.example from where it is"); and it holds its
   own deletes too, which are removals at the sharer's ("2 items

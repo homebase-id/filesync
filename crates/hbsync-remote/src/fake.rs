@@ -1050,6 +1050,10 @@ pub struct Faults {
     /// share was written, which the share's rows don't tell (**[verified]** odin-core
     /// `DriveShareService.AssertCircleFitsAsync`: checked when the share is written only).
     pub their_server_refuses: bool,
+    /// The member's app may not send to other identities (Homebase: it lacks the permission,
+    /// or lost it): a writing member's writes are refused with [`RemoteError::Fatal`] before
+    /// anything is sent, and it says that it doesn't write ([`Remote::writes`]).
+    pub may_not_send: bool,
     /// Creates, updates, deletes and share changes are refused with [`RemoteError::Denied`]
     /// (the app lost write access to the drive); reads still work.
     pub deny_writes: bool,
@@ -1187,6 +1191,10 @@ fn stops(e: &RemoteError) -> bool {
 /// An upload's bytes as the fake took them in, with their hash.
 type Received = Option<(hbsync_types::ContentHash, Vec<u8>)>;
 
+/// Why a writing member's write is refused where its app may not send
+/// ([`Faults::may_not_send`]).
+const MAY_NOT_SEND: &str = "the app may not send to other identities";
+
 /// The answer to a write of the member's that is still on its way to the owner's drive, as
 /// the Homebase adapter gives it (`PeerRemote`: asked again in a minute).
 fn on_its_way() -> RemoteError {
@@ -1288,6 +1296,9 @@ impl FakeRemote {
     /// shared with it is read-only.
     fn writable(&self) -> Result<()> {
         match self.writes {
+            true if self.is_member() && self.faults().may_not_send => {
+                Err(RemoteError::Fatal(MAY_NOT_SEND.into()))
+            }
             true => Ok(()),
             false => self.owners(),
         }
@@ -1762,6 +1773,10 @@ impl Remote for FakeRemote {
 
     fn shared(&self) -> bool {
         self.view == View::Member
+    }
+
+    fn writes(&self, _asked: bool) -> Result<bool> {
+        Ok(!self.is_member() || (self.writes && !self.faults().may_not_send))
     }
 
     fn create(&self, node: &NodeMeta, payload: Option<Upload<'_>>) -> Result<Written> {

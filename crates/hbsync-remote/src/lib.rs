@@ -818,6 +818,17 @@ pub trait Remote: Send + Sync {
         false
     }
 
+    /// Whether what changes here is sent to this drive at present. The account's own: always.
+    /// Another identity's ([`Remote::shared`]): only where this client writes to what they
+    /// share for editing and may (Homebase: the app holds the permission to send to other
+    /// identities); a folder synced from one that says no is read-only as a whole, as every
+    /// write would be refused. `asked`: the user asked for a sync just now (they may have
+    /// given the permission a moment ago), so a no from before is asked again. Cheap: a
+    /// remote asks its server only where its last answer was no, and then only now and then.
+    fn writes(&self, _asked: bool) -> Result<bool> {
+        Ok(!self.shared())
+    }
+
     /// Creates a node. Fails with [`RemoteError::AlreadyExists`] if a live file already has
     /// this node id (a retry of a create that landed). Returns the file as written, with the
     /// token its header will give for this version.
@@ -894,6 +905,10 @@ impl<T: Remote + ?Sized> Remote for std::sync::Arc<T> {
 
     fn shared(&self) -> bool {
         (**self).shared()
+    }
+
+    fn writes(&self, asked: bool) -> Result<bool> {
+        (**self).writes(asked)
     }
 
     fn create(&self, node: &NodeMeta, payload: Option<Upload<'_>>) -> Result<Written> {

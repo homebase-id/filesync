@@ -184,9 +184,12 @@ impl Sharers for ByMarkers {
             drive_alias,
         };
         let token = self.paths.shared_token(&self.me, sharer);
+        // Written to as well, where the app may send to other identities: it refuses each
+        // write itself where it may not, and its runner syncs it read-only meanwhile
+        // (`Remote::writes`).
         let peer = PeerRemote::open(Arc::clone(&self.own), named, &token)
             .map_err(hbsync_engine::EngineError::Remote)?;
-        let peer = Arc::new(peer);
+        let peer = Arc::new(peer.writing());
         let login = peer.login_id();
         let drive = Drive::open(&db, &self.me, peer.clone())?;
         // The files' tokens are sealed under the token's secret: another token's don't open.

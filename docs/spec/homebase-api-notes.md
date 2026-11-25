@@ -771,8 +771,10 @@ it for editing. Built, and not turned on: a share is still read-only in the prod
   permission is asked before anything is stored: odin-core #2155, PR #2159, **[verified]**
   live). The client asks the security context first all the same, and sends only where it
   holds 210 (while it doesn't, the context is read again at most once a minute): a send
-  refused has uploaded its bytes for nothing. The app doesn't ask for it at registration
-  yet.
+  refused has uploaded its bytes for nothing. A share's folder goes by the same answer
+  (`Remote::writes`, `docs/spec/daemon.md`): it writes to what is shared for editing only
+  while the app holds 210, and is read-only as a whole otherwise. The app doesn't ask for
+  it at registration yet.
 - **Whether it may.** Their server asks drive `Write` and, for a file there already, a live
   share row with `Write` on it (**[verified]** odin-core
   `DriveStorageServiceBase.AssertMemberMayWriteAsync`, `DriveAclAuthorizationService

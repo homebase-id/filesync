@@ -442,6 +442,17 @@ impl Remote for PeerRemote {
         true
     }
 
+    /// Where it writes at all ([`PeerRemote::writing`]): whether the app may send to other
+    /// identities ([`HomebaseRemote::may_send`]: no request while it may; a no is read again
+    /// at most once a minute, or, `asked`, once it is two seconds old).
+    fn writes(&self, asked: bool) -> Result<bool> {
+        let within = match asked {
+            true => super::SENDS_READ_ASKED,
+            false => super::SENDS_READ_AGAIN,
+        };
+        Ok(self.writing && self.own.may_send_within(within)?)
+    }
+
     fn create(&self, node: &NodeMeta, payload: Option<Upload<'_>>) -> Result<Written> {
         match self.writing {
             true => self.add_to_theirs(node, payload),
@@ -542,6 +553,32 @@ mod tests {
         refused(sam.delete(&[]).map(drop));
         refused(sam.delete_for_good(&[]).map(drop));
         refused(sam.set_removed(&[], true).map(drop));
+        Ok(())
+    }
+
+    /// A share says that it is written to where it is one that writes and the app may send
+    /// to other identities. A no read a moment ago stands (asking would fail here: the
+    /// identity can't be reached); one two seconds old is asked again where the user asked
+    /// for the sync, and otherwise not within the minute.
+    #[test]
+    fn a_share_is_written_to_where_the_app_may_send() -> Result<(), HomebaseError> {
+        let reading = sam()?;
+        reading.own.drive_key.lock().sends = true;
+        assert_eq!(
+            reading.writes(false).ok(),
+            Some(false),
+            "not one that writes"
+        );
+        let sam = sam()?.writing();
+        sam.own.drive_key.lock().sends = true;
+        assert_eq!(sam.writes(false).ok(), Some(true));
+        sam.own.may_not_send();
+        assert_eq!(sam.writes(false).ok(), Some(false));
+        assert_eq!(sam.writes(true).ok(), Some(false), "read just now");
+        let earlier = std::time::Instant::now().checked_sub(std::time::Duration::from_secs(3));
+        sam.own.drive_key.lock().sends_read = earlier;
+        assert_eq!(sam.writes(false).ok(), Some(false));
+        assert!(sam.writes(true).is_err(), "asked again, and not answered");
         Ok(())
     }
 

@@ -74,6 +74,11 @@ const SHARER_WAIT: std::time::Duration = std::time::Duration::from_secs(15 * 60)
 /// before the security context is asked again ([`HomebaseRemote::may_send`]).
 const SENDS_READ_AGAIN: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// The same where the user asked for a sync just now (they may have given the permission a
+/// moment ago, [`HomebaseRemote::may_send_within`]): long enough for every share's runner
+/// asked at once to go by one read.
+pub(crate) const SENDS_READ_ASKED: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// How long a share waits before it asks again where this identity isn't connected to its
 /// sharer: connecting is done by people, in their Homebase.
 const NOT_CONNECTED_WAIT: std::time::Duration = std::time::Duration::from_secs(3600);
@@ -728,8 +733,13 @@ impl HomebaseRemote {
     /// the owner may have given the permission since) at most once in [`SENDS_READ_AGAIN`],
     /// and kept: every write refused for want of it asks.
     pub(crate) fn may_send(&self) -> Result<bool> {
+        self.may_send_within(SENDS_READ_AGAIN)
+    }
+
+    /// [`HomebaseRemote::may_send`], a no read again once it is `within` old.
+    pub(crate) fn may_send_within(&self, within: std::time::Duration) -> Result<bool> {
         let (sends, read) = self.key_state(false, |s| Ok((s.sends, s.sends_read)))?;
-        if sends || read.is_some_and(|at| at.elapsed() < SENDS_READ_AGAIN) {
+        if sends || read.is_some_and(|at| at.elapsed() < within) {
             return Ok(sends);
         }
         // (Nothing held while it is asked.)
