@@ -1578,12 +1578,17 @@ whatever changed here, and the plan holds no operation on the drive:
   editing, or back to reading) marks its node, and where its plan finds nothing else to
   do the file's bit is put right, written only where it differs; where the folder starts
   to write, or stops (the app was given the permission to send to other identities, or
-  lost it), each file that may be changed is planned again once, for the same. The cost:
-  for a node told done in such a folder, two rows read and a look at its file; for a
-  folder that starts or stops writing, one mark and one plan per file that may be changed
-  (engine tests `a_file_that_may_be_changed_is_writable_on_disk`,
-  `the_folder_writing_or_not_puts_the_files_that_may_be_changed_right`). The simulator
-  doesn't model the bit.
+  lost it), each file that may be changed is planned again once, for the same. In a
+  folder that doesn't write, only a file the drive says may be changed is looked at (it
+  can be writable by the client's doing only since the folder wrote): the rest stay as
+  they are. The cost: for a node told done in such a folder, a row read; where it
+  counts, a look at its file; where the bit differs, its change and the file's row
+  written again (the change moves the file's change time, and a scan would read and hash
+  the file anew for it); for a folder that starts or stops writing, one mark and one
+  plan per file that may be changed (engine tests
+  `a_file_that_may_be_changed_is_writable_on_disk`,
+  `the_folder_writing_or_not_puts_the_files_that_may_be_changed_right`,
+  `a_file_that_may_be_changed_is_placed_writable`). The simulator doesn't model the bit.
   A read-only file anywhere is treated the same way, the user's own too (a copy of a shared
   file keeps its bits in Explorer, Finder and `cp`; filesync #459): what another device did
   to the file goes through. Its tags are written with it made writable for the write, then

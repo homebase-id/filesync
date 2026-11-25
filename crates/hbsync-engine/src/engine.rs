@@ -565,7 +565,7 @@ impl Engine {
         if self.cfg.folder.read_only.is_none() {
             return Ok(());
         }
-        if std::mem::replace(&mut self.writes_applied, true) {
+        if self.writes_applied {
             return Ok(());
         }
         let writes = self.cfg.folder.writes;
@@ -578,7 +578,9 @@ impl Engine {
                 true => s.folder().set_kv(keys::WRITES, "1"),
                 false => s.folder().delete_kv(keys::WRITES),
             }
-        })
+        })?;
+        self.writes_applied = true;
+        Ok(())
     }
 
     /// The read-only bit of the files of `clean` (nodes a plan found nothing to do for) put
@@ -586,10 +588,15 @@ impl Engine {
     /// this identity may change since (its share turned to editing, or the folder writes
     /// now) is made writable, and the other way round. A change of what may be done with a
     /// file marks its node dirty ([`hbsync_state::AccountTx::set_writable`]), so it is
-    /// planned, and told clean where nothing else changed. Only in a folder synced from
-    /// another identity's drive: a row read and a look at the file for each such node,
-    /// written only where the bit differs. Best effort: one that can't be changed stays as
-    /// it is.
+    /// planned, and told clean where nothing else changed.
+    ///
+    /// Only in a folder synced from another identity's drive. Where it doesn't write, only
+    /// for a file the drive says may be changed (writable here, if at all, since the folder
+    /// wrote): the rest stay as they are, one there from before files were placed read-only
+    /// too. A row read for each such node, a look at the file where it counts, and where
+    /// the bit differs its change, with the file's row written again: the change moves the
+    /// file's change time, which its fingerprint holds, and a scan would read and hash the
+    /// file anew for it. Best effort: a file that can't be changed stays as it is.
     fn put_read_only_right(
         &mut self,
         clean: &std::collections::HashSet<NodeId>,
@@ -601,21 +608,45 @@ impl Engine {
         let files = self.db.read(|s| {
             let mut files = Vec::new();
             for node in clean {
-                let file = |l: &hbsync_state::LocalRow| l.kind == hbsync_types::NodeKind::File;
-                if let Some(here) = s.local_by_node(*node)?.filter(file) {
-                    let writable = s.get_mirror(*node)?.is_some_and(|row| row.writable);
-                    files.push((here.path, writable));
+                let writable = s.get_mirror(*node)?.is_some_and(|row| row.writable);
+                if !folder.writes && !writable {
+                    continue;
+                }
+                let here = s.local_by_node(*node)?;
+                if let Some(here) = here.filter(|l| l.kind == hbsync_types::NodeKind::File) {
+                    files.push((here, writable));
                 }
             }
             Ok(files)
         })?;
-        for (path, writable) in files {
-            let _ = hbsync_platform::ops::set_read_only(
-                &path.to_native(&folder.root),
-                folder.keeps_read_only(writable),
-            );
+        let mut changed = Vec::new();
+        for (row, writable) in files {
+            let at = row.path.to_native(&folder.root);
+            let read_only = folder.keeps_read_only(writable);
+            if !matches!(
+                hbsync_platform::ops::set_read_only(&at, read_only),
+                Ok(true)
+            ) {
+                continue;
+            }
+            // As it is now, where nothing but its change time moved (else the row stays, and
+            // the scan looks at the file).
+            let fp = row.fingerprint;
+            if let Ok(meta) = hbsync_platform::stat(&at)
+                && meta.file_id == fp.file_id
+                && fp.same_after_rename(&meta)
+            {
+                changed.push(hbsync_state::LocalRow {
+                    fingerprint: meta.fingerprint(),
+                    ..row
+                });
+            }
         }
-        Ok(())
+        if changed.is_empty() {
+            return Ok(());
+        }
+        self.db
+            .write(|s| changed.iter().try_for_each(|row| s.folder().put_local(row)))
     }
 
     /// Prepares for a filter that changed since the last run (§10): items may have come into
