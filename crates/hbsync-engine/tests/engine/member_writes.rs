@@ -1014,3 +1014,50 @@ fn a_file_that_may_be_changed_is_placed_writable() -> R {
     assert!(!read_only_here(&b, "d/edit.txt"));
     Ok(())
 }
+
+/// A file changed since it was last scanned, in a way that keeps its size and its time (here
+/// its change time alone moved: a tag written, say), whose bit is then put right: the file's
+/// row isn't written again with what the file holds now. The scan reads the file for the
+/// change; with the new change time under the old row it never would.
+#[test]
+fn the_bit_put_right_hides_no_change_made_since_the_scan() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    a.write("d/edit.txt", "one")?;
+    a.sync()?;
+    share_to_edit(&a, &server, "d")?;
+    share_to_read(&a, &server, "edit.txt")?;
+    let (mut b, _out) = writing_member(&server, "b")?;
+    b.sync()?;
+    assert!(read_only_here(&b, "d/edit.txt"));
+    let node = common::header_named(&server, "edit.txt")
+        .node()
+        .ok_or("node")?;
+    let scanned = b
+        .engine
+        .db()
+        .read(|s| s.local_by_node(node))?
+        .ok_or("row")?;
+
+    // Its share turned to editing, and the file touched meanwhile (its change time moves:
+    // made read-only again, as it was), neither scanned yet.
+    share_to_edit(&a, &server, "edit.txt")?;
+    let at = b.root.join("d/edit.txt");
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    hbsync_platform::ops::set_read_only(&at, false)?;
+    hbsync_platform::ops::set_read_only(&at, true)?;
+    let touched = hbsync_platform::stat(&at)?.fingerprint();
+    if touched == scanned.fingerprint {
+        // (A file system that keeps no change time: nothing to tell apart.)
+        return Ok(());
+    }
+    b.engine.sync("2026-10-08", true)?;
+    assert!(!read_only_here(&b, "d/edit.txt"));
+    let row = b
+        .engine
+        .db()
+        .read(|s| s.local_by_node(node))?
+        .ok_or("row")?;
+    assert_eq!(row.fingerprint, scanned.fingerprint, "left to the scan");
+    Ok(())
+}

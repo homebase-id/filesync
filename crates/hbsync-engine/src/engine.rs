@@ -596,7 +596,10 @@ impl Engine {
     /// too. A row read for each such node, a look at the file where it counts, and where
     /// the bit differs its change, with the file's row written again: the change moves the
     /// file's change time, which its fingerprint holds, and a scan would read and hash the
-    /// file anew for it. Best effort: a file that can't be changed stays as it is.
+    /// file anew for it. Written again only where the file was, just before, exactly as its
+    /// row has it: one changed since the last scan (a tag, a write that keeps its size and
+    /// time) is the scan's to read, and its new change time taken with the old row would
+    /// hide that change for good. Best effort: a file that can't be changed stays as it is.
     fn put_read_only_right(
         &mut self,
         clean: &std::collections::HashSet<NodeId>,
@@ -623,16 +626,21 @@ impl Engine {
         for (row, writable) in files {
             let at = row.path.to_native(&folder.root);
             let read_only = folder.keeps_read_only(writable);
+            if hbsync_platform::ops::is_read_only(&at) == read_only {
+                continue;
+            }
+            let fp = row.fingerprint;
+            let as_scanned = hbsync_platform::stat(&at).is_ok_and(|meta| meta.fingerprint() == fp);
             if !matches!(
                 hbsync_platform::ops::set_read_only(&at, read_only),
                 Ok(true)
             ) {
                 continue;
             }
-            // As it is now, where nothing but its change time moved (else the row stays, and
-            // the scan looks at the file).
-            let fp = row.fingerprint;
-            if let Ok(meta) = hbsync_platform::stat(&at)
+            // As it is now, where it was as its row has it and nothing but its change time
+            // moved (else the row stays, and the scan looks at the file).
+            if as_scanned
+                && let Ok(meta) = hbsync_platform::stat(&at)
                 && meta.file_id == fp.file_id
                 && fp.same_after_rename(&meta)
             {
