@@ -641,6 +641,18 @@ impl FakeServer {
         }
     }
 
+    /// How the member reads the folder `parent` now, for what the drive's owner adds to it:
+    /// the folder's share, while it is live and hasn't ended. The owner's client gives a new
+    /// file its folder's shares with the upload itself (the Homebase adapter's
+    /// `HomebaseRemote::shares_of_new`; the server writes the header and its share rows as
+    /// one: **[verified]** odin-core `StandardFileStreamWriter.ProcessNewFileUpload`). None
+    /// at the top, or in a folder that isn't shared.
+    fn shared_as(&self, parent: NodeId) -> Option<Share> {
+        let folder = self.file_id_of(parent)?;
+        let share = *self.shares.get(&folder)?;
+        (share.live && share.until.is_none_or(|until| until > self.clock_ms)).then_some(share)
+    }
+
     /// The member's share of the folder `parent`, where it may add to it: a folder of the
     /// drive it may change ([`FakeServer::editable`]). What it adds is shared as that.
     fn addable(&self, parent: NodeId) -> Result<Share> {
@@ -1799,8 +1811,10 @@ impl Remote for FakeRemote {
                 // several uploads at once; only the commit is serialized.
                 let received = self.receive(payload)?;
                 replay(received, |upload| {
-                    self.server()
-                        .create_by(Some(self.client), node, upload, None)
+                    // Shared as the folder it goes into is, in the one write.
+                    let mut server = self.server();
+                    let shared = server.shared_as(node.parent);
+                    server.create_by(Some(self.client), node, upload, shared)
                 })?
             }
         };

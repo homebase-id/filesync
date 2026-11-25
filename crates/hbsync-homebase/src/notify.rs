@@ -85,7 +85,7 @@ impl Events {
     }
 
     /// Whether anybody still listens.
-    fn send(&self, event: Event) -> bool {
+    pub(crate) fn send(&self, event: Event) -> bool {
         (self.0)(event)
     }
 }

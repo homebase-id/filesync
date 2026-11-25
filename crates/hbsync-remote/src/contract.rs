@@ -221,6 +221,11 @@ pub const SCENARIOS: &[(&str, Reach, Scenario)] = &[
     ),
     ("ranged_reads", Reach::Both, ranged_reads),
     (
+        "the_sharer_adds_to_a_shared_folder",
+        Reach::SharedOnly,
+        the_sharer_adds_to_a_shared_folder,
+    ),
+    (
         "a_child_of_a_folder_not_shared",
         Reach::SharedOnly,
         a_child_of_a_folder_not_shared,
@@ -435,7 +440,9 @@ impl<'a> Bench<'a> {
         Ok(at)
     }
 
-    /// A create, remembered for cleanup, not shared.
+    /// A create, remembered for cleanup, not shared by the bench: shared all the same where
+    /// it goes into a shared folder, as the sharer's client shares what it adds like the
+    /// folder it adds to ([`the_sharer_adds_to_a_shared_folder`]).
     fn create_unshared(
         &self,
         meta: &NodeMeta,
@@ -1410,11 +1417,56 @@ fn shares<'a>(b: &Bench<'a>) -> Result<&'a dyn Shares, &'static str> {
         .ok_or("not a shared bench: no member to share with")
 }
 
+/// A name for a node made at the top of the drive, outside the scratch folder: its own on a
+/// drive that keeps what earlier runs left there.
+fn unshared_name(what: &str) -> String {
+    format!("{what} {}", NodeId::new().0.simple())
+}
+
+/// What the sharer adds to a shared folder is shared as the folder is, with the write itself:
+/// the member reads it at once, a folder made there and what goes into that too, and may
+/// change it where it may change the folder. What is added once the folder's share is
+/// withdrawn isn't shared.
+fn the_sharer_adds_to_a_shared_folder(b: &Bench) -> Outcome {
+    let (member, editing) = (b.reader(), b.shared.is_some_and(|s| s.editing));
+    let cursor = b.cursor_now()?;
+    let added = file("added", b.scratch, b"1");
+    let dir = folder("a new folder", b.scratch);
+    let inner = file("inner", dir.node, b"2");
+    let at = [
+        b.create_unshared(&added, Some(b"1"))?,
+        b.create_unshared(&dir, None)?,
+        b.create_unshared(&inner, Some(b"2"))?,
+    ];
+    let ids: Vec<RemoteFileId> = at.iter().map(|at| at.file_id).collect();
+    let feed = b.changes_to(&cursor, &ids)?;
+    ensure!(feed.len() == 3, "the member's feed: {feed:?}");
+    for (at, meta) in at.iter().zip([&added, &dir, &inner]) {
+        let header = member.header(at.file_id)?;
+        ensure!(
+            header.version == at.version && header.parent == meta.parent,
+            "the member reads {header:?}"
+        );
+        ensure!(
+            header.writable == editing,
+            "shared as its folder is: {header:?}"
+        );
+    }
+    ensure!(b.read(at[0].file_id, None)? == b"1", "payload");
+    ensure!(b.read(at[2].file_id, None)? == b"2", "payload");
+
+    shares(b)?.withdraw(at[1].file_id)?;
+    let late = b.create_unshared(&file("late", dir.node, b"3"), Some(b"3"))?;
+    ensure_err!(member.header(late.file_id), RemoteError::Fatal(_));
+    Ok(())
+}
+
 /// A file shared in a folder that isn't is listed with its parent (`groupId`), the folder not at
 /// all, nor read.
 fn a_child_of_a_folder_not_shared(b: &Bench) -> Outcome {
     let cursor = b.cursor_now()?;
-    let dir = folder("not shared", b.scratch);
+    // At the top: in the scratch folder it would be shared as that is.
+    let dir = folder(&unshared_name("not shared"), NodeId::ROOT);
     let dir_ref = b.create_unshared(&dir, None)?;
     let f = file("shared", dir.node, b"in it");
     let w = b.create(&f, Some(b"in it"))?;
@@ -1432,7 +1484,9 @@ fn a_child_of_a_folder_not_shared(b: &Bench) -> Outcome {
 /// (the file is there), nor as a refusal of the member (the rest is still shared).
 fn what_isnt_shared_is_refused(b: &Bench) -> Outcome {
     let cursor = b.cursor_now()?;
-    let w = b.create_unshared(&file("private", b.scratch, b"mine"), Some(b"mine"))?;
+    // At the top: in the scratch folder it would be shared as that is.
+    let private = file(&unshared_name("private"), NodeId::ROOT, b"mine");
+    let w = b.create_unshared(&private, Some(b"mine"))?;
     ensure!(
         b.changes_to(&cursor, &[w.file_id])?.is_empty(),
         "a file not shared is in the feed"
@@ -1559,9 +1613,13 @@ fn the_member_writes_nothing(b: &Bench) -> Outcome {
 /// A folder holds, to the member, only children shared with it: one not shared, or whose share
 /// was withdrawn (a tombstone to the member), isn't counted, live or any; shared, it is.
 fn a_member_holds_only_what_is_shared(b: &Bench) -> Outcome {
-    let (dir, _) = b.folder("held")?;
+    let (dir, dir_at) = b.folder("held")?;
     let (other, _) = b.folder("withdrawn")?;
+    // Made while its folder isn't shared (in a shared one it would be shared as that is):
+    // a folder shared later doesn't share what is in it.
+    shares(b)?.withdraw(dir_at.file_id)?;
     let private = b.create_unshared(&file("private", dir.node, b"1"), Some(b"1"))?;
+    b.share(dir_at.file_id)?;
     let w = b.create(&file("w", other.node, b"2"), Some(b"2"))?;
     shares(b)?.withdraw(w.file_id)?;
     let folders = [dir.node, other.node];

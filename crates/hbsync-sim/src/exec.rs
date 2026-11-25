@@ -2068,6 +2068,10 @@ impl Sim {
                     parent: coords.to_drive(state.parent),
                     ..state
                 };
+                // A new file is shared as its folder is; one put back keeps its own shares.
+                if file_id.is_none() {
+                    (self.server).share_as_its_folder(remote.file_id, state.parent);
+                }
                 self.server.live.insert(node, ServerNode { state, remote });
                 self.record_remote(c, node);
                 Done

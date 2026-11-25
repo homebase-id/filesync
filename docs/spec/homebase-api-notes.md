@@ -742,11 +742,10 @@ server answers the rest, to a token their server made for this identity's connec
   `FakeRemote::member` (`hbsync-remote`) models this member's view, and the contract's
   read-only subset (`Bench::shared`) checks the fake now (a member that writes,
   `FakeRemote::writing`, passes its editing subset, `Bench::editing`: what it changes of what
-  is shared with it for editing, and that it deletes nothing). Live it needs a sharer that writes
-  share rows, which this client doesn't do yet (the chat app shares; a file this client's
-  owner side adds to a shared folder, or moves into one, gets none and reaches no member:
-  **[verified]** live 2026-11-25, a new file in a folder shared for editing, not on the
-  member's computer 30 s later, its server not told): until it does, the
+  is shared with it for editing, and that it deletes nothing). Live it needs a sharer that shares and
+  withdraws single files, which this client doesn't do (the chat app shares; this client's
+  owner side gives what it adds to a shared folder that folder's shares, and no more:
+  "Sharing what this identity's computer adds"): the
   live check is the daemon syncing what the chat app shared (**[verified]** 2026-11-20 on
   the dev server: a folder with a subfolder and 20 files, a member's token kept and reused). Refusals: 401 the token (unknown,
   the connection gone, their keys invalid), 403 a file not (or no longer) shared, 404 none
@@ -853,7 +852,8 @@ asked for it syncs a share read-only until its owner approves. **[verified]** li
   (**[verified]** odin-core `PeerDriveIncomingTransferService`), and no client writes them
   (**[verified]** chat-kmp 0ff83254c: `FilesyncShareUpkeep` seals circle keys and keeps the
   editors' circle, `FilesyncSharing.inherit` runs after that app's own uploads alone; this
-  client's owner side writes no rows at all). So members of those circles don't see it.
+  client's owner side shares what it adds itself, nothing a member added: "Sharing what
+  this identity's computer adds"). So members of those circles don't see it.
 - **The version a new file lands as** is made by their server (**[verified]** odin-core
   efc317ad4, `PeerFileWriter`: `CreateVersionTag`; live: never the send's `newVersionTag`),
   and told in one place only, the socket's word of the delivery (`versionTag`, below;
@@ -943,6 +943,77 @@ asked for it syncs a share read-only until its owner approves. **[verified]** li
   delete to the owner's Recently deleted instead (`archivalStatus` 2, above), and deletes
   nothing there. (The V2 route takes its JSON body plain, not sealed with the shared secret:
   **[verified]** live, a sealed one reads as empty.)
+
+## Sharing what this identity's computer adds
+
+A share is a row on each file (`circleId`, the permissions, an end, the file's key locked
+under the circle's key), not a property of a folder: a file added to a shared folder reaches
+the folder's members only with rows of its own, and nothing on the server gives it any
+(**[verified]** odin-core `DriveShareService`, `StandardFileStreamWriter`). The app that
+shares a folder writes the rows of what is in it then (**[verified]** chat-kmp
+`FilesyncSharing.share`); whoever adds to it later writes the new file's.
+
+- **This client gives a new node its folder's shares with the upload** (`drive/shared_as.rs`,
+  `HomebaseRemote::shares_of_new`). The descriptor of a new file's upload takes `shares`
+  (`[{fileId: nil, circleId, permissions (a number), expiresAt, lockedFileKey}]`) and a
+  `globalTransitId` the client picks; the server writes the header and the rows as one, and
+  lifts the file's group from `owner` to `connected` itself (**[verified]** odin-core
+  `StandardFileStreamWriter.ValidateUnpackedData`, `ProcessNewFileUpload`,
+  `SelectiveShareDrives.LiftForShares`; live 2026-11-25, odin-core b79aefa99, with the app's
+  own login: a file and a folder tree a computer added inside a folder shared for editing
+  were on the member's computer 2.5 s later, and the member's edit and rename of such a
+  file came back, 2.4 to 2.8 s each). Each `lockedFileKey` is the file's key under that
+  circle's key in format 3, bound to the global transit id, as the file has no id yet
+  (encryption spec, "Files shared with you"). Any other write (an update, an overwrite) is
+  refused with `shares` or a `globalTransitId` (**[verified]**
+  `FileSystemStreamWriterBase.AssertNoSharesNorGlobalTransitId`): it keeps the rows the file
+  has. A share whose end has passed refuses the whole upload (**[verified]**
+  `DriveShareService.AssertShape`): one that ends within a minute isn't given.
+- **How a folder is shared is read with `includeShares`**: `query-batch` with `queryParams
+  {clientUniqueIdAtLeastOne: [folder], fileType: [7101]}` and `resultOptionsRequest
+  {maxRecords: 1, includeShares: true}` gives the folder's header with `shares`, the live
+  rows alone: `{circleId, permissions, expiresAt, created, modified}`, the permissions by
+  name as a member reads them, no key. Only the owner console and the app that owns the
+  drive get them; this client's login is that app's (**[verified]** live and odin-core
+  `SelectiveShareDrives.CallerManagesShares`, `DriveStorageServiceBase.AttachSharesAsync`:
+  another caller gets no `shares`, and no error). A tombstone still lists the rows it had
+  (seen live): a folder deleted for good shares nothing here.
+- **A circle's key**, for the app that owns the circle: `GET
+  /api/v2/connections/circles/{circleId}/share-key` → `{appKeyLockedShareKey}`, 45 bytes:
+  `2 ‖ nonce (12) ‖ ciphertext (16) ‖ tag (16)`, AES-128-GCM under the app's zero-knowledge
+  key, AAD the circle id's .NET bytes (**[verified]** odin-core's golden vector
+  `SelectiveShareKeyVectorTests`, and live). Set once, by the app that first shares with the
+  circle, and never changed: read once per circle and run.
+- **What it costs.** The first node added to a folder in a run: one `query-batch` for that
+  folder (9 ms on the dev server), and one key read per circle not read yet. Every later
+  one there, and everything added to a folder this computer made itself: nothing (a new
+  folder with a folder and four files in it went up in its six uploads; **[verified]**
+  live). At the top of the drive, and on a drive that isn't private, nothing is asked.
+- **How long what was read is gone by.** Until something says the folder changed, at most
+  10 minutes. A share given or withdrawn keeps the folder's version and moves its `updated`
+  alone; it is announced to the owner's other devices as a change of the folder at the
+  version it has. This client takes such a notice without reading the feed (a version it
+  knows), so the notice itself drops what was read of that folder; a feed row of the
+  folder at another version, or with `updated` past `versionUpdated`, does too (what the
+  notifications missed). **[verified]** live: a folder's share withdrawn by another device,
+  and a file added there 3 s later went up with no share, after one new read. A login's
+  own writes aren't announced to it (`excludeOwnWrites`): a share written with this
+  computer's own token isn't heard here (seen live; nothing of this client writes one, but
+  with a new node).
+- **Limits.**
+  - A node this computer **moves** into a shared folder, or out of one, keeps the rows it
+    has: moved in, it reaches no member; moved out, it stays shared. Rows can't ride on an
+    update: they are written and withdrawn on their own routes (`PUT /drives/{d}/shares`,
+    `DELETE …/files/{id}/shares/{circleId}`), which this client doesn't use yet.
+  - A node added in the seconds between a share's change and its notice goes up as the
+    folder was shared before: one added just after a withdrawal stays shared, one added
+    just after a folder is first shared isn't (the app that shared wrote the rows of what
+    was there then). With the notifications down, for up to 10 minutes.
+  - The folder's other circles get no row for what a **member** adds ("Writing to what
+    others share").
+  - A share that can't be given (the folder's shares or a circle's key not read, a key that
+    doesn't open) fails the upload: it is tried again, the file staying on the computer.
+    One that went up without it would stay unshared, as nothing shares it later.
 
 ## Conventions
 - camelCase JSON, enums as camelCase strings, bytes as standard base64, times as Unix ms.

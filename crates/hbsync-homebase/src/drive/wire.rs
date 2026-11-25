@@ -22,6 +22,7 @@ use crate::HomebaseError;
 use crate::crypto::{Key, WriteOnlyKey, aes_cbc_encrypt};
 use crate::drive::sealed::{KeyHeader, SealedKeyHeader, checked_sealed_len, iv16, sealed_len};
 use crate::drive::share_keys::CircleKey;
+use crate::drive::shared_as::Fed;
 
 pub(crate) const CONTENT_TYPE: &str = "application/octet-stream";
 
@@ -198,6 +199,48 @@ pub(crate) struct QueryBatchResponse {
     /// The server's clock when it answered, Unix ms (odin-core `QueryBatchResponse.QueryTime`,
     /// **[verified]** `DriveQueryServiceBase.cs`).
     pub query_time: i64,
+}
+
+/// What a feed row says of a folder's shares ([`Fed`]): none for a row that isn't a folder's,
+/// or doesn't read. Both shapes: a minimal row names its fields itself, a header under
+/// `fileMetadata`.
+pub(crate) fn fed(row: &str) -> Option<Fed> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Said {
+        unique_id: Option<Uuid>,
+        file_type: Option<i32>,
+        version_tag: Option<Uuid>,
+        updated: Option<i64>,
+        version_updated: Option<i64>,
+        #[serde(default)]
+        app_data: Option<Box<Said>>,
+        #[serde(default)]
+        file_metadata: Option<Box<Said>>,
+    }
+    let row: Said = serde_json::from_str(row).ok()?;
+    let (times, node) = match row.file_metadata {
+        Some(meta) => {
+            let node = meta.app_data.as_deref().map(|a| (a.unique_id, a.file_type));
+            (
+                (meta.version_tag, meta.updated, meta.version_updated),
+                node?,
+            )
+        }
+        None => (
+            (row.version_tag, row.updated, row.version_updated),
+            (row.unique_id, row.file_type),
+        ),
+    };
+    let (version, updated, version_updated) = times;
+    if node.1 != Some(FILE_TYPE_FOLDER) {
+        return None;
+    }
+    Some(Fed {
+        node: NodeId(node.0?),
+        version: version?,
+        as_written: updated.is_some() && updated == version_updated,
+    })
 }
 
 /// The file a feed row is about, if its `fileId` reads (a row that doesn't read as a node).
@@ -462,6 +505,15 @@ pub(crate) fn query(
 pub fn feed_query(cursor: Option<&str>, limit: usize, shape: Shape) -> Value {
     let params = json!({ "fileType": [FILE_TYPE_FOLDER, FILE_TYPE_FILE] });
     query(params, cursor, limit, shape, Order::Changes)
+}
+
+/// The `query-batch` body for the folder `node` alone, with its live shares (`includeShares`:
+/// **[verified]** odin-core `QueryBatchResultOptionsRequest`, chat-kmp `FilesyncSharing.inherit`).
+pub(crate) fn shares_query(node: NodeId) -> Value {
+    json!({
+        "queryParams": { "clientUniqueIdAtLeastOne": [node.0], "fileType": [FILE_TYPE_FOLDER] },
+        "resultOptionsRequest": { "maxRecords": 1, "includeShares": true },
+    })
 }
 
 /// The `query-batch` body for a page of the active files in `folders` (their `groupId`), of
@@ -818,12 +870,16 @@ pub(crate) fn instructions(
 /// Homebase replaces the whole header on update, so every field is always sent: node id,
 /// parent, kind, content, and the owner-only ACL. The file is encrypted: its `key` sealed with
 /// the shared secret (locked with the drive's key on a private drive), the content with the key.
+/// A new file in a shared folder goes up `shared` as the folder is ([`NewShares`]): the
+/// server writes the header and its shares as one (**[verified]** odin-core
+/// `StandardFileStreamWriter.ProcessNewFileUpload`), and refuses shares on any other write.
 pub(crate) fn metadata(
     meta: &NodeMeta,
     version: Option<VersionTag>,
     keys: Keys<'_>,
     transfer_iv: &[u8; 16],
     key: &KeyHeader,
+    shared: Option<&NewShares>,
 ) -> Vec<u8> {
     let key_header = match keys.drive {
         Some(drive_key) => key.lock(drive_key),
@@ -831,8 +887,20 @@ pub(crate) fn metadata(
     };
     // Owner-only, and not sent on: every write of the owner's own computers (a share lifts
     // the group, on the server).
-    let plain = descriptor(meta, version, key, key_header, "owner", false);
+    let mut plain = descriptor(meta, version, key, key_header, "owner", false);
+    if let Some(shared) = shared {
+        plain["shares"] = json!(shared.shares);
+        plain["globalTransitId"] = json!(shared.global_transit_id);
+    }
     aes_cbc_encrypt(keys.shared, transfer_iv, plain.to_string().as_bytes())
+}
+
+/// The shares a new file goes up with ([`share_of_new`]), and the global transit id picked
+/// for it, which its keys are locked to: it has no file id yet.
+#[derive(Debug)]
+pub(crate) struct NewShares {
+    pub global_transit_id: Uuid,
+    pub shares: Vec<Value>,
 }
 
 /// The identity's transient temp drive (its alias and its type): where its server stages
@@ -890,15 +958,20 @@ pub(crate) fn deposit_instructions(
     instructions
 }
 
-/// One share of a new file, as its adder sends it along: as `row` shares the folder it goes
-/// into (the same circle, permissions and end), with the file's key `locked` under that
+/// One share of a new file, as its adder sends it along: as the folder it goes into is shared
+/// with `circle` (the same `permissions` and end), with the file's key `locked` under that
 /// circle's key ([`CircleKey::lock_file_key`]). The file has no id yet.
-pub(crate) fn share_of_new(row: &ShareRow, circle: Uuid, locked: &[u8]) -> Value {
+pub(crate) fn share_of_new(
+    circle: Uuid,
+    permissions: u32,
+    expires_at: Option<i64>,
+    locked: &[u8],
+) -> Value {
     json!({
         "fileId": Uuid::nil(),
         "circleId": circle,
-        "permissions": row.permissions,
-        "expiresAt": row.expires_at,
+        "permissions": permissions,
+        "expiresAt": expires_at,
         "lockedFileKey": STANDARD.encode(locked),
     })
 }
@@ -1070,7 +1143,7 @@ mod tests {
             removed: false,
         };
         let transfer_iv = sealed::strong()?;
-        let sent = metadata(&meta, None, private, &transfer_iv, &kh);
+        let sent = metadata(&meta, None, private, &transfer_iv, &kh, None);
         let plain: Value = serde_json::from_slice(&aes_cbc_decrypt(&SS, &transfer_iv, &sent)?)?;
         let key: SealedKeyHeader = serde_json::from_value(plain["encryptedKeyHeader"].clone())?;
         assert!(key.locked_with_drive_key());
@@ -1614,7 +1687,7 @@ mod tests {
             "circleId": Uuid::new_v4(), "permissions": "readWrite", "expiresAt": 5_000,
         }))?;
         let circle = row.circle_id.ok_or("circle")?;
-        let share = share_of_new(&row, circle, b"locked");
+        let share = share_of_new(circle, row.permissions, row.expires_at, b"locked");
         assert_eq!(share["fileId"], json!(Uuid::nil()));
         assert_eq!(share["circleId"], json!(circle));
         assert_eq!(
@@ -1650,6 +1723,99 @@ mod tests {
         assert_eq!(file["accessControlList"]["requiredSecurityGroup"], "owner");
         assert_eq!(file["versionTag"], Value::Null);
         assert_eq!(file["appData"]["fileType"], FILE_TYPE_FOLDER);
+        Ok(())
+    }
+
+    /// A new node in a shared folder goes up with its shares and the global transit id its
+    /// keys are locked to; any other write names neither (the server refuses them there).
+    #[test]
+    fn a_new_node_goes_up_with_the_shares_it_is_given() -> R {
+        let transfer_iv = [7u8; 16];
+        let kh = KeyHeader::random()?;
+        let meta = NodeMeta {
+            node: NodeId::new(),
+            parent: NodeId::new(),
+            kind: NodeKind::File,
+            content: NodeContent::file("added.txt", 1, 1, false),
+            removed: false,
+        };
+        let open = |sealed: Vec<u8>| -> Result<Value, Box<dyn std::error::Error>> {
+            let plain = aes_cbc_decrypt(&SS, &transfer_iv, &sealed)?;
+            Ok(serde_json::from_slice(&plain)?)
+        };
+        let share = share_of_new(Uuid::from_u128(9), 3, None, b"locked");
+        let shared = NewShares {
+            global_transit_id: Uuid::from_u128(4),
+            shares: vec![share.clone()],
+        };
+        let plain = open(metadata(
+            &meta,
+            None,
+            SHARED,
+            &transfer_iv,
+            &kh,
+            Some(&shared),
+        ))?;
+        assert_eq!(plain["shares"], json!([share]));
+        assert_eq!(plain["globalTransitId"], json!(Uuid::from_u128(4)));
+        // As any write of the owner's: its group is lifted by the shares, on the server.
+        let file = &plain["fileMetadata"];
+        assert_eq!(file["accessControlList"]["requiredSecurityGroup"], "owner");
+        assert_eq!(file["allowDistribution"], false);
+
+        let plain = open(metadata(&meta, None, SHARED, &transfer_iv, &kh, None))?;
+        let sent = plain.as_object().ok_or("an object")?;
+        assert!(!sent.contains_key("shares") && !sent.contains_key("globalTransitId"));
+        Ok(())
+    }
+
+    /// What a feed row says of a folder's shares, from both shapes: a folder as it was
+    /// written, one changed since (a share given or withdrawn moves `updated` alone), and
+    /// nothing for a file's row or one that doesn't name its node.
+    #[test]
+    fn a_feed_row_says_whether_a_folder_is_as_it_was_written() -> R {
+        const NODE: &str = "33333333-3333-3333-3333-333333333333";
+        const VERSION: &str = "22222222-2222-2222-2222-222222222222";
+        let slim = |file_type: i32, updated: i64, node: Option<&str>| {
+            json!({
+                "fileId": "11111111-1111-1111-1111-111111111111", "fileState": "active",
+                "fileType": file_type, "versionTag": VERSION, "uniqueId": node,
+                "updated": updated, "versionUpdated": 9,
+            })
+            .to_string()
+        };
+        let whole = |file_type: i32, updated: i64| {
+            json!({
+                "fileId": "11111111-1111-1111-1111-111111111111", "fileState": "active",
+                "fileMetadata": {
+                    "versionTag": VERSION, "updated": updated, "versionUpdated": 9,
+                    "appData": { "uniqueId": NODE, "fileType": file_type, "content": "x" },
+                },
+            })
+            .to_string()
+        };
+        let said = |row: String| fed(&row).map(|f| (f.node.0, f.version, f.as_written));
+        let (node, version): (Uuid, Uuid) = (NODE.parse()?, VERSION.parse()?);
+        for row in [
+            slim(FILE_TYPE_FOLDER, 9, Some(NODE)),
+            whole(FILE_TYPE_FOLDER, 9),
+        ] {
+            assert_eq!(said(row), Some((node, version, true)));
+        }
+        for row in [
+            slim(FILE_TYPE_FOLDER, 12, Some(NODE)),
+            whole(FILE_TYPE_FOLDER, 12),
+        ] {
+            assert_eq!(said(row), Some((node, version, false)));
+        }
+        assert_eq!(said(slim(FILE_TYPE_FILE, 12, Some(NODE))), None);
+        assert_eq!(said(whole(FILE_TYPE_FILE, 12)), None);
+        assert_eq!(said(slim(FILE_TYPE_FOLDER, 12, None)), None);
+        assert_eq!(said("not a row".to_owned()), None);
+        // One that doesn't say when it changed isn't taken as unchanged.
+        let untimed =
+            json!({ "fileType": FILE_TYPE_FOLDER, "versionTag": VERSION, "uniqueId": NODE });
+        assert_eq!(said(untimed.to_string()), Some((node, version, false)));
         Ok(())
     }
 
@@ -1739,7 +1905,7 @@ mod tests {
             removed: false,
         };
         let version = VersionTag(Uuid::from_u128(5));
-        let sealed = metadata(&meta, Some(version), SHARED, &transfer_iv, &kh);
+        let sealed = metadata(&meta, Some(version), SHARED, &transfer_iv, &kh, None);
         let plain: Value = serde_json::from_slice(&aes_cbc_decrypt(&SS, &transfer_iv, &sealed)?)?;
         let file = &plain["fileMetadata"];
         assert_eq!(file["isEncrypted"], true);
@@ -1754,7 +1920,7 @@ mod tests {
             removed: true,
             ..meta.clone()
         };
-        let sealed_gone = metadata(&gone, Some(version), SHARED, &transfer_iv, &kh);
+        let sealed_gone = metadata(&gone, Some(version), SHARED, &transfer_iv, &kh, None);
         let plain_gone: Value =
             serde_json::from_slice(&aes_cbc_decrypt(&SS, &transfer_iv, &sealed_gone)?)?;
         let app_gone = &plain_gone["fileMetadata"]["appData"];

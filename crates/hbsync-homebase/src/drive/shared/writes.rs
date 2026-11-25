@@ -524,7 +524,8 @@ impl PeerRemote {
                 .circle_key(circle)?
                 .lock_file_key(&key.key, global_transit_id)
                 .map_err(remote_error)?;
-            shares.push(wire::share_of_new(row, circle, &locked));
+            let (permissions, ends) = (row.permissions, row.expires_at);
+            shares.push(wire::share_of_new(circle, permissions, ends, &locked));
         }
         // Without a share it would be its owner's alone: this identity couldn't read what
         // it added.
