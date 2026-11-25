@@ -299,6 +299,15 @@ pub enum Event {
     Crash {
         client: usize,
     },
+    /// The sharer's server takes the oldest `1 + pick % n` of the `n` writes the member's
+    /// server holds on their way ([`Sim::hold_member_writes`]), in the order they were
+    /// sent, as Homebase's outbox delivers them: each where it still may be, the rest given
+    /// up. Nothing when none is held.
+    ///
+    /// [`Sim::hold_member_writes`]: crate::Sim::hold_member_writes
+    Deliver {
+        pick: usize,
+    },
 }
 
 /// Names drawn from a small pool so clashes (including case-only ones) are common. The last

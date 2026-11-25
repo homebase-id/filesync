@@ -37,3 +37,8 @@ const FULL_HOLD_MAX: Duration = Duration::from_secs(24 * 3600);
 pub(crate) fn full_hold(after: Option<Duration>) -> Duration {
     after.map_or(FULL_HOLD, |after| after.clamp(FULL_HOLD_MIN, FULL_HOLD_MAX))
 }
+
+/// The sooner of two waits, either of which may be none.
+pub(crate) fn sooner(a: Option<Duration>, b: Option<Duration>) -> Option<Duration> {
+    a.into_iter().chain(b).min()
+}

@@ -152,6 +152,13 @@ impl Ledger {
         lost
     }
 
+    /// Whether client `c`'s removal of `node`, as the drive has it now, is the one a delete's
+    /// lost commit makes ([`Ledger::commit_lost`]), without taking it: a removal on its way
+    /// asks when it is sent, and takes it when it lands.
+    pub(crate) fn lost_commit_removes(&self, c: usize, node: NodeId, now: &Seen) -> bool {
+        self.commit_lost.get(&(c, node)) == Some(now)
+    }
+
     /// A user listed Recently deleted: `rows`, each node at its version.
     pub(crate) fn deleted_listed(&mut self, rows: BTreeSet<(NodeId, VersionTag)>) {
         self.listed = Some(rows);

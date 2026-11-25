@@ -27,6 +27,9 @@ impl Sim {
             return;
         }
         self.faults.crashes += 1;
+        // A member's memory of its sends on their way is the process's: a new one asks again
+        // without it (the memoryless crash).
+        self.clients[c].sent.clear();
         // The user's Delete answers, and what they were shown, are kept in memory only: a new
         // process shows its holds again and asks again (§7).
         self.clients[c].confirmed.clear();

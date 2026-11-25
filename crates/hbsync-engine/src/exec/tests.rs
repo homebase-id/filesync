@@ -4618,6 +4618,17 @@ fn errors_go_through_the_policy() {
         }
         other => panic!("{other:?}"),
     }
+    // A write on its way to another identity's drive is this operation's wait alone: the
+    // run isn't stopped.
+    let on_its_way = remote_outcome(RemoteError::OnItsWay {
+        why: "waiting for tom's server".into(),
+        retry_after: Duration::from_secs(60),
+    });
+    assert!(
+        matches!(&on_its_way, Outcome::Wait(why, after)
+            if why == "waiting for tom's server" && *after == Duration::from_secs(60)),
+        "{on_its_way:?}"
+    );
     let token = hbsync_remote::Refusal::Token;
     let refused = remote_outcome(RemoteError::Denied("no more".into(), token));
     match refused {
@@ -4626,6 +4637,43 @@ fn errors_go_through_the_policy() {
         }
         other => panic!("{other:?}"),
     }
+}
+
+/// Writes on their way in a row hold the sync's other writes from the third. One the owner's
+/// server takes between them starts the count again; what isn't a write there doesn't.
+#[test]
+fn three_writes_on_their_way_in_a_row_hold_the_rest() {
+    let at = some_version();
+    let write = Op::RemoteDelete {
+        node: NodeId::new(),
+        parent: NodeId::ROOT,
+        file_id: at.file_id,
+        expected: at.version,
+    };
+    let other = Op::Settle {
+        node: NodeId::new(),
+    };
+    let wait = || Outcome::Wait("on its way".into(), Duration::from_secs(60));
+    let mut heard = OnTheirWay::default();
+    for _ in 0..2 {
+        heard.ended(&write, &wait());
+    }
+    assert!(!heard.holds_writes());
+    heard.ended(&other, &Outcome::Done);
+    heard.ended(&write, &Outcome::waiting("left"));
+    heard.ended(&write, &wait());
+    assert!(heard.holds_writes(), "three in a row");
+
+    let mut heard = OnTheirWay::default();
+    for outcome in [wait(), wait(), Outcome::Done, wait(), wait()] {
+        heard.ended(&write, &outcome);
+    }
+    assert!(!heard.holds_writes(), "one was taken between them");
+    heard.ended(&write, &Outcome::Settled);
+    for _ in 0..3 {
+        heard.ended(&write, &wait());
+    }
+    assert!(heard.holds_writes());
 }
 
 /// The drive removes a file and a plan here deletes it; before the delete runs, the drive brings

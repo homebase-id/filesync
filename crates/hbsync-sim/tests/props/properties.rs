@@ -199,6 +199,21 @@ proptest! {
         run_with(3, None, |sim| sim.with_writing_member(2), &events)?;
     }
 
+    /// [`a_writing_member_writes_only_what_it_may_and_converges`], from a drive shared with the
+    /// member for editing ([`with_all_shared_for_editing`]), the member's writes held on
+    /// their way by its own server ([`Sim::hold_member_writes`]) till the sharer's
+    /// server takes them, a few at a time ([`Event::Deliver`]), every client dying now and
+    /// then (the member forgetting what it sent). Each write lands at most once, only where
+    /// the drive's node is still as it was sent over, else it is given up; what the member
+    /// wrote that was given up is kept on its device as the engine keeps a change the drive
+    /// didn't take (a conflict copy, or moved out). All converge without loss.
+    #[test]
+    fn a_members_write_on_its_way_lands_once(
+        events in proptest::collection::vec(delivering(3, on_its_way_event()), 0..120)
+    ) {
+        run_with(3, None, with_all_shared_for_editing, &events)?;
+    }
+
     /// [`a_writing_member_writes_only_what_it_may_and_converges`], the member planning in
     /// pages of 1 to 4, its downloads fetched and placed in two steps, every client dying
     /// now and then, while the owner's folders are deleted, stopped half way and deleted

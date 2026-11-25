@@ -29,6 +29,7 @@ use crate::action::NAMES;
 use crate::model::client::{Client, SeenRemoved, keeps_in, rekey_client, rekey_marks, verdict};
 use crate::model::server::{ServerNode, time};
 use crate::oracle::{PlanSeen, Planned, What, view_with};
+use crate::outbox::{Held, Write};
 
 /// What an operation read of the drive before its write, for its commit (the executor's).
 #[derive(Debug, Clone)]
@@ -195,7 +196,13 @@ impl Sim {
             || (planned < 2 * nodes + 2 && !self.clients[c].pages.borrow().own.is_empty())
         {
             planned += 1;
+            // Another round of the same sync: what was on its way in it stays so, and how
+            // many in a row (the engine's `OnTheirWay`, a sync long).
+            let on_its_way = self.clients[c].on_its_way.clone();
+            let waits = self.clients[c].waits;
             self.plan(c);
+            self.clients[c].on_its_way.extend(on_its_way);
+            self.clients[c].waits = waits;
             // A page that holds deletes is one too: the user answers it (`Sim::quiesce`).
             let client = &self.clients[c];
             if !client.plan.is_empty() || !client.held.is_empty() {
@@ -299,6 +306,10 @@ impl Sim {
         if !self.clients[c].added || self.as_member(c, |sim| sim.plan(c)).is_some() {
             return;
         }
+        // A new sync: what was on its way is asked again, and it hears afresh (a page of the
+        // same sweep keeps both: `Sim::next_page_planned`).
+        self.clients[c].on_its_way.clear();
+        self.clients[c].waits = 0;
         // A run whose operations are left undone stopped (the engine's sync stopped: what its
         // sweep held stays dirty).
         if !self.clients[c].plan.is_empty() {
@@ -652,12 +663,10 @@ impl Sim {
                 Op::RemoteUpdate {
                     node, parent, name, ..
                 } => {
-                    // (Into a folder this plan makes in one it may add to: shared as that one
-                    // is, once made, which it is before the move runs.)
-                    let moves = |r: &NodeState| {
-                        let to = adds_to(parent) || made.contains(parent);
-                        r.parent != *parent && !(to && adds_to(&r.parent))
-                    };
+                    // Into a folder it may add to, or one this plan makes in such a folder.
+                    let into = adds_to(parent) || made.contains(parent);
+                    let moves =
+                        |r: &NodeState| r.parent != *parent && !(into && adds_to(&r.parent));
                     !input.writable.contains(node)
                         || input.remote.get(*node).is_none_or(moves)
                         || taken(*node, *parent, name)
@@ -1100,12 +1109,46 @@ impl Sim {
             Op::LocalMkdir { .. } | Op::LocalDownload { .. } => waits(node, there),
             _ => false,
         };
-        // A member that writes: as the executor's last guard, by what the drive says as the
-        // write runs (a share turned back to reading since the plan stops it here).
-        let outcome = match self.clients[c].writes && op.writes_remote() && !self.may_change(&op) {
-            true => Outcome::Skip,
-            false => self.execute(c, &op),
+        // A member that writes: what the engine's executor leaves for a later plan unsent
+        // first (on its way in this sync, into a folder on its way, held after three in a
+        // row: [`Sim::held_back`]); then its last guard, by what the drive says as the write
+        // runs (a share turned back to reading since the plan stops it here); then what its
+        // own server answers ([`Sim::member_sends`]). On its way, the op is left for a later
+        // plan (the engine's `Outcome::Wait`: dirty, not refused), not asked again in this
+        // sync.
+        let member_write = self.clients[c].writes && op.writes_remote();
+        let held_back = match member_write {
+            true => self.held_back(c, &op),
+            false => None,
         };
+        let outcome = if let Some(why) = held_back {
+            self.clients[c].on_its_way.insert(node);
+            self.note(|_| format!("  Waiting ({why}) {op:?}"));
+            Outcome::Skip
+        } else if member_write && !self.may_change(&op) {
+            Outcome::Skip
+        } else if member_write {
+            match self.member_sends(c, &op) {
+                Some(MemberAnswer::OnItsWay) => {
+                    let client = &mut self.clients[c];
+                    client.waits += 1;
+                    client.on_its_way.insert(node);
+                    self.note(|_| format!("  Wait (on its way) {op:?}"));
+                    Outcome::Skip
+                }
+                Some(MemberAnswer::Landed) => {
+                    self.record_remote(c, node);
+                    Outcome::Done
+                }
+                None => self.execute(c, &op),
+            }
+        } else {
+            self.execute(c, &op)
+        };
+        // A remote write done: their server takes this identity's writes (`Heard::ended`).
+        if matches!(outcome, Outcome::Done | Outcome::Landed) && op.writes_remote() {
+            self.clients[c].waits = 0;
+        }
         // What it read before its write, as the executor's (a pull landing before its commit
         // changes nothing of it).
         let (mut placed_from, read) = self.take_read();
@@ -3560,3 +3603,358 @@ mod tests {
         sim.check().unwrap_or_else(|e| panic!("{e}"));
     }
 }
+
+/// What the member's own server answers a write of the member's ([`Sim::member_sends`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum MemberAnswer {
+    /// On its way: held there, or waiting behind another write of the node held there.
+    OnItsWay,
+    /// This very write, sent before, landed since: answered as it was written.
+    Landed,
+}
+
+impl Sim {
+    /// Turns holding a writing member's writes on their way on or off. Held, each stays on
+    /// the member's own server (the adapter's answer is that it is on its way,
+    /// `RemoteError::OnItsWay`) till the sharer's server takes it ([`crate::Event::Deliver`],
+    /// and every one before the clients settle: [`Sim::quiesce`]), as `hbsync_remote`'s fake
+    /// holds them (`Faults::on_their_way`); what is held stays held when it is turned off.
+    pub fn hold_member_writes(&mut self, on: bool) {
+        self.faults.on_their_way = on;
+    }
+
+    /// For scripted tests: how many of the member's writes are held on their way.
+    pub fn writes_on_their_way(&self) -> usize {
+        self.outbox.held.len()
+    }
+
+    /// Why the engine's executor leaves member `c`'s write `op` unsent, for a later plan,
+    /// before it is asked of the drive (its `run_ops`): its node's write was on its way, or
+    /// held, in this sync; it is made in, or moved into, a folder whose own write was
+    /// (`goes_into_one_on_its_way`); or three in a row were on their way in this sync
+    /// (`OnTheirWay::holds_writes`).
+    pub(crate) fn held_back(&self, c: usize, op: &Op) -> Option<&'static str> {
+        let client = &self.clients[c];
+        let waits = |folder: &NodeId| client.on_its_way.contains(folder);
+        let goes_into = match op {
+            Op::RemoteCreate { parent, .. } => waits(parent),
+            Op::RemoteUpdate { node, parent, .. } => {
+                let there = client.planned_remote.get(*node);
+                waits(parent) && there.is_none_or(|row| row.parent != *parent)
+            }
+            _ => false,
+        };
+        if client.on_its_way.contains(&op.node()) {
+            Some("on its way to the drive: asked again later")
+        } else if goes_into {
+            Some("its folder is on its way to the drive")
+        } else if client.waits >= WAIT_HOLD {
+            Some("held: the drive's server isn't taking changes for now")
+        } else {
+            None
+        }
+    }
+
+    /// The write member `c`'s `op` sends, as the drive is now (as the member reads it): a new
+    /// node as it is to be, or a change or removal of the node at the version the op acts on.
+    /// `None` where the executor doesn't send one as such (another version taken along: a
+    /// new item; nothing to send; the item changed since the plan; a node not on the drive):
+    /// the op runs as ever ([`Sim::execute`]).
+    fn would_write(&self, c: usize, op: &Op) -> Option<Write> {
+        let client = &self.clients[c];
+        let coords = client.coords;
+        let node = op.node();
+        let unchanged = client.local.get(node) == client.planned_local.get(node);
+        let on_drive = self.server.live.get(&node);
+        let at = |expected: VersionTag| {
+            let on = on_drive?;
+            Some(RemoteRef {
+                file_id: on.remote.file_id,
+                version: expected,
+            })
+        };
+        match op {
+            Op::RemoteCreate {
+                parent,
+                name,
+                kind,
+                tags,
+                ..
+            } => {
+                // (One the drive has by now, live or in Recently deleted, is asked of the
+                // member's server all the same: its send landed, or it is given up there.)
+                if !client.local.contains(node) || !unchanged {
+                    return None;
+                }
+                let content = match kind {
+                    NodeKind::Folder => None,
+                    NodeKind::File => Some(sent_content_over(client, node, None)?),
+                };
+                let state = NodeState {
+                    parent: coords.to_drive(*parent),
+                    name: name.clone(),
+                    kind: *kind,
+                    content,
+                    tags: tags.clone(),
+                };
+                Some(Write::Create { state })
+            }
+            Op::RemoteUpdate {
+                expected,
+                parent,
+                name,
+                upload,
+                tags,
+                ..
+            } => {
+                let on = on_drive?;
+                let local = sent_content(client, node);
+                if *upload && never_had_over(client, node, on.state.content, local) {
+                    return None;
+                }
+                let content = match upload {
+                    true => Some(local?),
+                    false => on.state.content,
+                };
+                let tags = self.merged_with_drive(c, node, tags, &on.state.tags);
+                let state = NodeState {
+                    parent: coords.to_drive(*parent),
+                    name: name.clone(),
+                    content,
+                    tags,
+                    ..on.state.clone()
+                };
+                Some(Write::Update {
+                    at: at(*expected)?,
+                    state,
+                })
+            }
+            Op::RemoteTags { expected, tags, .. } => {
+                let on = on_drive?;
+                let tags = self.merged_with_drive(c, node, tags, &on.state.tags);
+                let state = NodeState {
+                    tags,
+                    ..on.state.clone()
+                };
+                Some(Write::Update {
+                    at: at(*expected)?,
+                    state,
+                })
+            }
+            Op::RemoteDelete { expected, .. } => {
+                let now = self.on_drive(node)?;
+                let version = on_drive?.remote.version;
+                // Rightly so as `execute` judges a removal: the user's delete of it as it is
+                // now, a lost commit's, or what a folder's removal had taken along.
+                let rightly = self.ledger.deleted_by_user(node, &now)
+                    || self.ledger.lost_commit_removes(c, node, &now)
+                    || self.ledger.plan_saw_taken(c, node, version);
+                Some(Write::Remove {
+                    at: at(*expected)?,
+                    rightly,
+                })
+            }
+            _ => None,
+        }
+    }
+
+    /// What member `c`'s own server answers its write `op`, where the fake's `before`/`add`
+    /// and `send` would not just pass it on to the drive (`None`: it runs as ever, now):
+    /// 1. this very write, sent before and remembered (`Client::sent`): landed since, it is
+    ///    answered as written; still held, the drive's node unchanged, it is on its way; else
+    ///    it is forgotten;
+    /// 2. their node at another version by now: the op runs as ever (and is refused on its
+    ///    version);
+    /// 3. another write of the node held: on its way, unsent;
+    /// 4. writes held on their way ([`Sim::hold_member_writes`]): sent and held, judged
+    ///    as sent (a breach then is the member's), remembered.
+    pub(crate) fn member_sends(&mut self, c: usize, op: &Op) -> Option<MemberAnswer> {
+        if !matches!(ready(&self.clients[c], op), Met::Yes) {
+            return None;
+        }
+        let write = self.would_write(c, op)?;
+        let node = op.node();
+        let drive = self.whole.as_ref().unwrap_or(&self.server);
+        let version = drive.live.get(&node).map(|n| n.remote.version);
+        // A new node that landed and is gone since: none of theirs, sent again.
+        if matches!(write, Write::Create { .. }) && drive.node(node).is_none() {
+            self.outbox.landed.remove(&node);
+        }
+        if let Some((sent, send)) = self.clients[c].sent.get(&node).cloned()
+            && sent == write
+        {
+            if self
+                .outbox
+                .landed
+                .get(&node)
+                .is_some_and(|(l, _)| *l == send)
+            {
+                self.clients[c].sent.remove(&node);
+                self.outbox.landed.remove(&node);
+                return Some(MemberAnswer::Landed);
+            }
+            let unchanged = write.over().is_none_or(|at| version == Some(at.version));
+            if unchanged && self.outbox.holds(node) {
+                return Some(MemberAnswer::OnItsWay);
+            }
+            self.clients[c].sent.remove(&node);
+        }
+        if let Some(at) = write.over()
+            && version != Some(at.version)
+        {
+            return None;
+        }
+        if self.outbox.holds(node) {
+            return Some(MemberAnswer::OnItsWay);
+        }
+        if !self.faults.on_their_way {
+            self.clients[c].sent.remove(&node);
+            return None;
+        }
+        // Judged as sent, against the drive as the member reads it now (`Sim::as_member`'s
+        // judgement of what it wrote): what it may not write is a breach whether or not it
+        // lands. (A new node the drive has by now, its plan made before it landed, is given
+        // up there: no write.)
+        let exists = matches!(write, Write::Create { .. }) && self.server.node(node).is_some();
+        if let Some(whole) = self.whole.as_ref().filter(|_| !exists) {
+            let before = self.server.snapshot();
+            let mut seen =
+                (self.server).holding(self.server.live.clone(), self.server.removed.clone());
+            apply_write(&mut seen, node, &write);
+            let (breach, _) = whole
+                .holding(whole.live.clone(), whole.removed.clone())
+                .take_from_member(&before, &seen);
+            let name = &self.clients[c].name;
+            self.ledger
+                .read_only_wrote(|| breach.map(|what| format!("{name}, a member: {what}")));
+        }
+        if let Write::Create { state } | Write::Update { state, .. } = &write {
+            let was = (self.server.live.get(&node))
+                .and_then(|n| n.state.content)
+                .map(|c| c.executable);
+            self.x_sent(c, node, was, state.content);
+        }
+        let send = self.outbox.sends;
+        self.outbox.sends += 1;
+        let tags = match op {
+            Op::RemoteCreate { tags, .. }
+            | Op::RemoteUpdate { tags, .. }
+            | Op::RemoteTags { tags, .. } => tags.iter().map(|t| t.name.clone()).collect(),
+            _ => Vec::new(),
+        };
+        self.clients[c].sent.insert(node, (write.clone(), send));
+        self.outbox.held.push(Held {
+            send,
+            client: c,
+            node,
+            write,
+            tags,
+        });
+        self.note(|_| format!("  held on its way: send {send} {op:?}"));
+        Some(MemberAnswer::OnItsWay)
+    }
+
+    /// The sharer's server takes the oldest `count` of the member's writes held on their way,
+    /// in the order they were sent (the fake's `deliver`): each only where it still may be (a
+    /// change or a removal of the node at the version it was sent over, shared for editing; a
+    /// new node in a folder shared for editing, where the drive has none of it); any other is
+    /// given up, as Homebase's outbox gives it up (nothing of it lands, and that is no
+    /// breach).
+    pub(crate) fn deliver(&mut self, count: usize) {
+        let count = count.min(self.outbox.held.len());
+        let held: Vec<Held> = self.outbox.held.drain(..count).collect();
+        for h in held {
+            let taken = self.taken(&h);
+            self.note(|_| format!("deliver send {}: {:?} taken {taken}", h.send, h.node));
+        }
+    }
+
+    /// The sharer's server takes the held write `h`, where it may: whether it did.
+    /// (No send lands twice: each is taken out of the outbox as it is looked at.)
+    fn taken(&mut self, h: &Held) -> bool {
+        let node = h.node;
+        let server = &self.server;
+        let editable = |n: NodeId| server.editable_node(n).is_some();
+        let at_sent = |at: &RemoteRef| {
+            server
+                .live
+                .get(&node)
+                .is_some_and(|n| n.remote == *at && editable(node))
+        };
+        // As the fake's server takes one (`FakeRemote::taken`): a new node where the drive
+        // has none of it (its folder isn't asked again: what it was sent to be shared as went
+        // with it); a change or removal of the node still at the version it was sent over,
+        // and still the member's to change.
+        let may = match &h.write {
+            Write::Create { .. } => server.node(node).is_none(),
+            Write::Update { at, .. } | Write::Remove { at, .. } => at_sent(at),
+        };
+        if !may {
+            return false;
+        }
+        match &h.write {
+            Write::Remove { rightly, .. } => {
+                let n = self.server.live.remove(&node).expect("live");
+                if let Some(now) = self.on_drive_state(&n) {
+                    self.ledger.removed_by_lost_commit(h.client, node, &now);
+                }
+                self.remove_on_drive(node, n, *rightly);
+                self.deleted_now(node);
+            }
+            write => {
+                let at = apply_write(&mut self.server, node, write);
+                if matches!(write, Write::Create { .. }) {
+                    self.server.shared.insert(at.file_id);
+                    self.server.editable.insert(at.file_id);
+                }
+                let now = self.server.now();
+                for tag in &h.tags {
+                    self.ledger.tags.sent(h.client, node, tag, now);
+                }
+                self.outbox.landed.insert(node, (h.send, at));
+            }
+        }
+        if let Some(at) = self.server.node(node).map(|(n, _)| n.remote) {
+            self.outbox.landed.entry(node).or_insert((h.send, at));
+        }
+        true
+    }
+
+    /// `n` (a live node just taken out) as a user saw it ([`crate::oracle::Seen`]).
+    fn on_drive_state(&self, n: &ServerNode) -> Option<crate::oracle::Seen> {
+        Some((
+            n.state.parent,
+            n.state.name.clone(),
+            n.state.content.map(|c| c.hash),
+        ))
+    }
+}
+
+/// Puts `write` of `node` on `server` as a write there, at a new version: where it is the
+/// write's.
+fn apply_write(
+    server: &mut crate::model::server::Server,
+    node: NodeId,
+    write: &Write,
+) -> RemoteRef {
+    match write {
+        Write::Create { state } => server.put(node, state.clone()),
+        Write::Update { state, .. } => {
+            let version = VersionTag(server.uuid());
+            let n = server.live.get_mut(&node).expect("live");
+            n.state = state.clone();
+            n.remote.version = version;
+            n.remote
+        }
+        Write::Remove { at, .. } => {
+            if let Some(n) = server.live.remove(&node) {
+                server.remove(node, n);
+            }
+            *at
+        }
+    }
+}
+
+/// So many of a member's writes on their way in a row hold the sync's others: the engine's
+/// `WAIT_HOLD` (`hbsync_engine`'s executor, not exported).
+const WAIT_HOLD: u32 = 3;

@@ -218,8 +218,12 @@ pub(crate) enum Synced {
     /// Stopped by a pause or a stop: the rest waits for resume.
     Stopped,
     /// Work left that another try may do (`SyncReport::unfinished`); `progressed`: this sync
-    /// did some.
-    Unfinished { progressed: bool },
+    /// did some; `not_before`: what is left waits for another identity's server, asked again
+    /// no sooner (`SyncReport::not_before`).
+    Unfinished {
+        progressed: bool,
+        not_before: Option<Duration>,
+    },
 }
 
 #[derive(Debug)]
@@ -364,12 +368,16 @@ impl Schedule {
                 self.retry = None;
                 self.retry_backoff = Backoff::new();
             }
-            Synced::Unfinished { progressed } => {
+            Synced::Unfinished {
+                progressed,
+                not_before,
+            } => {
                 self.why = Whys::default();
                 if progressed {
                     self.retry_backoff = Backoff::new();
                 }
-                self.retry = Some(now + self.retry_backoff.next());
+                let after = self.retry_backoff.next();
+                self.retry = Some(now + not_before.map_or(after, |wait| after.max(wait)));
             }
         }
     }
@@ -413,6 +421,37 @@ mod tests {
         Duration::from_millis(n)
     }
 
+    /// Work left that waits for another identity's server is tried again no sooner than it
+    /// said, however short the backoff; a change still asks for a sync at once.
+    #[test]
+    fn work_that_waits_for_their_server_is_retried_no_sooner_than_said() {
+        let t0 = Instant::now();
+        let wait = Duration::from_secs(60);
+        let mut s = Schedule::new(t0, LOOK, false);
+        s.synced(
+            t0,
+            Synced::Unfinished {
+                progressed: true,
+                not_before: Some(wait),
+            },
+        );
+        assert!(!s.due(t0 + Duration::from_secs(30)));
+        assert_eq!(s.next_wake(t0, false), Some(t0 + wait));
+        assert!(s.due(t0 + wait));
+        s.want(Why::Local);
+        assert!(s.due(t0 + Duration::from_secs(1)));
+        // Without: the backoff's own few seconds.
+        let mut s = Schedule::new(t0, LOOK, false);
+        s.synced(
+            t0,
+            Synced::Unfinished {
+                progressed: true,
+                not_before: None,
+            },
+        );
+        assert!(s.due(t0 + Duration::from_secs(30)));
+    }
+
     /// A sync says what asked for it: the start, then what came since the sync before ended;
     /// unfinished work's retry when nothing else did. A sync that fails keeps them.
     #[test]
@@ -420,7 +459,13 @@ mod tests {
         let t0 = Instant::now();
         let mut s = Schedule::new(t0, LOOK, false);
         assert_eq!(s.why(t0).to_string(), "start");
-        s.synced(t0, Synced::Unfinished { progressed: false });
+        s.synced(
+            t0,
+            Synced::Unfinished {
+                progressed: false,
+                not_before: None,
+            },
+        );
         assert_eq!(s.why(t0).to_string(), "nothing", "told once");
         for why in [Why::Local, Why::Drive, Why::Local] {
             s.want(why);
@@ -435,7 +480,13 @@ mod tests {
             "a change here, a change on the drive",
             "a failed sync's, asked for again"
         );
-        s.synced(t0, Synced::Unfinished { progressed: false });
+        s.synced(
+            t0,
+            Synced::Unfinished {
+                progressed: false,
+                not_before: None,
+            },
+        );
         assert_eq!(s.why(t0 + ms(10_000)).to_string(), "unfinished work");
         s.woke(t0);
         assert_eq!(s.why(t0).to_string(), "a wake-up");
@@ -473,7 +524,10 @@ mod tests {
     fn unfinished_work_backs_off_without_holding_back_changes() {
         let t0 = Instant::now();
         let s5 = Duration::from_secs(5);
-        let stuck = Synced::Unfinished { progressed: false };
+        let stuck = Synced::Unfinished {
+            progressed: false,
+            not_before: None,
+        };
         let mut s = Schedule::new(t0, LOOK, false);
         s.synced(t0, stuck);
         assert!(!s.due(t0 + s5 - ms(1)));
@@ -486,7 +540,13 @@ mod tests {
         s.want(Why::Local);
         assert!(s.due(t0 + ms(1)));
         // A try that did some: from the start again.
-        s.synced(t0, Synced::Unfinished { progressed: true });
+        s.synced(
+            t0,
+            Synced::Unfinished {
+                progressed: true,
+                not_before: None,
+            },
+        );
         assert!(s.due(t0 + s5));
         // Finished: nothing more.
         s.synced(t0, Synced::Done);
@@ -502,7 +562,13 @@ mod tests {
         s.synced(t0, Synced::Done);
         s.online(t0);
         assert!(!s.due(t0), "nothing waits");
-        s.synced(t0, Synced::Unfinished { progressed: false });
+        s.synced(
+            t0,
+            Synced::Unfinished {
+                progressed: false,
+                not_before: None,
+            },
+        );
         s.online(t0 + ms(1));
         assert!(s.due(t0 + ms(1)), "unfinished work");
         s.synced(t0, Synced::Done);
@@ -590,7 +656,13 @@ mod tests {
         assert!(s.due(t0 + wait));
 
         // Unfinished work: its retry.
-        s.synced(t0, Synced::Unfinished { progressed: false });
+        s.synced(
+            t0,
+            Synced::Unfinished {
+                progressed: false,
+                not_before: None,
+            },
+        );
         assert_eq!(s.next_wake(t0, false), Some(t0 + s5));
         assert!(s.due(t0 + s5));
 

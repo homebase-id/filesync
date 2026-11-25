@@ -39,6 +39,7 @@ mod ids;
 mod model;
 mod narrow;
 mod oracle;
+mod outbox;
 mod tagbook;
 mod trace;
 mod world;
@@ -88,6 +89,8 @@ pub struct Sim {
     read: Option<exec::Read>,
     /// The faults it plays, and what they keep ([`Faults`]).
     faults: Faults,
+    /// The writing member's server's writes on their way ([`Sim::hold_member_writes`]).
+    outbox: outbox::Outbox,
 }
 
 impl Sim {
@@ -117,6 +120,7 @@ impl Sim {
             computers: Vec::new(),
             faults: Faults::default(),
             read: None,
+            outbox: outbox::Outbox::default(),
         }
     }
 
@@ -487,6 +491,12 @@ impl Sim {
                 }
                 Event::PutBack { client } => self.put_back(client % self.clients.len()),
                 Event::Crash { client } => self.crash(client % self.clients.len()),
+                Event::Deliver { pick } => {
+                    let held = self.outbox.held.len();
+                    if held > 0 {
+                        self.deliver(1 + pick % held);
+                    }
+                }
             }
         }
     }
@@ -618,6 +628,17 @@ impl Sim {
     /// For scripted tests: what [`Action::DeleteStopped`]'s `pick` is to pick folder `node`.
     pub fn stopped_pick(&self, node: NodeId) -> Option<usize> {
         self.stopped_folders().iter().position(|n| *n == node)
+    }
+
+    /// For scripted tests: the bytes client `c`'s item of `node` holds, as their hash.
+    pub fn local_hash(&self, c: usize, node: NodeId) -> Option<hbsync_types::ContentHash> {
+        self.clients[c].local.get(node)?.content.map(|c| c.hash)
+    }
+
+    /// For scripted tests: the bytes the drive has of `node`, live or in Recently deleted, as
+    /// their hash.
+    pub fn drive_hash(&self, node: NodeId) -> Option<hbsync_types::ContentHash> {
+        self.server.node(node)?.0.state.content.map(|c| c.hash)
     }
 
     /// Whether `node` is in Recently deleted.
@@ -757,6 +778,10 @@ impl Sim {
         for client in &mut self.clients {
             client.locked.clear();
         }
+        // The member's server takes what it holds, and holds no more: the drive's answers
+        // come, as they do in time.
+        self.faults.on_their_way = false;
+        self.deliver(usize::MAX);
         // A Desktop not added yet is added before the clients settle: then everything syncs.
         while self.add_desktop() {}
     }

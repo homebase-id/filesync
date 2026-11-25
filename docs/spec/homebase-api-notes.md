@@ -795,7 +795,9 @@ it for editing. Built, and not turned on: a share is still read-only in the prod
   upload. Answer: `{globalTransitId, newVersionTag, recipientStatus: {owner: "enqueued"}}`
   (a send that couldn't be queued answers 200 too, with `enqueuedFailed`, and leaves its
   staged copy behind, odin-core #2158: the client waits for no word then, and asks again in a
-  minute):
+  minute, the whole share's wait, `RemoteError::Waiting`: its own server's outbox is in
+  trouble; the copy left staged then answers `existingFileWithUniqueId` to the next send of
+  the node, read as on its way, until it is gone):
   `newVersionTag` is the version their file will have, known before it lands
   (**[verified]** live). A header alone (a rename, a move, `archivalStatus` 2 for their
   Recently deleted and 0 back) keeps the bytes. There is no batch for a member: several
@@ -861,8 +863,10 @@ it for editing. Built, and not turned on: a share is still read-only in the prod
   notifications of the own drive feed it, a write takes the one for its global transit id
   and sent version). Where none comes in 0.3 s it reads their file itself (their version is
   the one sent: landed), again after 1, 3, 7 and 15 s; then it asks the outbox: still
-  pending is `RemoteError::Waiting` (asked again in a minute, and not sent twice in one run:
-  the write is remembered by node and by what it wrote), not pending and not landed is
+  pending is `RemoteError::OnItsWay` (that write's own wait: asked again in a minute, and
+  not sent twice in one run: the write is remembered by node and by what it wrote, the
+  bytes' hash too where it is known before they are sent; the engine leaves the one
+  operation and goes on, sync semantics §13), not pending and not landed is
   retried. Measured live, the whole write with the socket connected: 20 to 40 ms for a
   header, 60 to 120 ms with bytes or for a new file; without a socket, the first wait and one
   read more.
@@ -875,7 +879,11 @@ it for editing. Built, and not turned on: a share is still read-only in the prod
 - **One write of a node at a time.** The staged copy carries the node's `uniqueId`, unique
   on the transient drive too: a second write of the node while the first is still in the
   outbox answers `400 existingFileWithUniqueId` (**[verified]** live for a stray copy;
-  **[inferred]** for one still on its way), taken as "still on its way".
+  **[inferred]** for one still on its way), taken as "still on its way". A new file is
+  refused so at its metadata part, before its bytes are read (**[verified]** odin-core
+  `FileSystemStreamWriterBase.AddMetadata`, PR #2019, from v0.1.968): a write asked again
+  with bytes while the earlier one is staged doesn't cost their upload there. (Not looked
+  at: how much of the body this client has sent by the time it reads that answer.)
 - **Not used:** a member's delete. `POST …/files/senddeleterequest` (with
   `expectedVersionTag`, odin-core PR #2140) writes a tombstone; this client moves a member's
   delete to the owner's Recently deleted instead (`archivalStatus` 2, above), and deletes
