@@ -35,6 +35,12 @@ pub(crate) struct ExecReport {
     /// drive's state, an earlier try of it landed unanswered, an answer that didn't come), or
     /// full (the run's uploads from then on were held, left dirty).
     pub news: DriveNews,
+    /// Writes on their way to another identity's drive were left for a later plan
+    /// ([`Outcome::Wait`]): asked again no sooner than this (the soonest any said).
+    pub not_before: Option<Duration>,
+    /// What the sync's runs so far left on its way there, for its next run
+    /// ([`super::Executor::with_on_their_way`]).
+    pub on_their_way: super::OnTheirWay,
 }
 
 /// Why a run stopped before its plan was done.
@@ -75,6 +81,11 @@ pub(super) enum Outcome {
     /// The drive is out of storage: hold this and every later upload of the run (and on the
     /// account: for the time the drive said, if it did).
     Full(Option<Duration>),
+    /// The write is on its way to another identity's drive ([`RemoteError::OnItsWay`]): left
+    /// for a later plan, asked again no sooner than said, while the run goes on with the
+    /// rest. (A few in a row, and the run's other writes there are held: their server isn't
+    /// taking any.)
+    Wait(String, Duration),
     /// A download's bytes didn't match what the drive said they are: the first time at a
     /// version, the drive is read again; the second, it is refused.
     Mismatch(String),
@@ -193,6 +204,7 @@ pub(super) fn remote_outcome(e: RemoteError) -> Outcome {
         RemoteError::Waiting { why, retry_after } => {
             Outcome::Stop(Stopped::Waiting(why, retry_after))
         }
+        RemoteError::OnItsWay { why, retry_after } => Outcome::Wait(why, retry_after),
         e => Outcome::of(e.class(), e.to_string(), e.retry_after()),
     }
 }

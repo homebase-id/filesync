@@ -145,7 +145,11 @@ impl Schedule {
     pub(super) fn ended(&mut self, op: &Op, outcome: &Outcome) {
         if matches!(
             outcome,
-            Outcome::Done | Outcome::Settled | Outcome::Skip(_) | Outcome::Full(_)
+            Outcome::Done
+                | Outcome::Settled
+                | Outcome::Skip(_)
+                | Outcome::Full(_)
+                | Outcome::Wait(..)
         ) {
             self.streak = 0; // the remote answered (or wasn't needed)
         }

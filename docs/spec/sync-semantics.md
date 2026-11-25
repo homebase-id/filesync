@@ -1613,7 +1613,9 @@ whatever changed here, and the plan holds no operation on the drive:
   forgotten.
 - The mass-delete guard (§7) judges the deletes here as everywhere (a removal elsewhere of
   every synced file is held); what it holds is confirmed or stays held: putting it back would
-  restore it on the drive, and is refused.
+  restore it on the drive, and is refused. (A folder that writes there also holds its own
+  deletes, and puts those back here without a write: below, "A delete here of an item the
+  store says may be changed".)
 - The folder things move out to is a full path outside the read-only one (else its scan would find them
   as new items there) and made where it is missing, on the folder's volume (a move out is one
   rename; a rename across devices, as into a bind mount of the same file system, tells it too):
@@ -1755,6 +1757,12 @@ rules hold too:
   - gone there, it follows the drive: what is gone there (deleted, its share withdrawn,
     taken along by its folder's removal) isn't made again, and an edit of it here moves
     out;
+  - not synced here for its name (left out: its folder no longer shared, its name at the
+    top taken, above), its edit here doesn't go up either, and stays with it; but a delete
+    here takes no edit: where its folder goes here, the edited file moves out first (what
+    a delete here would take that changed here does, whatever kept it out of the plan, in
+    a folder that only reads too: a file edited here that waits for a folder there this
+    device can't read, say);
   - deleted here, it is removed there: it goes to its owner's Recently deleted (below);
   - edited on both sides, both are kept where its folder may be added to (below): the
     drive's version keeps the file, and this device's becomes a conflict copy beside it,
@@ -1763,7 +1771,8 @@ rules hold too:
     moves out, as of any item of the folder (an executable bit changed here alone is no
     edit to keep, as in any read-only folder);
   - a move here to another folder goes up between two folders that may be added to
-    (below), and is undone, whole, anywhere else (the item goes back to the drive's place
+    (below; also into a folder made here in one, which is added first), and is undone,
+    whole, anywhere else (the item goes back to the drive's place
     and name); an edit made with it still goes up;
   - a rename or a move here onto a name another item holds, on the drive or in the plan, or
     one this device leaves out there or keeps (§10, §7), is undone: no clash of names is
@@ -1776,11 +1785,10 @@ rules hold too:
   sharer and the Homebase adapter share a new item with its folder's rows):
   - what is new here in such a folder is added there, a new folder with what is in it: a
     folder is made before what is in it, in the same run where its create is answered at
-    once (a write still on its way there, as Homebase's can be, leaves what is in it for
-    a later plan, once the feed brought the folder's row; meanwhile the guard's refusal
-    of it reads "the folder is read-only", which is the wrong word for it: to be put
-    right with writes on their way); new at the top (no folder of
-    the drive's) or in a folder shared for reading, it moves out, as before;
+    once (a create still on its way there, below, leaves what is in it for a later plan,
+    once the feed brought the folder's row: told that its folder is on its way, not
+    refused); new at the top (no folder of the drive's) or in a folder shared for
+    reading, it moves out, as before;
   - what is added under a name another item holds there goes under the first free
     numbered name, as a clash's loser does on an identity's own drive (§6.3);
   - the executor's last guard makes a node only in a folder the store says may be
@@ -1818,8 +1826,16 @@ rules hold too:
     removed one, goes along with it (this device doesn't know where the unshared folder
     is).
   - The mass-delete guard (§7) holds such removals as an own drive's: confirmed, they are
-    sent. Putting them back is refused in such a folder for now (`Engine::put_back`): what
-    is held is confirmed or stays held.
+    sent. **Put them back** undoes them here without a write to the drive: after a read of
+    the feed, the base of each node deleted here and live there goes, with what below it
+    is gone here too, so it comes down again (`held::put_back_here`; one the drive removed
+    too meanwhile is left to the drive). A removal made there that such a folder holds
+    (every synced file, the items still here) is not this identity's to put back: that is
+    a restore on the drive, which only its owner does. It stays held till confirmed, and a
+    put back that undoes nothing and leaves one such is refused, told so
+    (`Engine::put_back`; a folder that doesn't write holds only such removals, and refuses
+    every put back, as above).
+    Simulator: `a_guarded_writing_member_confirms_or_puts_back_its_own_deletes`.
   - What this device itself moved out of the folder (an edit of an item it may only read)
     is no delete of the user's: in a folder that writes, the bases of what moves out go
     before the item does, so the node is planned from the drive's alone and comes back,
@@ -1868,9 +1884,40 @@ rules hold too:
   this device ignores (§10) follows the drive: an ignore rule here removes nothing there.
   Simulator: `a_writing_member_writes_only_what_it_may_and_converges`, the same in pages
   that crash, and on the engine's planning path; scripted cases in
-  `regressions/writing_member.rs`. No folder writes yet (nothing turns it on): the daemon
-  turns it on with the permission to send to other identities, once a write still on its
-  way no longer stops the whole share (the next step).
+  `regressions/writing_member.rs`.
+
+  **A write on its way waits alone.** A member's write goes through its own server, which
+  hands it to the owner's: it can be on its way there for a while (their server busy or
+  down), and the adapter says so of that write (`RemoteError::OnItsWay`, asked again in a
+  minute; not the whole share's wait for someone, which stops the share: not connected,
+  their key not opened yet, a send this identity's server couldn't queue).
+  - The operation is left for a later plan, as it is, and the run goes on: what the owner
+    changed comes down in the same sync, and the other writes go up. Asked again as it
+    was, the write is answered from what was sent (landed, or still on its way): nothing
+    is sent twice. Their server is asked once a sync for it, not once a round, and the
+    sync, ending with work left, isn't tried again before the minute is over.
+  - Another write of the same item meanwhile (edited again) is another write: it waits
+    behind the first (the member's server stages one write of an item at a time), and
+    once the first has landed it meets that version: the second edit is then kept as an
+    edit made on both sides is (a conflict copy where its folder may be added to, moved
+    out elsewhere). A copy of one's own edit, and nothing lost: to be spared by
+    remembering what was sent (not done).
+  - After three writes on their way in a row, none taken between them, the sync's other
+    writes to that drive are held, unsent: their server isn't taking any, and each would
+    cost the wait for its answer (and a file its upload) to learn the same. What comes
+    down goes on meanwhile.
+  - What is made in, or moved into, a folder whose own create or move is on its way waits
+    for it: a new folder has no row to ask yet, and one that moves isn't where it is to
+    be (a folder sent into one whose move out of it hasn't landed would close a ring
+    there for a while). Told so, left for the next plan with it, and not refused as
+    going into a folder that is read-only. A change of what is in such a folder already
+    goes up.
+  - A write the owner's server doesn't take in the end (their file changed meanwhile,
+    the share turned to reading) is told as such when it is asked again, and the item
+    planned from what is there: the owner's change wins, as against any stale write.
+
+  No folder writes yet (nothing turns it on): the daemon turns it on with the permission
+  to send to other identities (the next step).
   So a folder synced from another identity's drive is read-only (above), whatever its items
   say. A share's state DB from before it was kept reads its
   feed from its beginning once (a re-read, §8b), each row taking what its header says.

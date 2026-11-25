@@ -199,6 +199,21 @@ proptest! {
         run_with(3, None, |sim| sim.with_writing_member(2), &events)?;
     }
 
+    /// [`a_writing_member_writes_only_what_it_may_and_converges`], from a drive shared with the
+    /// member for editing ([`with_all_shared_for_editing`]), the member's writes held on
+    /// their way by its own server ([`Sim::hold_member_writes`]) till the sharer's
+    /// server takes them, a few at a time ([`Event::Deliver`]), every client dying now and
+    /// then (the member forgetting what it sent). Each write lands at most once, only where
+    /// the drive's node is still as it was sent over, else it is given up; what the member
+    /// wrote that was given up is kept on its device as the engine keeps a change the drive
+    /// didn't take (a conflict copy, or moved out). All converge without loss.
+    #[test]
+    fn a_members_write_on_its_way_lands_once(
+        events in proptest::collection::vec(delivering(3, on_its_way_event()), 0..120)
+    ) {
+        run_with(3, None, with_all_shared_for_editing, &events)?;
+    }
+
     /// [`a_writing_member_writes_only_what_it_may_and_converges`], the member planning in
     /// pages of 1 to 4, its downloads fetched and placed in two steps, every client dying
     /// now and then, while the owner's folders are deleted, stopped half way and deleted
@@ -221,6 +236,27 @@ proptest! {
                 .with_split_downloads()
         };
         run_with(3, None, setup, &events)?;
+    }
+
+    /// [`a_writing_member_writes_only_what_it_may_and_converges`] with the mass-delete guard
+    /// on (a low limit, so it trips often; §7): the member's deletes of what it may change
+    /// are held as an own drive's and sent only once confirmed; put back, they are undone
+    /// here without a write to the drive (the items come down again), while a removal made
+    /// there, which only its owner restores, stays held till confirmed. Whatever the users
+    /// answer, the clients converge without loss.
+    #[test]
+    fn a_guarded_writing_member_confirms_or_puts_back_its_own_deletes(
+        events in proptest::collection::vec(
+            prop_oneof![
+                8 => events_of(3, editing_action()),
+                1 => (0usize..3).prop_map(|client| Event::Confirm { client }),
+                1 => (0usize..3).prop_map(|client| Event::PutBack { client }),
+            ],
+            0..120,
+        ),
+        min in 1usize..3,
+    ) {
+        run_with(3, Some(min), |sim| sim.with_writing_member(2), &events)?;
     }
 
     /// A device's folder that holds what other identities share (§10) is its own: nothing in
