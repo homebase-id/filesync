@@ -88,6 +88,14 @@ impl FolderCtx {
 }
 
 impl FolderCtx {
+    /// Whether a file synced into the folder is kept read-only on disk (§13): in a folder
+    /// synced from another identity's drive, a save over it would only move out, and the bit
+    /// keeps that from happening by accident. Not one this identity may change there
+    /// (`writable`: its mirror row's), where the folder writes: its save goes up.
+    pub fn keeps_read_only(&self, writable: bool) -> bool {
+        self.read_only.is_some() && !(self.writes && writable)
+    }
+
     /// Whether a file's id, size and mtime prove its bytes on the folder's volume
     /// ([`FolderCtx::mtime_proves_bytes`]): its family keeps fine mtimes and stable ids, and a
     /// probe in the client's state folder reads a sub-second mtime back. Asked once.
