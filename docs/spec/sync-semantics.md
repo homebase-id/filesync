@@ -1724,6 +1724,12 @@ rules hold too:
   - gone there, it follows the drive: what is gone there (deleted, its share withdrawn,
     taken along by its folder's removal) isn't made again, and an edit of it here moves
     out;
+  - not synced here for its name (left out: its folder no longer shared, its name at the
+    top taken, above), its edit here doesn't go up either, and stays with it; but a delete
+    here takes no edit: where its folder goes here, the edited file moves out first (what
+    a delete here would take that changed here does, whatever kept it out of the plan, in
+    a folder that only reads too: a file edited here that waits for a folder there this
+    device can't read, say);
   - deleted here, it is removed there: it goes to its owner's Recently deleted (below);
   - edited on both sides, both are kept where its folder may be added to (below): the
     drive's version keeps the file, and this device's becomes a conflict copy beside it,
@@ -1732,7 +1738,8 @@ rules hold too:
     moves out, as of any item of the folder (an executable bit changed here alone is no
     edit to keep, as in any read-only folder);
   - a move here to another folder goes up between two folders that may be added to
-    (below), and is undone, whole, anywhere else (the item goes back to the drive's place
+    (below; also into a folder made here in one, which is added first), and is undone,
+    whole, anywhere else (the item goes back to the drive's place
     and name); an edit made with it still goes up;
   - a rename or a move here onto a name another item holds, on the drive or in the plan, or
     one this device leaves out there or keeps (§10, §7), is undone: no clash of names is

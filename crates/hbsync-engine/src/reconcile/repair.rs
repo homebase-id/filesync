@@ -766,7 +766,7 @@ impl Reconciler<'_> {
     /// the first numbered name that is free, as a clash's loser does on an identity's own
     /// drive. A clash of names on the drive is its owner's to mend, so none is made there.
     pub(super) fn keep_off_taken_names(&mut self) {
-        if !self.masking.read_only || self.input.writable.is_empty() {
+        if !self.writes_there() {
             return;
         }
         let i = self.input;

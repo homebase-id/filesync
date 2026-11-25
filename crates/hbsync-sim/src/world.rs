@@ -26,6 +26,13 @@ use crate::model::server::{Server, ServerNode, time};
 use crate::oracle::Seen;
 use crate::tagbook::Limit;
 
+/// A node of the drive as a user sees it ([`Seen`]).
+///
+/// [`Seen`]: crate::oracle::Seen
+fn seen(n: &NodeState) -> Seen {
+    (n.parent, n.name.clone(), n.content.map(|c| c.hash))
+}
+
 impl Sim {
     /// The server as client `c`'s folder sees it ([`Coords`]).
     pub(crate) fn server_view(&self, c: usize) -> Tree {
@@ -1156,9 +1163,30 @@ impl Sim {
     /// The user of client `c` took its item `node` out of what it syncs (a delete, a move to
     /// another folder, a filter rule): as they saw it, as the client's base has it.
     pub(crate) fn user_removed(&mut self, c: usize, node: NodeId) {
-        if let Some(seen) = self.base_seen(c, node) {
+        if let Some(seen) = self.seen_by_user(c, node) {
             self.ledger.user_deleted(c, node, seen);
         }
+    }
+
+    /// Client `c`'s node `node` as its user saw it on the drive: as its base has it
+    /// ([`Sim::base_seen`]), but a member's at the drive's place where only the place differs.
+    /// A member reads a node at its top while the node's folder isn't shared, and that place
+    /// changes with the folder's share, without a move on the drive: the base at the top, of
+    /// the drive's name and bytes and at its version (a share given or withdrawn keeps it),
+    /// the user saw the drive's node as it is, which only a move there takes elsewhere.
+    /// (The version alone doesn't say so: a settle moves the base to it whatever was agreed.)
+    pub(crate) fn seen_by_user(&self, c: usize, node: NodeId) -> Option<Seen> {
+        let client = &self.clients[c];
+        let base = self.base_seen(c, node)?;
+        let drive = self.whole.as_ref().unwrap_or(&self.server);
+        let there = drive.live.get(&node).filter(|_| client.member);
+        let on_drive = there.map(|n| seen(&n.state)).filter(|on_drive| {
+            let synced = (client.extra.get(&node))
+                .is_some_and(|e| e.version == there.map(|n| n.remote.version));
+            let at_top = base.0 == client.coords.to_drive(NodeId::ROOT);
+            synced && at_top && base.1 == on_drive.1 && base.2 == on_drive.2
+        });
+        Some(on_drive.unwrap_or(base))
     }
 
     /// Client `c`'s base of `node`, as the drive would have it ([`Seen`]).
@@ -1174,12 +1202,19 @@ impl Sim {
         ))
     }
 
+    /// Live `node` as the whole drive has it, where a member's view stands in for the drive
+    /// ([`Sim::as_member`]; else `None`). A member reads a file at the top once its folder's
+    /// share is withdrawn, where the drive still has it in the folder: no move made there,
+    /// and none to win over a delete of the member's user, who had it in the folder.
+    pub(crate) fn on_whole_drive(&self, node: NodeId) -> Option<Seen> {
+        Some(seen(&self.whole.as_ref()?.live.get(&node)?.state))
+    }
+
     /// Live `node` as the drive has it, but for its tags ([`Seen`]).
     ///
     /// [`Seen`]: crate::oracle::Seen
     pub(crate) fn on_drive(&self, node: NodeId) -> Option<Seen> {
-        let n = &self.server.live.get(&node)?.state;
-        Some((n.parent, n.name.clone(), n.content.map(|c| c.hash)))
+        Some(seen(&self.server.live.get(&node)?.state))
     }
 
     /// `node` left the drive (a delete won): it settles the tag removals made before it.
