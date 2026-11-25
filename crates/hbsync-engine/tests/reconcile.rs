@@ -4708,6 +4708,29 @@ fn read_only_a_file_edited_on_both_sides_where_it_may_add_keeps_both() {
     assert_eq!(sorted_ops(&plan), want);
 }
 
+/// Such a file that the drive also moved, to a name another item holds here: left out for
+/// the name, where it is here, edit and all. Its conflict copy isn't made meanwhile (half of
+/// one was planned at every sync: the copy sent, with no item here to send); it is judged
+/// again once the name is free.
+#[test]
+fn read_only_one_left_out_for_its_name_makes_no_conflict_copy_meanwhile() {
+    let [c, d, f] = ids(3)[..] else {
+        unreachable!()
+    };
+    let mut w = read_only();
+    w.synced(c, file(ROOT, "a.txt", "c"))
+        .synced(d, folder(ROOT, "d"))
+        .synced(f, file(d, "a.txt", "a"));
+    editing(&mut w);
+    w.local(f, Some(file(d, "a.txt", "mine")))
+        .remote(f, Some(file(ROOT, "a.txt", "theirs")));
+    let plan = w.plan();
+    assert!(!plan.writes_drive(), "{:?}", plan.ops);
+    assert!(plan.ops.is_empty(), "{:?}", plan.ops);
+    assert_eq!(plan.conflicts, [Conflict::NameTaken { node: f }]);
+    assert!(plan.deferred.contains(&f));
+}
+
 /// An item that may be changed moves between two folders this identity may add to; a move
 /// out of one into a folder it may only read, or to the top, is undone.
 #[test]

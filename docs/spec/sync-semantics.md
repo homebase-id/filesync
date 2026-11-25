@@ -1656,6 +1656,12 @@ rules hold too:
   refused, name taken, at every sync (plan
   `read_only_what_a_folder_left_out_holds_elsewhere_keeps_its_name`; simulator
   `what_a_folder_left_out_holds_at_the_top_keeps_its_name_there`).
+  One left out that this identity may change, edited here and there besides, makes no
+  conflict copy while it is left out: it stays as it is here, edit and all, and the two are
+  told apart once it is planned again (half a copy was planned at every sync: sent up, with
+  no item here to send; plan
+  `read_only_one_left_out_for_its_name_makes_no_conflict_copy_meanwhile`, simulator
+  `a_file_left_out_for_its_name_makes_no_conflict_copy_meanwhile`).
   A loser inside a folder whose share is withdrawn leaves with the folder.
   Where none of them is here under the name and another item is (one synced here that the
   drive has in a folder now), and that folder is one of them, the folder takes the name: it
