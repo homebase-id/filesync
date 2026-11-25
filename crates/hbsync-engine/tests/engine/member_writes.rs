@@ -1092,6 +1092,12 @@ fn a_share_not_written_to_tells_what_could_be_changed() -> R {
     share_to_edit(&a, &server, "one.txt")?;
     assert!(b.engine.sync("2026-10-08", true)?.editable);
     assert!(b.engine.sync("2026-10-08", true)?.editable);
+    // Shared for reading again: nothing could be changed any more, and for editing once
+    // more: it could.
+    share_to_read(&a, &server, "one.txt")?;
+    assert!(!b.engine.sync("2026-10-08", true)?.editable);
+    share_to_edit(&a, &server, "one.txt")?;
+    assert!(b.engine.sync("2026-10-08", true)?.editable);
 
     // The folder writes: nothing to ask for.
     b.restart_with(Box::new(reading.writing()), |cfg| {
