@@ -129,10 +129,6 @@ pub struct RunnerConfig {
     /// moves out to this folder (outside `folder`, on its volume; made where missing).
     /// `None`: it syncs both ways.
     pub read_only: Option<PathBuf>,
-    /// Such a folder writes to what is shared with the account for editing (the engine's
-    /// `FolderCtx::writes`): shown, and its own held deletes can be put back. Nothing sets
-    /// it yet.
-    pub writes: bool,
     /// The folder at the top that holds what other identities share with the account (sync
     /// semantics §10) is made under this name where none is there, as the folder opens (or
     /// under the first free of `<name>-2`, …). `None`: none is made (one that is there is
@@ -201,7 +197,6 @@ impl RunnerConfig {
             kind: crate::RootKind::Main,
             sharer: None,
             read_only: None,
-            writes: false,
             shares: None,
             device: device.to_owned(),
             mass_delete: MassDelete::default(),
@@ -336,14 +331,6 @@ pub struct Handle {
     changed: Arc<Wakeup>,
     /// Its account's drive: whether it refuses this computer while paused.
     drive: Arc<Drive>,
-}
-
-impl RunnerConfig {
-    /// Whether the folder writes to what is shared with the account for editing
-    /// ([`RunnerConfig::writes`]): only one that is read-only otherwise (another identity's).
-    pub fn writes(&self) -> bool {
-        self.read_only.is_some() && self.writes
-    }
 }
 
 impl Command {
@@ -627,7 +614,6 @@ impl Runner {
         let mut status = FolderStatus::new(&cfg.identity, &cfg.folder);
         status.kind = cfg.kind;
         status.sharer.clone_from(&cfg.sharer);
-        status.writes = cfg.writes();
         status.paused_until = cfg.paused.and_then(|p| p.until);
         let status = Arc::new(Mutex::new(status));
         let held = Arc::new(Mutex::new(Held::default()));
@@ -722,6 +708,39 @@ impl Runner {
             );
         }
         unreachable!("the last one is returned")
+    }
+
+    /// Whether the folder is written to though read-only otherwise: another identity's
+    /// share, where the app may send to other identities, as its drive says now
+    /// ([`Drive::writes`]; asked anew where the user asked for the sync that is due).
+    fn writes(&self) -> Result<bool, hbsync_remote::RemoteError> {
+        Ok(self.drive.shared() && self.drive.writes(self.retry_refused)?)
+    }
+
+    /// Whether the folder, another identity's share, is to be opened again as a sync is due:
+    /// the app may send to other identities now and couldn't as it was opened (the owner
+    /// gave it the permission: what they share for editing is written to from here on), or
+    /// the other way round (taken away: all of it is read-only again). Asked of the drive
+    /// ([`Drive::writes`]: no request while it may; a no is asked again now and then, and at
+    /// once where the user asked for the sync); one that can't say leaves the folder as it
+    /// is.
+    fn writes_changed(&self, parts: &Parts) -> bool {
+        let writes = parts.engine.config().folder.writes;
+        match self.writes() {
+            Ok(now) if now != writes => {
+                let what = match now {
+                    true => "the app may now change what is shared for editing",
+                    false => "the app may no longer change what is shared",
+                };
+                tracing::info!("{what}: opening the folder again");
+                true
+            }
+            Ok(_) => false,
+            Err(e) => {
+                tracing::debug!("whether the app may send to other identities isn't known: {e}");
+                false
+            }
+        }
     }
 
     /// Whether this is a share's runner whose folder is there: a real folder, not a link to
@@ -851,7 +870,19 @@ impl Runner {
             );
         }
         cfg.folder.read_only.clone_from(&self.cfg.read_only);
-        cfg.folder.writes = self.cfg.writes();
+        // What another identity shares is written to (what they share for editing) where the
+        // app may send to other identities, as its drive says now. One that can't say leaves
+        // the folder as it last synced (read-only, where that can't be read either):
+        // opened read-only for want of an answer, a folder that wrote would have its files
+        // made read-only and a change waiting there moved out, only to write again at the
+        // next answer ([`Runner::writes_changed`] asks as each sync is due).
+        cfg.folder.writes = match self.writes() {
+            Ok(writes) => writes,
+            Err(e) => {
+                tracing::debug!("whether the app may send to other identities isn't known: {e}");
+                self.drive.shared() && sync_root.wrote().unwrap_or(false)
+            }
+        };
         if let Some(tweak) = self.cfg.tweak {
             tweak(&mut cfg);
         }
@@ -865,7 +896,8 @@ impl Runner {
         });
         let (opts, feed) = (engine.scan_options().clone(), self.cfg.feed.clone());
         let observer = LocalObserver::watching(root, opts, Some(bell), feed);
-        self.set(|s| s.rules = rules);
+        let writes = engine.config().folder.writes;
+        self.set(|s| (s.rules, s.writes) = (rules, writes));
         let drive_changed = Arc::new(AtomicBool::new(false));
         let (alive, wakes) = (Arc::downgrade(&drive_changed), self.wakes.clone());
         // One message until the runner takes the change, however many wakes come.
@@ -1218,6 +1250,9 @@ impl Runner {
                 }
                 self.cfg.changed.raise();
             }
+            if parts.as_ref().is_some_and(|p| self.writes_changed(p)) {
+                parts = None;
+            }
             let p = match &mut parts {
                 Some(p) => p,
                 None => match self.open() {
@@ -1286,6 +1321,7 @@ impl Runner {
             match answer {
                 Some((HeldAnswer::Delete, seen)) => p.engine.confirm_deletes(seen.iter().copied()),
                 Some((HeldAnswer::PutBack, seen)) => {
+                    let writes = p.engine.config().folder.writes;
                     match p.engine.put_back(&seen) {
                         Ok(_) => {}
                         // A read-only folder never puts back (§13): nothing to try again.
@@ -1293,7 +1329,7 @@ impl Runner {
                         // where a folder that writes held deletes of its own as the user
                         // answered, and their owner removed those too before the sync.)
                         Err(hbsync_engine::EngineError::ReadOnly(_)) => {
-                            let why = crate::words::no_put_back(self.cfg.writes());
+                            let why = crate::words::no_put_back(writes);
                             self.tell(vec![why.into()])
                         }
                         // What it didn't put back is still held, and shown again; the first
@@ -1674,7 +1710,8 @@ impl Runner {
         engine: &mut Engine,
         report: &SyncReport,
     ) -> Result<Vec<String>, StateError> {
-        let writes_to = self.cfg.sharer.as_ref().filter(|_| self.cfg.writes());
+        let writes = engine.config().folder.writes;
+        let writes_to = self.cfg.sharer.as_ref().filter(|_| writes);
         let moved_out = report::moved_out_notes(report, writes_to);
         self.tell(moved_out);
         let skips = self.stalled.told(&report.skipped, Instant::now());

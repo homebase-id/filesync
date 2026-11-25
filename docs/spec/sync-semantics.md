@@ -1781,7 +1781,8 @@ rules hold too:
   `DriveShareService.AssertCircleFitsAsync`, `AssertMemberMayWriteAsync`). A write refused
   so is to count as read-only after all, where a folder writes.
   Read-only is asked item by item (the reconciler's `one_way`), where the folder writes to
-  what is shared with it (`FolderCtx::writes`, the view's `Input::writable`). **An item
+  what is shared with it (`FolderCtx::writes`, the view's `Input::writable`; in the
+  product: where the app may send to other identities, `docs/spec/daemon.md`). **An item
   the store says may be changed is changed there**:
   - its edit (bytes, the executable bit), its tags and its rename in its folder go up;
   - gone there, it follows the drive: what is gone there (deleted, its share withdrawn,

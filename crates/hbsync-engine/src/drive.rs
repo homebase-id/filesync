@@ -475,6 +475,13 @@ impl Drive {
         self.remote.shared()
     }
 
+    /// Whether what changes in a folder of the drive is sent to it at present
+    /// ([`Remote::writes`]): what another identity shares is written to only where the app
+    /// may send to other identities. `asked`: the user asked for a sync just now.
+    pub fn writes(&self, asked: bool) -> Result<bool, RemoteError> {
+        self.remote.writes(asked)
+    }
+
     pub(crate) fn shared_remote(&self) -> Arc<dyn Remote> {
         Arc::clone(&self.remote)
     }

@@ -442,6 +442,13 @@ impl Remote for PeerRemote {
         true
     }
 
+    /// Where it writes at all ([`PeerRemote::writing`]): whether the app may send to other
+    /// identities ([`HomebaseRemote::may_send`]: no request while it may; a no is read again
+    /// at most once a minute, or, `asked`, once it is two seconds old).
+    fn writes(&self, asked: bool) -> Result<bool> {
+        Ok(self.writing && self.own.sends(asked)?)
+    }
+
     fn create(&self, node: &NodeMeta, payload: Option<Upload<'_>>) -> Result<Written> {
         match self.writing {
             true => self.add_to_theirs(node, payload),
@@ -542,6 +549,49 @@ mod tests {
         refused(sam.delete(&[]).map(drop));
         refused(sam.delete_for_good(&[]).map(drop));
         refused(sam.set_removed(&[], true).map(drop));
+        Ok(())
+    }
+
+    /// A share says that it is written to where it is one that writes and the app may send
+    /// to other identities. A no stands for the hour (a share's folder asks as its syncs
+    /// are due), and for two seconds where the user asked for the sync; older than that, it
+    /// is asked again (here the identity can't be reached: no answer), and that try counts
+    /// as a read just now, so the next one asked at once makes no request of its own.
+    #[test]
+    fn a_share_is_written_to_where_the_app_may_send() -> Result<(), HomebaseError> {
+        let reading = sam()?;
+        reading.own.drive_key.lock().sends = true;
+        assert_eq!(
+            reading.writes(false).ok(),
+            Some(false),
+            "not one that writes"
+        );
+        let sam = sam()?.writing();
+        sam.own.drive_key.lock().sends = true;
+        assert_eq!(sam.writes(false).ok(), Some(true));
+        sam.own.may_not_send();
+        assert_eq!(sam.writes(false).ok(), Some(false));
+        assert_eq!(sam.writes(true).ok(), Some(false), "read just now");
+        let now = std::time::Instant::now();
+        let Some(earlier) = now.checked_sub(std::time::Duration::from_secs(3)) else {
+            // (A clock that started less than that ago.)
+            return Ok(());
+        };
+        sam.own.drive_key.lock().sends_read = Some(earlier);
+        assert_eq!(
+            sam.writes(false).ok(),
+            Some(false),
+            "not asked again within the hour"
+        );
+        assert!(sam.writes(true).is_err(), "asked again, and not answered");
+        assert_eq!(sam.writes(true).ok(), Some(false), "tried just now");
+        assert!(
+            sam.own
+                .drive_key
+                .lock()
+                .sends_read
+                .is_some_and(|at| at >= now)
+        );
         Ok(())
     }
 

@@ -422,6 +422,15 @@ impl SyncRoot {
         Ok(StateDb::open_folder(&self.db, self.folder)?)
     }
 
+    /// Whether the folder, read-only otherwise, wrote to what is shared for editing when it
+    /// last synced ([`crate::FolderCtx::writes`], as its engine recorded it): what it is
+    /// opened as where its drive can't say whether it does now. A connection to the state DB
+    /// and one read.
+    pub fn wrote(&self) -> Result<bool, RootError> {
+        let mut db = self.state()?;
+        Ok(db.read(|s| s.get_kv(keys::WRITES))?.is_some())
+    }
+
     /// Names this folder, a Desktop, on the drive ([`keys::DESKTOP_NAME`], the one owner of
     /// its name) from its next sync on. With `name` (made one the drive takes): that one, also
     /// over a rename made elsewhere (asked for now), the same name as before too. With none:

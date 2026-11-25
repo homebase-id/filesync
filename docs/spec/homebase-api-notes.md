@@ -756,8 +756,8 @@ server answers the rest, to a token their server made for this identity's connec
 
 ## Writing to what others share
 What a change to another identity's share uses (`drive/shared/writes.rs`), where they shared
-it for editing. Built, and not turned on: a share is still read-only in the product
-(`PeerRemote::writing`). **[verified]** live means seen on the dev server (odin-core
+it for editing. Used where the app holds the permission below, which it doesn't ask for
+yet: until it does, a share is read-only in the product. **[verified]** live means seen on the dev server (odin-core
 3ace44b69, 2026-11-23), a member writing to a share made with "Edit" in the Homebase app.
 - **Only through this identity's own server.** Their server takes no write from a member
   directly (**[verified]**: no such route; its peer token reads). This identity's server
@@ -771,8 +771,11 @@ it for editing. Built, and not turned on: a share is still read-only in the prod
   permission is asked before anything is stored: odin-core #2155, PR #2159, **[verified]**
   live). The client asks the security context first all the same, and sends only where it
   holds 210 (while it doesn't, the context is read again at most once a minute): a send
-  refused has uploaded its bytes for nothing. The app doesn't ask for it at registration
-  yet.
+  refused has uploaded its bytes for nothing. A share's folder goes by the same answer
+  (`Remote::writes`, `docs/spec/daemon.md`): it writes to what is shared for editing only
+  while the app holds 210, and is read-only as a whole otherwise (it asks again once an
+  hour at most; where the user asked for a sync, once the last answer is two seconds old). The app doesn't ask for it
+  at registration yet.
 - **Whether it may.** Their server asks drive `Write` and, for a file there already, a live
   share row with `Write` on it (**[verified]** odin-core
   `DriveStorageServiceBase.AssertMemberMayWriteAsync`, `DriveAclAuthorizationService

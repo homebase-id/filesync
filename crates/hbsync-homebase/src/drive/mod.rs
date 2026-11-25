@@ -74,6 +74,17 @@ const SHARER_WAIT: std::time::Duration = std::time::Duration::from_secs(15 * 60)
 /// before the security context is asked again ([`HomebaseRemote::may_send`]).
 const SENDS_READ_AGAIN: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// The same for a share's folder, which is read-only while the app may not send
+/// ([`HomebaseRemote::sends`]): asked as its syncs are due, so seldom. The owner's approval
+/// is found sooner all the same: by the sync asked for as they give it
+/// ([`SENDS_READ_ASKED`]), and as this identity's notifications connect again (the security
+/// context is read anew then).
+const SENDS_LOOK_AGAIN: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
+/// The same where the user asked for a sync just now (they may have given the permission a
+/// moment ago): long enough for every share's runner asked at once to go by one read.
+const SENDS_READ_ASKED: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// How long a share waits before it asks again where this identity isn't connected to its
 /// sharer: connecting is done by people, in their Homebase.
 const NOT_CONNECTED_WAIT: std::time::Duration = std::time::Duration::from_secs(3600);
@@ -104,6 +115,9 @@ pub struct HomebaseRemote {
     made: i64,
     /// What is known of the drive's privacy, and its key ([`HomebaseRemote::drive_key`]).
     drive_key: DriveKey,
+    /// Held by whoever asks whether the app may send ([`HomebaseRemote::may_send`]): one
+    /// asks, and the rest go by its answer.
+    sends_asking: Mutex<()>,
 }
 
 /// How [`read_pages`] ended.
@@ -544,6 +558,7 @@ impl HomebaseRemote {
             drive: answer.target_drive,
             made: answer.created,
             drive_key: DriveKey(Mutex::new(state)),
+            sends_asking: Mutex::default(),
         })
     }
 
@@ -728,15 +743,43 @@ impl HomebaseRemote {
     /// the owner may have given the permission since) at most once in [`SENDS_READ_AGAIN`],
     /// and kept: every write refused for want of it asks.
     pub(crate) fn may_send(&self) -> Result<bool> {
-        let (sends, read) = self.key_state(false, |s| Ok((s.sends, s.sends_read)))?;
-        if sends || read.is_some_and(|at| at.elapsed() < SENDS_READ_AGAIN) {
+        self.may_send_within(SENDS_READ_AGAIN)
+    }
+
+    /// [`HomebaseRemote::may_send`] for a share's folder, which is written to while it says
+    /// yes: a no is read again where the user `asked` for the sync just now, once it is
+    /// [`SENDS_READ_ASKED`] old.
+    pub(crate) fn sends(&self, asked: bool) -> Result<bool> {
+        self.may_send_within(match asked {
+            true => SENDS_READ_ASKED,
+            false => SENDS_LOOK_AGAIN,
+        })
+    }
+
+    /// [`HomebaseRemote::may_send`], a no read again once it is `within` old. One asks at a
+    /// time, and whoever waited for it goes by its answer (the shares' runners, all due at
+    /// once after a Sync now: one request). A read that failed counts as read just now: the
+    /// no stands, and the next asks only once it is `within` old again.
+    fn may_send_within(&self, within: std::time::Duration) -> Result<bool> {
+        let known = || {
+            let (sends, read) = self.key_state(false, |s| Ok((s.sends, s.sends_read)))?;
+            Ok::<_, RemoteError>(
+                (sends || read.is_some_and(|at| at.elapsed() < within)).then_some(sends),
+            )
+        };
+        if let Some(sends) = known()? {
             return Ok(sends);
         }
-        // (Nothing held while it is asked.)
-        let sends = holds(&self.client, app::USE_TRANSIT_WRITE).map_err(remote_error)?;
+        let _asking = self.sends_asking.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(sends) = known()? {
+            return Ok(sends);
+        }
+        // (The key state isn't held while it is asked.)
+        let asked = holds(&self.client, app::USE_TRANSIT_WRITE);
         let mut state = self.drive_key.lock();
-        state.sends = sends;
         state.sends_read = Some(std::time::Instant::now());
+        let sends = asked.map_err(remote_error)?;
+        state.sends = sends;
         Ok(sends)
     }
 
@@ -2318,6 +2361,7 @@ mod tests {
             },
             made: 0,
             drive_key: DriveKey(Mutex::new(state)),
+            sends_asking: Mutex::default(),
         })
     }
 

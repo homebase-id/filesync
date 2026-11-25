@@ -2320,6 +2320,95 @@ fn a_share_waits_where_its_login_isnt_what_is_refused() -> R {
     Ok(())
 }
 
+/// What another identity shares is written to only where the app may send to other identities
+/// (its drive says, [`hbsync_remote::Remote::writes`]). Where it may not, the folder is
+/// read-only as a whole: a file shared for editing is read-only on disk too. Given the
+/// permission, the folder is opened again as the next sync asked for is due, and writes: the
+/// file is writable, and a change of it goes to its owner. Taken away, it is read-only again.
+#[test]
+fn a_share_is_written_to_where_the_app_may_send() -> R {
+    use hbsync_platform::ops::is_read_only;
+    use hbsync_remote::contract::Shares;
+    let server = server();
+    let a = Device::start(&server, "a")?;
+    a.write("edit.txt", "one")?;
+    wait_until("it is up", || live_names(&server).len() == 1)?;
+    a.wait_idle()?;
+    let id = header_named(&server, "edit.txt")
+        .ok_or("on the drive")?
+        .file_id;
+    a.remote.share_to_edit(id)?;
+
+    let member = FakeRemote::member(server.clone()).writing();
+    member.faults().may_not_send = true;
+    let b = Device::start_on(member, "b", |cfg| {
+        cfg.sharer = Some("sharer.example".into());
+        cfg.read_only = Some(cfg.folder.with_file_name("moved out"));
+    })?;
+    let file = b.root.join("edit.txt");
+    wait_until("b has what is shared", || b.has("edit.txt"))?;
+    b.wait_idle()?;
+    assert!(!b.status().writes);
+    assert!(is_read_only(&file), "read-only as a whole");
+
+    // Given: the sync asked for finds so, and the folder writes.
+    b.remote.faults().may_not_send = false;
+    b.handle.send(Command::SyncNow);
+    wait_until("it writes", || b.status().writes)?;
+    wait_until("the file may be changed", || !is_read_only(&file))?;
+    b.wait_idle()?;
+    let before = header_named(&server, "edit.txt").ok_or("there")?.version;
+    std::fs::write(&file, "two")?;
+    b.handle.send(Command::SyncNow);
+    wait_until("the change went to its owner", || {
+        header_named(&server, "edit.txt").is_some_and(|h| h.version != before)
+    })?;
+    b.wait_idle()?;
+    a.handle.send(Command::SyncNow);
+    wait_until("its owner has it", || {
+        std::fs::read_to_string(a.root.join("edit.txt")).is_ok_and(|text| text == "two")
+    })?;
+
+    // Whether it may can't be asked (its own server doesn't answer), and the folder is opened
+    // again meanwhile, for its ignore rules: it stays as it last synced, writing, and a
+    // change goes to its owner still.
+    b.remote.faults().sends_unknown = true;
+    let rules = b.status().rules;
+    b.write(".hbsync/ignore", "*.tmp\n")?;
+    b.handle.send(Command::SyncNow);
+    wait_until("opened again with the rule", || b.status().rules > rules)?;
+    b.wait_idle()?;
+    assert!(b.status().writes && !is_read_only(&file));
+    let before = header_named(&server, "edit.txt").ok_or("there")?.version;
+    std::fs::write(&file, "three")?;
+    b.handle.send(Command::SyncNow);
+    wait_until("this change went too", || {
+        header_named(&server, "edit.txt").is_some_and(|h| h.version != before)
+    })?;
+    b.wait_idle()?;
+    b.remote.faults().sends_unknown = false;
+
+    // Taken away, with a change waiting here: read-only again as a whole, so the change
+    // moves out, and nothing of it reaches the owner.
+    let before = header_named(&server, "edit.txt").ok_or("there")?.version;
+    b.remote.faults().may_not_send = true;
+    // (Written whatever the file's bit: a look in between may have made it read-only.)
+    b.write("edit.txt", "four")?;
+    b.handle.send(Command::SyncNow);
+    wait_until("it writes no more", || !b.status().writes)?;
+    let out = b.root.with_file_name("moved out").join("edit.txt");
+    wait_until("the change moved out", || {
+        std::fs::read_to_string(&out).is_ok_and(|text| text == "four")
+    })?;
+    wait_until("the owner's is back, read-only", || {
+        std::fs::read_to_string(&file).is_ok_and(|text| text == "three") && is_read_only(&file)
+    })?;
+    b.wait_idle()?;
+    let now = header_named(&server, "edit.txt").ok_or("there")?.version;
+    assert_eq!(now, before, "nothing was sent");
+    Ok(())
+}
+
 /// A share that writes to what is shared with it for editing holds its own deletes (they are
 /// removals at the sharer's), and puts them back when asked: they come back here, and
 /// nothing is removed there.
@@ -2342,7 +2431,6 @@ fn a_share_that_writes_puts_back_its_own_held_deletes() -> R {
     let b = Device::start_on(member, "b", |cfg| {
         cfg.sharer = Some("sharer.example".into());
         cfg.read_only = Some(cfg.folder.with_file_name("moved out"));
-        cfg.writes = true;
     })?;
     wait_until("b has what is shared", || b.has("f59.txt"))?;
     b.wait_idle()?;

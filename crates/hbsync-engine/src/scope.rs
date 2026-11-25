@@ -194,6 +194,9 @@ impl Remote for ScopedRemote {
     fn shared(&self) -> bool {
         self.inner.shared()
     }
+    fn writes(&self, asked: bool) -> RemoteResult<bool> {
+        self.inner.writes(asked)
+    }
     fn create(
         &self,
         node: &NodeMeta,

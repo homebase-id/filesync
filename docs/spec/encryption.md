@@ -246,8 +246,8 @@ odin-core's `SelectiveShareKeyVectorTests` **[verified]**):
   `DriveFileUtility.CreateClientFileHeader`, `CallerShares.LiveRowsOf`; `drive/shared.rs`).
   A payload comes without a key header; its IV is the payload descriptor's, as on a private
   drive.
-- **As a member writes it** (built, not turned on: homebase-api-notes, "Writing to what
-  others share"). A change keeps the file's key under a new header IV: the member sends
+- **As a member writes it** (where the app may send to other identities:
+  homebase-api-notes, "Writing to what others share"). A change keeps the file's key under a new header IV: the member sends
   `{type: "share", iv: newHeaderIv, encryptedAesKey: ""}`, and the owner's server keeps the
   key as it holds it. A new file gets a new key, sealed to the owner's drive (`type:
   "sealed"`: `ZkSeal` version 1 of `iv ‖ key`, to the drive's write-only public key, asked of
