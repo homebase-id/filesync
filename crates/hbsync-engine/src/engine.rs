@@ -124,6 +124,9 @@ pub struct SyncReport {
     /// operations were skipped or failed with nodes still pending. Deletes held for a
     /// confirmation never count: another try doesn't let them through.
     pub unfinished: bool,
+    /// Writes on their way to another identity's drive were left for a later sync: the work
+    /// left isn't tried again before this (their server is asked again no sooner).
+    pub not_before: Option<Duration>,
     /// Nothing was planned: an item at the top of the drive has the name of the folder of
     /// shares, which is to give way first ([`Engine::yield_shares`]). The folder is opened
     /// again ([`SyncRoot::place_shares`]).
@@ -155,6 +158,7 @@ impl SyncReport {
         self.waiting.extend(later.waiting);
         self.left_aside = later.left_aside;
         self.unfinished = later.unfinished;
+        self.not_before = crate::time::sooner(self.not_before, later.not_before);
     }
 }
 
@@ -253,6 +257,9 @@ pub struct Engine {
     unreported: Option<SyncReport>,
     /// The folder's refusals ([`crate::refused`]).
     refusals: FolderRefusals,
+    /// The writes to another identity's drive that were on their way, or held, in this sync
+    /// so far ([`Executor::with_on_their_way`]): from none at each sync's start.
+    on_their_way: crate::exec::OnTheirWay,
     /// What the folder holds of the drive, as set up ([`FolderKind`]).
     part: Part,
     /// A sync plans nothing while the folder of shares is to give way
@@ -344,6 +351,7 @@ impl Engine {
             progress: Arc::default(),
             rescanned: Default::default(),
             refusals: FolderRefusals::default(),
+            on_their_way: crate::exec::OnTheirWay::default(),
             waited: Waited::default(),
             unreported: None,
             part,
@@ -464,15 +472,23 @@ impl Engine {
     /// The next sync does the rest; what a failure leaves is still held, and shown again.
     /// Costs a feed read, then one restore of them all: a request per wave and per thousand rows,
     /// and after it two reads per node restored ([`crate::held::after_restore`]). Returns how
-    /// many it put back. Refused in a read-only folder (§13), where nothing is restored on the
-    /// drive (it is another identity's, or this folder only follows it): what is held there
-    /// is confirmed or stays held.
+    /// many it put back.
+    ///
+    /// In a read-only folder (§13) nothing is restored on the drive (it is another
+    /// identity's, or this folder only follows it). One that writes there
+    /// ([`crate::FolderCtx::writes`]) holds its own deletes, which are removals there: those
+    /// are put back, each base forgotten so the item comes down again (no write to the
+    /// drive, after a feed read); a removal made there stays held, to be confirmed, and where
+    /// it put nothing back and left one such, that is the error. One that doesn't write holds
+    /// only removals made there: refused.
     pub fn put_back(&mut self, nodes: &[NodeId]) -> Result<usize, EngineError> {
-        if self.cfg.folder.read_only.is_some() {
+        let folder = &self.cfg.folder;
+        let read_only = folder.read_only.is_some();
+        if read_only && !folder.writes {
             return Err(EngineError::ReadOnly("nothing is put back on the drive"));
         }
         self.held
-            .put_back(&mut self.db, &self.drive, nodes, &self.cfg.folder.scope)
+            .put_back(&mut self.db, &self.drive, nodes, &folder.scope, !read_only)
     }
 
     /// Waits up to `timeout` for the live changes `observer`'s watcher reports, and records
@@ -768,6 +784,7 @@ impl Engine {
         // (unpark), and what this one did is when it ends, however it ends: a power cut loses
         // at most the sync in progress (sync semantics §8a).
         self.db.flush()?;
+        self.on_their_way = crate::exec::OnTheirWay::default();
         let synced = self.sync_pass(date, pulled);
         // Best effort: a failure here leaves what was done undone in no way, and the next
         // sync's opening flush reports it.
@@ -1288,18 +1305,21 @@ impl Engine {
         .with_progress(Arc::clone(&self.progress))
         .with_full(self.drive.full())
         .with_refusals(refusals)
+        .with_on_their_way(std::mem::take(&mut self.on_their_way))
         .with_moved_out(&mut moved_out);
         self.refusals.running();
         let ran = exec.run(ops);
         report.moved_out.extend(moved_out);
         let exec = ran?;
         self.refusals.ran(exec.refused);
+        self.on_their_way = exec.on_their_way;
         self.drive.absorb(exec.news);
         // What was done counts, and the folders it asks to look at are looked at, however
         // the run ended.
         report.ops_done += exec.done;
         report.skipped.extend(exec.skipped);
         report.failed.extend(exec.failed);
+        report.not_before = crate::time::sooner(report.not_before, exec.not_before);
         let synced = activity::group(exec.synced, activity::GROUP_OVER);
         self.db
             .write(|s| s.folder().add_synced(&synced, activity::KEEP))?;

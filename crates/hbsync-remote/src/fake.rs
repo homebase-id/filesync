@@ -1038,7 +1038,7 @@ pub struct Faults {
     /// Every request is put off with [`RemoteError::Later`] for this long: a busy server.
     pub later: Option<Duration>,
     /// A writing member's creates, updates and removals are held on their way to the
-    /// owner's drive: each answers [`RemoteError::Waiting`], as the Homebase adapter does
+    /// owner's drive: each answers [`RemoteError::OnItsWay`], as the Homebase adapter does
     /// when no word of a send comes in time, and is written only when
     /// [`FakeRemote::deliver`] is called (or never). While one of a node is held, another of
     /// that node waits too, and is not sent (their file as it was: one changed since answers
@@ -1111,19 +1111,21 @@ pub struct FakeRemote {
     /// The member's server's side of its writes on their way ([`Faults::on_their_way`]): one
     /// for all its clients.
     outbox: Arc<Mutex<Outbox>>,
-    /// What this client asked in the writes it had no answer to, by node, and whether with
-    /// bytes: what the Homebase adapter remembers of a send on its way (`Writes::earlier`),
+    /// What this client asked in the writes it had no answer to, by node, with the hash of
+    /// its bytes: what the Homebase adapter remembers of a send on its way (`Writes::earlier`),
     /// gone with a restart ([`FakeRemote::sharing_token`] starts without).
     sent: Arc<Mutex<HashMap<NodeId, Sent>>>,
 }
 
-/// A write this client sent and had no answer to: what it asked, whether with bytes, and
+/// A write this client sent and had no answer to: what it asked, with which bytes, and
 /// which send it was (a send's word is that send's alone, as a global transit id tells the
 /// Homebase adapter whose a new file is).
 #[derive(Debug)]
 struct Sent {
     ask: Ask,
-    bytes: bool,
+    /// The hash of the bytes sent, if any were: the same file asked again with other bytes
+    /// is another write, where their hash is known before they are sent.
+    content: Option<hbsync_types::ContentHash>,
     send: u64,
 }
 
@@ -1188,7 +1190,7 @@ type Received = Option<(hbsync_types::ContentHash, Vec<u8>)>;
 /// The answer to a write of the member's that is still on its way to the owner's drive, as
 /// the Homebase adapter gives it (`PeerRemote`: asked again in a minute).
 fn on_its_way() -> RemoteError {
-    RemoteError::Waiting {
+    RemoteError::OnItsWay {
         why: "waiting for the owner's server to take a change of yours".into(),
         retry_after: Duration::from_secs(60),
     }
@@ -1320,12 +1322,16 @@ impl FakeRemote {
         &self,
         outbox: &mut Outbox,
         ask: &Ask,
-        bytes: bool,
+        (bytes, known): (bool, Option<hbsync_types::ContentHash>),
         unchanged: bool,
     ) -> Option<Result<Written>> {
         let node = ask.node();
         let mut sent = self.sent();
-        let this = |sent: &&Sent| sent.ask == *ask && sent.bytes == bytes;
+        let this = |sent: &&Sent| {
+            sent.ask == *ask
+                && sent.content.is_some() == bytes
+                && known.is_none_or(|hash| sent.content == Some(hash))
+        };
         let send = sent.get(&node).filter(this)?.send;
         if outbox
             .landed
@@ -1353,7 +1359,12 @@ impl FakeRemote {
     ///    second one while the first is staged there, so this one waits, unsent.
     ///
     /// `None`: it is sent.
-    fn before(&self, ask: &Ask, at: RemoteRef, bytes: bool) -> Result<Option<Written>> {
+    fn before(
+        &self,
+        ask: &Ask,
+        at: RemoteRef,
+        bytes: (bool, Option<hbsync_types::ContentHash>),
+    ) -> Result<Option<Written>> {
         let version = self.server().to_change(at.file_id)?.1.version;
         let mut outbox = self.outbox();
         if let Some(answer) = self.again(&mut outbox, ask, bytes, version == at.version) {
@@ -1380,7 +1391,7 @@ impl FakeRemote {
             outbox.sends += 1;
             let sent = Sent {
                 ask: held.ask.clone(),
-                bytes: held.bytes.is_some(),
+                content: held.bytes.as_ref().map(|(hash, _)| *hash),
                 send,
             };
             self.sent().insert(node, sent);
@@ -1467,7 +1478,11 @@ impl FakeRemote {
             if self.server().file_id_of(node.node).is_none() {
                 outbox.landed.remove(&node.node);
             }
-            if let Some(answer) = self.again(&mut outbox, &ask, payload.is_some(), true) {
+            let bytes = (
+                payload.is_some(),
+                payload.as_ref().and_then(|p| p.hash.known()),
+            );
+            if let Some(answer) = self.again(&mut outbox, &ask, bytes, true) {
                 return answer;
             }
             let shared_as = self.server().addable(node.parent)?;
@@ -1493,7 +1508,11 @@ impl FakeRemote {
         payload: Option<Upload<'_>>,
     ) -> Result<Written> {
         let ask = Ask::Update(at, meta.clone());
-        if let Some(written) = self.before(&ask, at, payload.is_some())? {
+        let bytes = (
+            payload.is_some(),
+            payload.as_ref().and_then(|p| p.hash.known()),
+        );
+        if let Some(written) = self.before(&ask, at, bytes)? {
             return Ok(written);
         }
         let bytes = self.receive(payload)?;
@@ -1521,7 +1540,7 @@ impl FakeRemote {
             node
         };
         let ask = Ask::Remove(node, at, removed);
-        if let Some(written) = self.before(&ask, at, false)? {
+        if let Some(written) = self.before(&ask, at, (false, None))? {
             return Ok(written);
         }
         self.send(Held {
