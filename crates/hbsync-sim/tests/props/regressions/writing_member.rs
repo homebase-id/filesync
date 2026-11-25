@@ -232,3 +232,55 @@ fn a_move_between_folders_shared_for_editing_reaches_the_drive() {
     assert_eq!(sim.local_paths(2), ["b", "c.txt", "d", "d/b"]);
     assert!(sim.moved_out(2).is_empty());
 }
+
+/// The guard on: the member's delete of all it may change is held, nothing removed on the
+/// drive. Put back, it is undone here without a write there (the items come down again).
+/// The owner's removal of it all is held on the member too, and is not the member's to put
+/// back (a restore there): it stays held till confirmed.
+#[test]
+fn held_deletes_of_the_members_are_put_back_and_the_owners_removals_are_not() {
+    let mut sim = owned(&["a", "b", "b/a"]);
+    sim.guard = Some(1);
+    let drive = sim.server_paths();
+    for path in ["a", "b"] {
+        let node = sim.item(2, path).expect(path);
+        let node = sim.pick(2, node, false).expect("its pick");
+        sim.run(&[act(2, Action::Delete { node })]);
+    }
+    sim.run(&[Event::Plan { client: 2 }]);
+    assert!(!sim.held(2).is_empty(), "the member's deletes are held");
+    assert!(sim.local_paths(2).is_empty());
+    sim.run(&[Event::PutBack { client: 2 }]);
+    settle(&mut sim);
+    assert!(sim.held(2).is_empty(), "{:?}", sim.held(2));
+    assert_eq!(sim.server_paths(), drive, "nothing removed there");
+    assert_eq!(sim.local_paths(2), drive, "back here");
+    assert!(sim.moved_out(2).is_empty());
+
+    // The owner removes it all (confirmed there).
+    for path in ["a", "b"] {
+        let node = sim.item(0, path).expect(path);
+        let node = sim.pick(0, node, false).expect("its pick");
+        sim.run(&[act(0, Action::Delete { node })]);
+    }
+    for _ in 0..4 {
+        sim.run(&[
+            Event::Plan { client: 0 },
+            Event::Confirm { client: 0 },
+            Event::Plan { client: 0 },
+        ]);
+        while !sim.planned(0).is_empty() {
+            sim.run(&[Event::Step { client: 0 }]);
+        }
+    }
+    assert!(sim.server_paths().is_empty(), "{:?}", sim.server_paths());
+    sim.run(&[Event::Plan { client: 2 }]);
+    assert!(!sim.held(2).is_empty(), "the owner's removal is held here");
+    sim.run(&[Event::PutBack { client: 2 }, Event::Plan { client: 2 }]);
+    assert!(!sim.held(2).is_empty(), "not the member's to put back");
+    assert_eq!(sim.local_paths(2), drive, "held: still here");
+    assert!(sim.server_paths().is_empty(), "nothing restored there");
+    sim.run(&[Event::Confirm { client: 2 }]);
+    settle(&mut sim);
+    assert!(sim.local_paths(2).is_empty(), "{:?}", sim.local_paths(2));
+}
