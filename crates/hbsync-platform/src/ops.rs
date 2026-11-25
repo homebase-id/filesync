@@ -397,10 +397,19 @@ pub fn relock(path: &Path, was: Unlocked) {
 }
 
 /// Whether the file at `path` is read-only as [`set_read_only`] makes it (a link not
-/// followed); `false` where it can't be read. (For tests and tools: the client itself asks
-/// [`set_read_only`], which says whether it changed anything.)
+/// followed): on Unix its user's write bit is clear, whatever others may do with it (the bit
+/// [`set_read_only`] sets to make it writable); on Windows it has the read-only attribute.
+/// `false` where it can't be read.
 pub fn is_read_only(path: &Path) -> bool {
-    fs::symlink_metadata(path).is_ok_and(|meta| meta.permissions().readonly())
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::symlink_metadata(path).is_ok_and(|meta| meta.permissions().mode() & 0o200 == 0)
+    }
+    #[cfg(not(unix))]
+    {
+        fs::symlink_metadata(path).is_ok_and(|meta| meta.permissions().readonly())
+    }
 }
 
 /// Makes what is at `path` writable for its user ([`set_read_only`]): a file, or every file
@@ -643,6 +652,16 @@ mod tests {
                 0o755,
                 "the owner's write bit alone comes back"
             );
+        }
+        // Read-only is its user's: what others may do with it doesn't say otherwise, and
+        // making it writable gives the user's bit back.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&file, fs::Permissions::from_mode(0o464))?;
+            assert!(is_read_only(&file));
+            assert!(set_read_only(&file, false)?);
+            assert!(!is_read_only(&file));
         }
         set_read_only(&file, false)?;
         assert!(!is_read_only(&file));

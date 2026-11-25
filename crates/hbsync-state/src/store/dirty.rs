@@ -238,6 +238,18 @@ impl FolderTx<'_> {
         self.mark_dirty_in(self.folder, self.key_or_insert(node)?)
     }
 
+    /// Marks dirty the nodes synced into this folder that the drive says this identity may
+    /// change (`MirrorRow::writable`): planned again, each. One statement.
+    pub fn mark_writable_dirty(&self) -> Result<()> {
+        self.prep(
+            "INSERT OR IGNORE INTO dirty (folder, id) \
+             SELECT $F, b.id FROM base b JOIN remote r ON r.id = b.id \
+             WHERE b.folder = $F AND r.writable = 1",
+        )?
+        .execute([])?;
+        Ok(())
+    }
+
     /// Marks every node of this folder dirty: its base rows, and the mirror's nodes in its part
     /// of the drive (below its top; the whole drive for the main folder).
     pub fn mark_synced_dirty(&self) -> Result<()> {

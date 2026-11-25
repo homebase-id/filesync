@@ -393,19 +393,23 @@ impl TagBook {
     /// The adds the drive (`server`) lost, each with the known limit that excuses it, if one
     /// does: an add stands unless the node was deleted (and the removed version didn't hold
     /// the tag: `held_at_removal`), or a removal made after it, or under way then, won. Nodes
-    /// in `refused` are left as they are.
+    /// in `refused` are left as they are, and so are those in `waits_on` for the client they
+    /// wait on, where the add was never sent (what waits there isn't written, its tags
+    /// neither; one that went up and is gone since is lost).
     pub(crate) fn lost(
         &self,
         server: &Tree,
         refused: &BTreeSet<NodeId>,
+        waits_on: &BTreeSet<(usize, NodeId)>,
         held_at_removal: impl Fn(NodeId, &str) -> Option<u8>,
     ) -> Vec<(Add, Option<Limit>)> {
         let mut lost = Vec::new();
         // A tag change loses to a delete (§11), unless the removed version held the tag: then
         // what brings it back keeps it.
-        for ((c, node, name), made, _) in self.adds() {
+        for ((c, node, name), made, sent) in self.adds() {
             if let Some(s) = server.get(*node)
                 && !refused.contains(node)
+                && !(sent.is_none() && waits_on.contains(&(*c, *node)))
                 && !made.concurrent
                 && !self.removed_since(*node, name, made.at)
                 && (!self.deleted.contains(node) || held_at_removal(*node, name).is_some())
@@ -454,9 +458,10 @@ impl TagBook {
         &self,
         server: &Tree,
         refused: &BTreeSet<NodeId>,
+        waits_on: &BTreeSet<(usize, NodeId)>,
         held_at_removal: impl Fn(NodeId, &str) -> Option<u8>,
     ) -> Result<(), String> {
-        let lost = self.lost(server, refused, &held_at_removal);
+        let lost = self.lost(server, refused, waits_on, &held_at_removal);
         *self.excused.borrow_mut() = lost
             .iter()
             .filter_map(|(add, limit)| limit.map(|l| (l, add.clone())))
@@ -476,6 +481,7 @@ impl TagBook {
             if let Some(s) = server.get(*node)
                 && !added_elsewhere
                 && !refused.contains(node)
+                && !waits_on.contains(&(*by, *node))
                 && s.tags.get(name).is_some()
             {
                 if let Some(limit) = self.cleared_limit.get(cleared) {
@@ -498,7 +504,7 @@ impl TagBook {
                 ));
             }
         }
-        self.check_colours(server, refused, held_at_removal, &adds)
+        self.check_colours(server, refused, waits_on, held_at_removal, &adds)
     }
 
     /// The drive's colours (`server`) against the users' recolours. A recolour is owed only
@@ -519,6 +525,7 @@ impl TagBook {
         &self,
         server: &Tree,
         refused: &BTreeSet<NodeId>,
+        waits_on: &BTreeSet<(usize, NodeId)>,
         held_at_removal: impl Fn(NodeId, &str) -> Option<u8>,
         adds: &[(&Add, &Made, Option<&i64>)],
     ) -> Result<(), String> {
@@ -535,7 +542,12 @@ impl TagBook {
             });
             let deleted =
                 self.deleted.contains(node) && held_at_removal(*node, name) != Some(colour);
-            if later || raced || deleted || refused.contains(node) {
+            if later
+                || raced
+                || deleted
+                || refused.contains(node)
+                || waits_on.contains(&(*by, *node))
+            {
                 continue;
             }
             if let Some(tag) = server.get(*node).and_then(|s| s.tags.get(name))
@@ -624,7 +636,7 @@ mod tests {
     }
 
     fn check(book: &TagBook, server: &Tree) -> Result<(), String> {
-        book.check(server, &BTreeSet::new(), |_, _| None)
+        book.check(server, &BTreeSet::new(), &BTreeSet::new(), |_, _| None)
     }
 
     /// F10: a removal made before an add doesn't excuse losing it; one made after does.
@@ -749,7 +761,8 @@ mod tests {
         book.recolour(0, NODE, "Red", 7, Some(6), false);
         book.deleted(NODE);
         let drive = drive_tagged(6);
-        let with = |held: Option<u8>| book.check(&drive, &BTreeSet::new(), |_, _| held);
+        let with =
+            |held: Option<u8>| book.check(&drive, &BTreeSet::new(), &BTreeSet::new(), |_, _| held);
         assert!(with(None).is_ok(), "the removed version lacks Red");
         assert!(
             with(Some(6)).is_ok(),
