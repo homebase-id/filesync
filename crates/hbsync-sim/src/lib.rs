@@ -646,17 +646,6 @@ impl Sim {
         self.server.removed.contains_key(&node)
     }
 
-    /// For scripted tests: the bytes client `c`'s item of `node` holds, as their hash.
-    pub fn local_hash(&self, c: usize, node: NodeId) -> Option<hbsync_types::ContentHash> {
-        self.clients[c].local.get(node)?.content.map(|c| c.hash)
-    }
-
-    /// For scripted tests: the bytes the drive has of `node`, live or in Recently deleted, as
-    /// their hash.
-    pub fn drive_hash(&self, node: NodeId) -> Option<hbsync_types::ContentHash> {
-        self.server.node(node)?.0.state.content.map(|c| c.hash)
-    }
-
     /// For scripted tests: the version the drive has `node` at, live or in Recently deleted.
     pub fn drive_version(&self, node: NodeId) -> Option<hbsync_types::VersionTag> {
         self.server.node(node).map(|(n, _)| n.remote.version)
