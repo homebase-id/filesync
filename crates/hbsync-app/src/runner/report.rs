@@ -253,6 +253,7 @@ pub(super) fn record(
     s.error = None;
     s.retry_at = None;
     s.pending = report.pending;
+    s.on_their_way = report.on_their_way;
     s.last_sync = Some(LastSync {
         at,
         millis: took.as_millis() as u64,
@@ -523,6 +524,7 @@ mod tests {
         let report = SyncReport {
             ops_done: 3,
             pending: 2,
+            on_their_way: 1,
             ..SyncReport::default()
         };
         let notes: Vec<String> = (0..60).map(|i| format!("note {i}")).collect();
@@ -534,6 +536,7 @@ mod tests {
             1_800_000_000,
         );
         assert_eq!((s.state, s.error, s.pending), (State::Idle, None, 2));
+        assert_eq!(s.on_their_way, 1);
         assert_eq!(s.notes_added, 60);
         assert_eq!(s.recent.len(), RECENT);
         assert_eq!(s.recent.last().map(|n| n.text.as_str()), Some("note 59"));

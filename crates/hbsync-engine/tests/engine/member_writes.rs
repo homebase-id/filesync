@@ -619,6 +619,7 @@ fn a_members_write_on_its_way_waits_alone_and_lands_once() -> R {
     );
     assert!(report.unfinished);
     assert_eq!(report.not_before, Some(std::time::Duration::from_secs(60)));
+    assert_eq!((report.on_their_way, report.pending), (1, 1));
     assert_eq!(b.read("d/theirs.txt")?, b"the sharer's edit");
     a.sync()?;
     assert_eq!(a.read("d/mine.txt")?, b"one", "not there yet");
@@ -730,6 +731,10 @@ fn writes_on_their_way_hold_the_runs_other_writes_after_a_few() -> R {
         report.skipped.iter().map(|(op, _)| op.node()).collect();
     assert_eq!(waiting.len(), made, "{left}");
     assert!(left.contains("held: "), "{left}");
+    assert_eq!(
+        report.on_their_way, made as u64,
+        "sent or held, each counts"
+    );
     for name in &theirs {
         assert_eq!(
             b.read(&format!("d/{name}"))?,

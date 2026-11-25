@@ -452,6 +452,19 @@ pub fn trying_to_connect(identity: &crate::Identity) -> String {
     format!("Trying again to connect to {identity}…")
 }
 
+/// "N changes on their way to X": sent, and not taken by their server yet. (All that is
+/// left: its count.)
+fn on_their_way(s: &FolderStatus) -> String {
+    let to = match &s.sharer {
+        Some(sharer) => sharer.to_string(),
+        None => "their owner".into(),
+    };
+    match s.pending {
+        1 => format!("Up to date · 1 change on its way to {to}"),
+        n => format!("Up to date · {} changes on their way to {to}", count(n)),
+    }
+}
+
 /// What a folder's sync is doing, in one line: the tray's status line and the head of `hbsync status`.
 pub fn status_line(s: &FolderStatus, now: u64) -> String {
     match s.state {
@@ -462,6 +475,8 @@ pub fn status_line(s: &FolderStatus, now: u64) -> String {
             Some(p) => format!("Syncing {}", progress(p)),
             None => "Syncing…".into(),
         },
+        // All that is left is with another identity's server: nothing here to wait for.
+        State::Idle if s.all_on_their_way() => on_their_way(s),
         State::Idle if s.pending == 1 => "1 item waiting".into(),
         State::Idle if s.pending > 0 => format!("{} items waiting", count(s.pending)),
         State::Idle => match &s.last_sync {
@@ -629,6 +644,23 @@ mod tests {
         s.state = State::Idle;
         s.pending = 1234;
         assert_eq!(status_line(&s, 0), "1,234 items waiting");
+        // Some of them on their way to another identity's server: waiting still, for the
+        // rest. All of them: this computer is done, and says where they are.
+        s.sharer = Some("tom.example.com".into());
+        s.on_their_way = 1200;
+        assert_eq!(status_line(&s, 0), "1,234 items waiting");
+        s.on_their_way = 1234;
+        assert_eq!(
+            status_line(&s, 0),
+            "Up to date · 1,234 changes on their way to tom.example.com"
+        );
+        (s.pending, s.on_their_way) = (1, 1);
+        assert_eq!(
+            status_line(&s, 0),
+            "Up to date · 1 change on its way to tom.example.com"
+        );
+        (s.sharer, s.on_their_way) = (None, 0);
+        s.pending = 1234;
         s.state = State::Denied;
         assert_eq!(
             status_line(&s, 0),

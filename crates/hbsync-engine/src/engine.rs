@@ -127,6 +127,9 @@ pub struct SyncReport {
     /// Writes on their way to another identity's drive were left for a later sync: the work
     /// left isn't tried again before this (their server is asked again no sooner).
     pub not_before: Option<Duration>,
+    /// How many items have a change on its way to another identity's drive at the sync's
+    /// end, or held with those: sent, or to be, and not taken there yet. Among `pending`.
+    pub on_their_way: u64,
     /// Nothing was planned: an item at the top of the drive has the name of the folder of
     /// shares, which is to give way first ([`Engine::yield_shares`]). The folder is opened
     /// again ([`SyncRoot::place_shares`]).
@@ -159,6 +162,7 @@ impl SyncReport {
         self.left_aside = later.left_aside;
         self.unfinished = later.unfinished;
         self.not_before = crate::time::sooner(self.not_before, later.not_before);
+        self.on_their_way = later.on_their_way;
     }
 }
 
@@ -998,6 +1002,18 @@ impl Engine {
         // node it stopped at may have gone clean meanwhile; the page query doesn't need it).
         self.sweep_after = after;
         report.pending = self.db.read(|s| s.pending_count())?;
+        // Those of them whose change is on its way: still to do. (One that landed and came
+        // back through the feed in a later round of this sync is done, and counts no more.)
+        let on_their_way = self.on_their_way.nodes();
+        if !on_their_way.is_empty() {
+            report.on_their_way = self.db.read(|s| {
+                let mut still = 0;
+                for node in on_their_way {
+                    still += u64::from(s.is_dirty(*node)?);
+                }
+                Ok(still)
+            })?;
+        }
         report.unfinished = !swept
             || (report.pending > 0 && !(report.skipped.is_empty() && report.failed.is_empty()));
         if report.ops_done > 0 || report.feed.deleted > 0 {
