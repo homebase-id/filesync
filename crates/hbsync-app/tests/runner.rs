@@ -2350,6 +2350,10 @@ fn a_share_is_written_to_where_the_app_may_send() -> R {
     b.wait_idle()?;
     assert!(!b.status().writes);
     assert!(is_read_only(&file), "read-only as a whole");
+    assert!(
+        b.status().needs_edit_approval,
+        "something here could be changed"
+    );
 
     // Given: the sync asked for finds so, and the folder writes.
     b.remote.faults().may_not_send = false;
@@ -2357,6 +2361,7 @@ fn a_share_is_written_to_where_the_app_may_send() -> R {
     wait_until("it writes", || b.status().writes)?;
     wait_until("the file may be changed", || !is_read_only(&file))?;
     b.wait_idle()?;
+    assert!(!b.status().needs_edit_approval);
     let before = header_named(&server, "edit.txt").ok_or("there")?.version;
     std::fs::write(&file, "two")?;
     b.handle.send(Command::SyncNow);
@@ -2406,6 +2411,7 @@ fn a_share_is_written_to_where_the_app_may_send() -> R {
     b.wait_idle()?;
     let now = header_named(&server, "edit.txt").ok_or("there")?.version;
     assert_eq!(now, before, "nothing was sent");
+    assert!(b.status().needs_edit_approval, "asked for again");
     Ok(())
 }
 

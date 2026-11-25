@@ -321,6 +321,8 @@ impl Account {
         // The app's want of the owner's approval is the account's to say, whichever share
         // met it: one that can't be opened (kept here) or one that is synced (its own).
         status.needs_approval |= folders.iter().any(|f| f.needs_approval);
+        // (And its want of the approval to change what others share: a synced share's.)
+        status.needs_edit_approval = folders.iter().any(|f| f.needs_edit_approval);
         (status, folders)
     }
 
@@ -1107,6 +1109,53 @@ mod tests {
         started.stop(checked)??;
         theirs.stop(())?;
         Ok(())
+    }
+
+    /// A share that isn't written to and holds something shared for editing has the account
+    /// say that the app wants the owner's approval to change what is shared: its folder's
+    /// status says so, and the account's with it. Not while all of it is shared for reading.
+    #[test]
+    fn what_could_be_changed_has_the_account_ask_for_the_approval()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use hbsync_remote::Remote;
+        use hbsync_remote::contract::Shares;
+        let home = tempfile::tempdir()?;
+        let tom_server = FakeServer::new(ServerConfig::default());
+        let tom = FakeRemote::new(tom_server.clone());
+        let docs = hbsync_remote::NodeMeta {
+            node: hbsync_types::NodeId::new(),
+            parent: hbsync_types::NodeId::ROOT,
+            kind: hbsync_types::NodeKind::Folder,
+            content: hbsync_types::schema::NodeContent::folder("Docs"),
+            removed: false,
+        };
+        let at = tom.create(&docs, None)?.at().file_id;
+        tom.share(at)?;
+        tom_server.lock().map_err(|_| "poisoned")?.tick();
+        let (_, folder, _, start) = shared_with(home.path(), &tom_server)?;
+        use hbsync_local::shares::{Made, make};
+        assert_eq!(make(&folder, "Shared")?, Made::Made);
+        let started = start();
+        let checks = || -> Result<(), Box<dyn std::error::Error>> {
+            let here = folder.join("Shared").join("tom.example").join("Docs");
+            started.wait_all("the share is synced", &|_, folders| {
+                folders.len() == 2 && folders[1].state == State::Idle && here.is_dir()
+            })?;
+            let (account, folders) = started.account.status();
+            assert!(!account.needs_edit_approval && !folders[1].needs_edit_approval);
+
+            tom.share_to_edit(at)?;
+            tom_server.lock().map_err(|_| "poisoned")?.tick();
+            started.account.sync_now()?;
+            started.wait_all("the approval is wanted", &|account, folders| {
+                account.needs_edit_approval && folders.len() == 2 && folders[1].needs_edit_approval
+            })?;
+            let (account, folders) = started.account.status();
+            assert!(!account.needs_approval && !folders[0].needs_edit_approval);
+            Ok(())
+        };
+        let checked = checks();
+        started.stop(checked)?
     }
 
     /// A folder at a share's place that holds a marker the share's DB doesn't know (another

@@ -346,6 +346,12 @@ pub struct AccountStatus {
     /// ([`FolderStatus::needs_approval`]). `hbsync approve` and the tray's menu ask for it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub needs_approval: bool,
+    /// The app lacks the owner's approval to change what others share with the identity (an
+    /// install from before it asked for that), and a share holds something shared for
+    /// editing ([`FolderStatus::needs_edit_approval`]): read-only until then. Nothing waits
+    /// or fails for it; `hbsync approve` and the tray's menu ask for it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub needs_edit_approval: bool,
     /// The account's own notes, newest last: a request of Recently deleted that failed, a file
     /// on the drive this client can't read. Its folders' are theirs ([`FolderStatus::recent`]).
     pub recent: Vec<Note>,
@@ -364,6 +370,7 @@ impl AccountStatus {
             credentials_warning: None,
             login_without_key: false,
             needs_approval: false,
+            needs_edit_approval: false,
             recent: Vec::new(),
             notes_added: 0,
             emptying: None,
@@ -455,6 +462,11 @@ pub struct FolderStatus {
     /// in their Homebase (reading what others share with them).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub needs_approval: bool,
+    /// What another identity shares, read-only as a whole though something in it is shared
+    /// for editing: the app may not send to other identities (it lacks the permission only
+    /// the owner gives). Synced one way meanwhile, as its last sync found it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub needs_edit_approval: bool,
     /// `Paused`, and the identity refuses this computer meanwhile ([`FolderStatus::refused`]):
     /// shown paused, with its resume, and refused.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -543,6 +555,7 @@ impl FolderStatus {
             error: None,
             lacks_key: false,
             needs_approval: false,
+            needs_edit_approval: false,
             refused_paused: false,
             retry_at: None,
             last_sync: None,

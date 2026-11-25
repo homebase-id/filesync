@@ -586,6 +586,20 @@ included (service managers restart it then).
   connect again (the context is read anew then). One asks at a time and the rest go by its
   answer, so the shares of an account, all due at once, make one request. One opening of
   the folder (its watcher, its catch-up scan) for each change.
+  **An install that may not is told when approving would give it something.** A share that
+  isn't written to says with each sync whether anything in it is shared for editing (the
+  engine's `SyncReport::editable`: one query of the share's mirror at its engine's first
+  sync and after each sync that planned something; measured 0.6 ms on a mirror of 10,000
+  items none of which may be changed, 11 ms on 100,000; it stops at the first that may).
+  The folder's status says so (`needs_edit_approval`), and the account's with it. Nothing
+  waits or fails for it, so the tray's icon and status line stay as they are: its menu has
+  a line ("Shared files are read-only until you approve editing") and **Approve editing
+  shared files…**, and `hbsync status` a line under the account ("sharing: files shared
+  with you for editing are read-only here until you approve: `hbsync approve …` asks your
+  Homebase to let … change them"). Both lead to the one approval (below), which asks for
+  what the app lacks. Where it may not read what is shared either, that is what is said
+  and asked (its page asks for both). An owner who doesn't want to approve keeps the line
+  and loses nothing: what is shared stays read-only.
   A share that writes (the status's `writes`; sync semantics §13, "What may be changed is
   told per item") is read-only for the rest of what it holds, and says so differently:
   `hbsync status` shows it with `<->`; what moves out is told as that item's ("report.txt:

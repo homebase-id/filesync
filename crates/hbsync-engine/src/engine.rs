@@ -130,6 +130,10 @@ pub struct SyncReport {
     /// How many items have a change on its way to another identity's drive at the sync's
     /// end, or held with those: sent, or to be, and not taken there yet. Among `pending`.
     pub on_their_way: u64,
+    /// The folder is another identity's share, read-only as a whole (it doesn't write to
+    /// what is shared, [`crate::FolderCtx::writes`]), and they share something in it for
+    /// editing: it would sync both ways where the folder wrote.
+    pub editable: bool,
     /// Nothing was planned: an item at the top of the drive has the name of the folder of
     /// shares, which is to give way first ([`Engine::yield_shares`]). The folder is opened
     /// again ([`SyncRoot::place_shares`]).
@@ -163,6 +167,7 @@ impl SyncReport {
         self.unfinished = later.unfinished;
         self.not_before = crate::time::sooner(self.not_before, later.not_before);
         self.on_their_way = later.on_their_way;
+        self.editable = later.editable;
     }
 }
 
@@ -264,6 +269,9 @@ pub struct Engine {
     /// The writes to another identity's drive that were on their way, or held, in this sync
     /// so far ([`Executor::with_on_their_way`]): from none at each sync's start.
     on_their_way: crate::exec::OnTheirWay,
+    /// [`SyncReport::editable`] as last looked up; `None`: not yet. Looked up again after a
+    /// sync that planned something (a change of what may be changed marks its node).
+    editable: Option<bool>,
     /// Whether this engine has looked at the folder writing or not since it last ran
     /// ([`Engine::apply_writes_change`]).
     writes_applied: bool,
@@ -359,6 +367,7 @@ impl Engine {
             rescanned: Default::default(),
             refusals: FolderRefusals::default(),
             on_their_way: crate::exec::OnTheirWay::default(),
+            editable: None,
             writes_applied: false,
             waited: Waited::default(),
             unreported: None,
@@ -1013,6 +1022,16 @@ impl Engine {
                 }
                 Ok(still)
             })?;
+        }
+        // Another identity's share that isn't written to: whether anything in it is shared
+        // for editing (the product asks its owner to let it write then). One query of the
+        // mirror, at an engine's first sync and after each that planned something.
+        // (Another identity's drive is only ever synced read-only: [`Engine::new`].)
+        if self.drive.shared() && !self.cfg.folder.writes {
+            if self.editable.is_none() || report.rounds > 0 {
+                self.editable = Some(self.db.read(|s| s.any_writable())?);
+            }
+            report.editable = self.editable.unwrap_or(false);
         }
         report.unfinished = !swept
             || (report.pending > 0 && !(report.skipped.is_empty() && report.failed.is_empty()));
