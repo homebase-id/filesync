@@ -1420,9 +1420,23 @@ impl FakeRemote {
     fn taken(&self, server: &mut FakeServer, held: Held) -> Result<Written> {
         let writer = Some(self.client);
         let written = match held.ask {
-            Ask::Create(meta) => replay(held.bytes, |upload| {
-                server.create_by(writer, &meta, upload, held.shared_as)
-            })?,
+            Ask::Create(meta) => {
+                // A node of the id is there already, and the member doesn't read it (its
+                // share alone taken back since it was sent): the owner's server refuses
+                // the new file, and the adapter finds none of theirs to call it there
+                // already (**[verified]** live: `recipientIdentityReturnedBadRequest`, its
+                // `Fatal`). One the member reads, live or in their Recently deleted, is
+                // there already ([`FakeServer::create_by`]).
+                let unseen = |file_id: &RemoteFileId| !server.shared_live(*file_id);
+                if server.file_id_of(meta.node).as_ref().is_some_and(unseen) {
+                    return Err(RemoteError::Fatal(
+                        "the owner's server didn't take the change".into(),
+                    ));
+                }
+                replay(held.bytes, |upload| {
+                    server.create_by(writer, &meta, upload, held.shared_as)
+                })?
+            }
             Ask::Update(at, meta) => {
                 self.their_server_takes()?;
                 server.editable(at.file_id)?;

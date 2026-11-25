@@ -721,3 +721,52 @@ fn an_edit_on_its_way_through_a_restart_lands_once() -> R {
     assert_eq!(b.tree_text(""), both);
     nothing_moved_out(&out)
 }
+
+/// A new file of the member's that went up while its client was away (on its way through a
+/// restart: no base of it here), and whose share alone its owner took back before the member
+/// heard of it: the member reads none of it, and makes it again. Their server refuses that,
+/// once: told, and not sent again at the next sync (against a fake that called it there
+/// already, it was sent eight times a sync, for good; Homebase refuses it, **[verified]**
+/// live). The file stays here; theirs is as it was.
+#[test]
+fn a_new_file_made_again_where_its_share_was_taken_back_is_refused_once() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    a.write("d/keep.txt", "k")?;
+    a.sync()?;
+    share_to_edit(&a, &server, "d")?;
+    share_to_edit(&a, &server, "keep.txt")?;
+    let (mut b, out) = writing_member(&server, "b")?;
+    b.sync()?;
+
+    b.remote.faults().on_their_way = true;
+    b.write("d/new.txt", "made by the member")?;
+    b.sync()?;
+    b.remote = b.remote.sharing_token();
+    b.restart()?;
+    assert_eq!(b.remote.deliver().len(), 1);
+    a.remote
+        .withdraw(common::header_named(&server, "new.txt").file_id)?;
+    server.lock().map_err(|_| "poisoned")?.tick();
+
+    b.engine.scan_local()?;
+    let before = b.remote.faults().requests;
+    let report = b.engine.sync("2026-10-08", true)?;
+    let left = format!("{:?}", report.skipped);
+    assert_eq!(left.matches("Refused(").count(), 1, "{left}");
+    assert!(
+        b.remote.faults().requests - before <= 3,
+        "{} requests",
+        b.remote.faults().requests - before
+    );
+    // The next sync sends nothing of it: the feed's read alone.
+    let before = b.remote.faults().requests;
+    let report = b.engine.sync("2026-10-08", true)?;
+    assert_eq!(b.remote.faults().requests - before, 1);
+    assert_eq!(report.refused.len(), 1, "{:?}", report.refused);
+    assert_eq!(b.read("d/new.txt")?, b"made by the member");
+    nothing_moved_out(&out)?;
+    a.sync()?;
+    assert_eq!(a.read("d/new.txt")?, b"made by the member");
+    Ok(())
+}

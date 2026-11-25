@@ -876,6 +876,13 @@ it for editing. Built, and not turned on: a share is still read-only in the prod
   server refuses the later one (**[verified]** odin-core `PeerFileWriter`: a file sent
   again with shares is an `ArgumentError`, told as `recipientIdentityReturnedBadRequest`):
   the client says `AlreadyExists`, and the engine reads what is there, its bytes too.
+  **[verified]** live (2026-11-27, a member with no memory of the send, other bytes and the
+  same): where the owner moved the file to Recently deleted meanwhile, it is there
+  already still (the member reads it, removed; theirs stays as it is, 30 to 135 ms);
+  where the owner took back the file's share alone, the member reads none of it (its
+  feed has the file as deleted) and is told the refusal as it is, a `Fatal`: recorded by
+  the engine as refused, not sent again till the item changes or an hour passed; where
+  the owner deleted it (a tombstone), the node is made again, a new file there.
 - **One write of a node at a time.** The staged copy carries the node's `uniqueId`, unique
   on the transient drive too: a second write of the node while the first is still in the
   outbox answers `400 existingFileWithUniqueId` (**[verified]** live for a stray copy;

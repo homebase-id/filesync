@@ -155,6 +155,49 @@ fn an_edit_of_other_bytes_isnt_the_write_on_its_way() -> R {
     Ok(())
 }
 
+/// A new file the member sent, its share alone taken back since: asked again by a client that
+/// remembers no send of it (one started again), it isn't there already for the member, which
+/// reads none of it: their server refuses the new file, and that is all the member is told
+/// (**[verified]** live, 2026-11-27: `recipientIdentityReturnedBadRequest`, the adapter's
+/// `Fatal`). Moved to their Recently deleted instead, the member reads it still: there
+/// already.
+#[test]
+fn a_new_file_sent_again_whose_share_was_taken_back_is_refused() -> R {
+    let (sharer, scratch) = sharing_a_folder_to_edit()?;
+    let member = FakeRemote::member(sharer.server_handle()).writing();
+    let (unshared, removed) = (
+        file("unshared", scratch.node, b"1"),
+        file("removed", scratch.node, b"1"),
+    );
+    let at_unshared = create_file(&member, &unshared, b"1")?;
+    let at_removed = create_file(&member, &removed, b"1")?;
+    sharer.withdraw(at_unshared.at().file_id)?;
+    let theirs = sharer.header(at_removed.at().file_id)?;
+    let target = hbsync_types::Target {
+        at: theirs.at(),
+        token: theirs.token.clone(),
+    };
+    sharer.set_removed(&[target], true)?;
+
+    let again = member.sharing_token();
+    for bytes in [&b"1"[..], b"2"] {
+        let refused = create_file(&again, &unshared, bytes);
+        assert!(matches!(refused, Err(RemoteError::Fatal(_))), "{refused:?}");
+        let there = create_file(&again, &removed, bytes);
+        assert!(
+            matches!(there, Err(RemoteError::AlreadyExists)),
+            "{there:?}"
+        );
+    }
+    // Their files are as they were.
+    assert_eq!(
+        sharer.header(at_unshared.at().file_id)?.version,
+        at_unshared.at().version
+    );
+    assert!(sharer.header(at_removed.at().file_id)?.removed);
+    Ok(())
+}
+
 /// The answer of a write still on its way.
 fn waits<T: std::fmt::Debug>(answer: Result<T, RemoteError>) {
     assert!(
