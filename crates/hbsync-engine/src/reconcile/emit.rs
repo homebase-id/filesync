@@ -230,8 +230,18 @@ impl Reconciler<'_> {
                 let unsynced = self.masks.masked.contains(&node)
                     || (self.masking.read_only && remote.is_some());
                 if needs_settle && target.is_none() && unsynced {
-                    // A detached node's base goes with the detach.
-                    if !self.masks.detached.contains_key(&node) {
+                    // A detached node's base goes with the detach. And a base stays while
+                    // one below it does that this plan leaves alone (what waits, out of the
+                    // plan: its base is kept where it is): the executor holds a folder's
+                    // forgetting till its children's bases are gone, and held it at every
+                    // sync, for as long as the wait lasted. Forgotten once that one is
+                    // planned again. (A walk of the base below the node, where one is let
+                    // go.)
+                    let kept_below = || {
+                        let below = i.base.subtree(node);
+                        below.iter().any(|n| *n != node && !self.scope.contains(n))
+                    };
+                    if !self.masks.detached.contains_key(&node) && !kept_below() {
                         let op = Op::Forget {
                             node,
                             subtree: Vec::new(),

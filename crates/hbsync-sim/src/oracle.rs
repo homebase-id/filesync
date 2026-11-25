@@ -837,6 +837,19 @@ impl Sim {
             if !client.local.violations().is_empty() {
                 return Err(format!("{}: {:?}", client.name, client.local.violations()));
             }
+            // The base of a folder this client no longer syncs and holds nothing of (let go:
+            // a name it ignores, §10) stays while one below it does that is out of its plans
+            // (what waits, here or not: its base is kept where it waits, and a base is a
+            // tree). Forgotten once that one is planned again.
+            let out_of_plans: Vec<NodeId> =
+                (client.base.ids()).filter(|n| !base.contains(*n)).collect();
+            for n in out_of_plans {
+                for above in client.base.ancestors(n) {
+                    if !synced.contains(above) && !client.local.contains(above) {
+                        base.remove(above);
+                    }
+                }
+            }
             if view(&base) != view(&synced) {
                 return Err(format!("{}: base not settled", client.name));
             }

@@ -811,6 +811,14 @@ expected fingerprint is treated as done.
     made till the name is free. What is only here under such a name (a new item, set
     aside while a folder of that name was made) is no newcomer of the drive's: it takes a
     numbered name and goes up, as any clash's loser (§6.3).
+  - The record of what waits (its base) is kept where it was, deleted here or not. A
+    folder above it that this device lets go meanwhile (no longer synced here: renamed
+    there to a name it ignores, §10, and gone here) keeps its own record with it: a
+    folder's is forgotten after those below it, so its forgetting isn't planned while one
+    below it is out of the plan (planned all the same, it was held at every sync for as
+    long as the wait lasted). Forgotten once that one is planned again (plan
+    `a_folder_let_go_keeps_its_base_while_what_waits_has_its_below_it`; simulator
+    `a_folder_let_go_here_keeps_its_base_while_what_waits_has_its_below_it`).
   - A node whose newer version it can't read (unreadable) is kept as it had it: a local edit
     goes up as a new node (a conflict copy, under a free name); a rename, tags, a delete or a
     download of it is refused and not tried again while it is the same; the drive's version

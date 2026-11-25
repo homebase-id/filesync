@@ -5587,6 +5587,47 @@ fn read_only_what_is_on_a_name_here_keeps_it_from_what_moved_out() {
     assert_eq!(told, [moved]);
 }
 
+/// A folder let go here (deleted here, and renamed on the drive to a name this device
+/// ignores), with a file whose base is below it that waits (moved there into a folder this
+/// device can't read): the folder's base isn't forgotten while the file's is kept where it
+/// waits. The executor holds a folder's forgetting till the bases below it are gone: planned
+/// all the same, it was held at every sync for as long as the wait lasted. With nothing that
+/// waits below it, both are forgotten.
+#[test]
+fn a_folder_let_go_keeps_its_base_while_what_waits_has_its_below_it() {
+    let [b, f, q] = ids(3)[..] else {
+        unreachable!()
+    };
+    for waits in [true, false] {
+        let mut w = World {
+            filter: ignoring("d\n"),
+            ..World::default()
+        };
+        w.synced(b, folder(ROOT, "b"))
+            .synced(f, file(b, "c.txt", "x"));
+        w.local(b, None)
+            .local(f, None)
+            .remote(b, Some(folder(ROOT, "d")));
+        if waits {
+            w.remote(f, Some(file(q, "c.txt", "x")));
+            w.input.unreadable.insert(q);
+        }
+        let plan = w.plan();
+        assert!(!plan.writes_drive(), "{waits}: {:?}", plan.ops);
+        let mut forgotten: Vec<NodeId> = (plan.ops.iter())
+            .filter(|op| matches!(op, Op::Forget { .. }))
+            .map(Op::node)
+            .collect();
+        forgotten.sort();
+        let mut want = match waits {
+            true => vec![],
+            false => vec![b, f],
+        };
+        want.sort();
+        assert_eq!(forgotten, want, "{waits}: {:?}", plan.ops);
+    }
+}
+
 /// Read-only, two of the drive's items on one name, both synced here: the one on the name on
 /// disk keeps it and follows the drive, and the one parked under a temporary name for it
 /// (reported at the place it belongs) is left out, though its id is the lower. The same where
