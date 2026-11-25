@@ -201,7 +201,7 @@ proptest! {
 
     /// [`a_writing_member_writes_only_what_it_may_and_converges`], from a drive shared with the
     /// member for editing ([`with_all_shared_for_editing`]), the member's writes held on
-    /// their way by its own server ([`Sim::with_writes_on_their_way`]) till the sharer's
+    /// their way by its own server ([`Sim::hold_member_writes`]) till the sharer's
     /// server takes them, a few at a time ([`Event::Deliver`]), every client dying now and
     /// then (the member forgetting what it sent). Each write lands at most once, only where
     /// the drive's node is still as it was sent over, else it is given up; what the member

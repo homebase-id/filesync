@@ -64,7 +64,7 @@ pub(crate) struct Faults {
     pub(crate) put_backs: u64,
     pub(crate) waves_left: Option<usize>,
     /// A writing member's writes are held on their way to the drive
-    /// ([`crate::Sim::with_writes_on_their_way`]), each till delivered
+    /// ([`crate::Sim::hold_member_writes`]), each till delivered
     /// ([`crate::Event::Deliver`]).
     pub(crate) on_their_way: bool,
 }

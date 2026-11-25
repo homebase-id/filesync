@@ -1,5 +1,5 @@
 //! A writing member's writes on their way to the sharer's drive: the member's own server
-//! holds them ([`crate::Sim::with_writes_on_their_way`]) until the sharer's server takes them
+//! holds them ([`crate::Sim::hold_member_writes`]) until the sharer's server takes them
 //! ([`crate::Event::Deliver`]), as `hbsync_remote`'s fake does (`Faults::on_their_way`,
 //! `FakeRemote::deliver`).
 
@@ -9,7 +9,7 @@ use hbsync_types::{NodeId, NodeState, RemoteRef};
 
 /// A write of the member's as it is sent: by this a write is the same one asked again (the
 /// fake's `Ask`, with its bytes: the state it writes holds them).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub(crate) enum Write {
     /// A new file or folder, as it is to be on the drive (in the drive's coordinates).
     Create { state: NodeState },
@@ -19,6 +19,21 @@ pub(crate) enum Write {
     /// that version (judged when sent: the node is at that version when it lands, or the
     /// write isn't taken).
     Remove { at: RemoteRef, rightly: bool },
+}
+
+/// The same write: what it asks of the drive. (Not how a removal is judged, which the
+/// oracle works out anew at each ask.)
+impl PartialEq for Write {
+    fn eq(&self, other: &Write) -> bool {
+        match (self, other) {
+            (Write::Create { state: a }, Write::Create { state: b }) => a == b,
+            (Write::Update { at: a, state: s }, Write::Update { at: b, state: t }) => {
+                a == b && s == t
+            }
+            (Write::Remove { at: a, .. }, Write::Remove { at: b, .. }) => a == b,
+            _ => false,
+        }
+    }
 }
 
 impl Write {

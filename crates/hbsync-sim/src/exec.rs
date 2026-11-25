@@ -3573,8 +3573,11 @@ pub(crate) enum MemberAnswer {
 }
 
 impl Sim {
-    /// Turns holding a writing member's writes on their way on or off
-    /// ([`Sim::with_writes_on_their_way`]); what is held stays held till delivered.
+    /// Turns holding a writing member's writes on their way on or off. Held, each stays on
+    /// the member's own server (the adapter's answer is that it is on its way,
+    /// `RemoteError::OnItsWay`) till the sharer's server takes it ([`crate::Event::Deliver`],
+    /// and every one before the clients settle: [`Sim::quiesce`]), as `hbsync_remote`'s fake
+    /// holds them (`Faults::on_their_way`); what is held stays held when it is turned off.
     pub fn hold_member_writes(&mut self, on: bool) {
         self.faults.on_their_way = on;
     }
@@ -3604,7 +3607,7 @@ impl Sim {
             Some("on its way to the drive: asked again later")
         } else if goes_into {
             Some("its folder is on its way to the drive")
-        } else if client.waits >= 3 {
+        } else if client.waits >= WAIT_HOLD {
             Some("held: the drive's server isn't taking changes for now")
         } else {
             None
@@ -3722,7 +3725,7 @@ impl Sim {
     /// 2. their node at another version by now: the op runs as ever (and is refused on its
     ///    version);
     /// 3. another write of the node held: on its way, unsent;
-    /// 4. writes held on their way ([`Sim::with_writes_on_their_way`]): sent and held, judged
+    /// 4. writes held on their way ([`Sim::hold_member_writes`]): sent and held, judged
     ///    as sent (a breach then is the member's), remembered.
     pub(crate) fn member_sends(&mut self, c: usize, op: &Op) -> Option<MemberAnswer> {
         if !matches!(ready(&self.clients[c], op), Met::Yes) {
@@ -3826,6 +3829,7 @@ impl Sim {
     }
 
     /// The sharer's server takes the held write `h`, where it may: whether it did.
+    /// (No send lands twice: each is taken out of the outbox as it is looked at.)
     fn taken(&mut self, h: &Held) -> bool {
         let node = h.node;
         let server = &self.server;
@@ -3836,21 +3840,17 @@ impl Sim {
                 .get(&node)
                 .is_some_and(|n| n.remote == *at && editable(node))
         };
+        // As the fake's server takes one (`FakeRemote::taken`): a new node where the drive
+        // has none of it (its folder isn't asked again: what it was sent to be shared as went
+        // with it); a change or removal of the node still at the version it was sent over,
+        // and still the member's to change.
         let may = match &h.write {
-            Write::Create { state } => server.node(node).is_none() && editable(state.parent),
-            Write::Update { at, state } => {
-                at_sent(at) && {
-                    let now = server.live[&node].state.parent;
-                    now == state.parent || (editable(now) && editable(state.parent))
-                }
-            }
-            Write::Remove { at, .. } => at_sent(at),
+            Write::Create { .. } => server.node(node).is_none(),
+            Write::Update { at, .. } | Write::Remove { at, .. } => at_sent(at),
         };
         if !may {
             return false;
         }
-        let what = || format!("c{} send {} {node:?}", h.client, h.send);
-        self.ledger.landed(h.send, what);
         match &h.write {
             Write::Remove { rightly, .. } => {
                 let n = self.server.live.remove(&node).expect("live");
@@ -3913,3 +3913,7 @@ fn apply_write(
         }
     }
 }
+
+/// So many of a member's writes on their way in a row hold the sync's others: the engine's
+/// `WAIT_HOLD` (`hbsync_engine`'s executor, not exported).
+const WAIT_HOLD: u32 = 3;

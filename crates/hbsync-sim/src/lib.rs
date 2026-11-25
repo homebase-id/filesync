@@ -89,7 +89,7 @@ pub struct Sim {
     read: Option<exec::Read>,
     /// The faults it plays, and what they keep ([`Faults`]).
     faults: Faults,
-    /// The writing member's server's writes on their way ([`Sim::with_writes_on_their_way`]).
+    /// The writing member's server's writes on their way ([`Sim::hold_member_writes`]).
     outbox: outbox::Outbox,
 }
 
@@ -358,15 +358,6 @@ impl Sim {
     pub fn with_member(mut self, c: usize) -> Self {
         self.clients[c].read_only = true;
         self.clients[c].member = true;
-        self
-    }
-
-    /// The writing member's writes are held on their way to the drive (its own server holds
-    /// each: the adapter's answer is that it is on its way, `RemoteError::OnItsWay`), till
-    /// the sharer's server takes them ([`Event::Deliver`], and every one before the clients
-    /// settle: [`Sim::quiesce`]): as `hbsync_remote`'s fake (`Faults::on_their_way`).
-    pub fn with_writes_on_their_way(mut self) -> Self {
-        self.faults.on_their_way = true;
         self
     }
 

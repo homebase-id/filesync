@@ -205,12 +205,12 @@ pub(crate) fn delivering(
     ]
 }
 
-/// The users' actions, the owner turning shares to editing and back ([`Action::Editable`]),
-/// as often as [`editing_action`] does; but not sharing or withdrawing shares
+/// The users' actions, the owner turning shares to editing and back now and then
+/// ([`Action::Editable`], one action in thirteen); but not sharing or withdrawing shares
 /// ([`Action::Share`]): for a drive shared whole ([`with_all_shared_for_editing`]), within a
 /// known engine gap (a file the member edited in a folder whose share was withdrawn, shared
-/// again at the member's top where another of its name is, is deleted with that folder: see
-/// `a_left_out_edit_in_a_withdrawn_folder_is_deleted_with_it`).
+/// again at the member's top where another of its name is, is deleted with that folder: a
+/// fault with a fix of its own, "a delete here takes no edit").
 pub(crate) fn on_its_way_action() -> impl Strategy<Value = Action> + Clone {
     prop_oneof![
         12 => action(),
@@ -220,7 +220,8 @@ pub(crate) fn on_its_way_action() -> impl Strategy<Value = Action> + Clone {
 
 /// Events on three clients with [`on_its_way_action`], the owner's two computers moving,
 /// deleting and ignoring nothing, nor changing a node under another's write
-/// ([`Action::Meanwhile`]): such an action of theirs is a plan instead.
+/// ([`Action::Meanwhile`]): such an action of theirs is a plan instead. (They still restore
+/// and empty Recently deleted.)
 /// - within another known engine gap: a file the sharer moved out of what is shared, at the
 ///   member's top where another of its name is, edited there and here, has its conflict copy
 ///   planned up at every sync, never made;
@@ -245,7 +246,7 @@ pub(crate) fn on_its_way_event() -> impl Strategy<Value = Event> {
 
 /// Client 2 a member that writes, with the owner's folder `b` holding `b/c.txt` and `b/a`,
 /// and `a` at the top, all shared with it for editing and synced; its writes from then on
-/// held on their way ([`Sim::with_writes_on_their_way`]).
+/// held on their way ([`Sim::hold_member_writes`]).
 pub(crate) fn with_all_shared_for_editing(sim: Sim) -> Sim {
     use Action::*;
     let mut sim = sim.with_writing_member(2);

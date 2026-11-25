@@ -234,7 +234,7 @@ pub(crate) struct Client {
     /// What moved out of it, read-only, to keep what changed here: each item with what was
     /// below it (`Op::LocalEvict`).
     pub(crate) moved_out: Vec<Tree>,
-    /// A member that writes, its writes on their way ([`crate::Sim::with_writes_on_their_way`]):
+    /// A member that writes, its writes on their way ([`crate::Sim::hold_member_writes`]):
     /// what it remembers of the sends it had no answer to, each its write and send (the
     /// adapter's memory, gone with a crash).
     pub(crate) sent: BTreeMap<NodeId, (crate::outbox::Write, u64)>,
