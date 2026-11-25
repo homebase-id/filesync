@@ -706,6 +706,12 @@ impl Sim {
                     *orphan_waits.entry(n).or_default() += 1;
                 }
             }
+            // What the engine's plan leaves out, its base kept where it is: what waits, on
+            // the drive or here, and the orphans that wait.
+            let out_of_plan: BTreeSet<NodeId> = (waiting.iter().copied())
+                .chain(orphan_out.iter().copied())
+                .chain(aside.iter().copied())
+                .collect();
             for &n in &orphan_out {
                 synced.remove(n);
                 base.remove(n);
@@ -836,6 +842,23 @@ impl Sim {
             }
             if !client.local.violations().is_empty() {
                 return Err(format!("{}: {:?}", client.name, client.local.violations()));
+            }
+            // The base of a folder this client no longer syncs and holds nothing of (let go:
+            // a name it ignores, §10; read-only, one the drive holds that isn't shared with
+            // it, §13) stays while the base of what its plan leaves out is below it (what
+            // waits, here or not: its base is kept where it waits, and a base is a tree).
+            // Forgotten once that one is planned again. (Not for one below it that the drive
+            // refused, or that lost a name: the engine plans those, and the folder with
+            // them.)
+            for n in out_of_plan {
+                if !client.base.contains(n) {
+                    continue;
+                }
+                for above in client.base.ancestors(n) {
+                    if !synced.contains(above) && !client.local.contains(above) {
+                        base.remove(above);
+                    }
+                }
             }
             if view(&base) != view(&synced) {
                 return Err(format!("{}: base not settled", client.name));
