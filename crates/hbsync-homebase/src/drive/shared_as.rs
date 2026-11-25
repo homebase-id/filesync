@@ -8,8 +8,8 @@
 //! one's: this client with the upload itself, as the folder it goes into is shared.
 //!
 //! What was read of a folder is gone by only while a change of it would have been told:
-//! by the notifications while they are connected ([`Folders::heard`]), by the feed for what
-//! they missed ([`Folders::fed`], [`Folders::feed_ended`]).
+//! by the notifications for as long as their connection holds ([`Folders::heard`]), else
+//! for a few minutes, in which the feed tells of it ([`Folders::fed`]).
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -18,20 +18,20 @@ use std::time::{Duration, Instant, SystemTime};
 use hbsync_types::{NodeId, RemoteFileId, RemoteRef};
 use uuid::Uuid;
 
-/// How long what was learnt of a folder's shares is gone by where the notifications weren't
-/// connected all the while since ([`Folders::known`]): the feed, read every few minutes
-/// then, tells of a change ([`Folders::fed`]); this bounds the time before it does, at one
-/// small read per folder added to in that time.
+/// How long what was learnt of a folder's shares is gone by where the notifications' one
+/// connection didn't hold all the while since ([`Folders::known`]): the feed, read every few
+/// minutes while they are down and as they connect, tells of a change ([`Folders::fed`]);
+/// this bounds the time before it does, at one small read per folder added to after it.
 const KEPT: Duration = Duration::from_secs(600);
 
 /// How long a folder whose shares the server refused with an upload is added to without
 /// them ([`Folders::refused`]), unless it changes before: then they are read and tried again.
 const REFUSED: Duration = Duration::from_secs(3600);
 
-/// A feed read begun this long after the notifications connected, and read to its end,
-/// holds every change they missed before: twice what the feed holds back
-/// (`HOLD_BACK`), so nothing falls between the two.
-const SETTLED: Duration = Duration::from_millis(2500);
+/// The wall clock this far ahead of the steady one since something was learnt: this
+/// computer slept meanwhile (the steady clock doesn't count a sleep on Linux and macOS),
+/// and the notifications' connection it was learnt under heard nothing in that time.
+const SLEPT: Duration = Duration::from_secs(30);
 
 /// More folders than this known: the ones no longer gone by are dropped as the next is
 /// learnt (about 150 bytes each).
@@ -87,19 +87,26 @@ impl At {
     fn within(&self, limit: Duration) -> bool {
         self.0.elapsed() < limit && self.1.elapsed().is_ok_and(|by_wall| by_wall < limit)
     }
+
+    /// This computer slept since ([`SLEPT`]), or its wall clock was set.
+    fn slept(&self) -> bool {
+        let by_wall = self.1.elapsed().unwrap_or(Duration::MAX);
+        by_wall > self.0.elapsed().saturating_add(SLEPT)
+    }
 }
 
 /// What is known of one folder.
 #[derive(Debug)]
 struct Known {
-    /// The folder's file, which the notifications name it by.
-    file_id: Uuid,
+    /// The folder's file, which the notifications name it by. None for a folder whose row
+    /// didn't read or isn't there ([`Folders::read`]): it shares nothing, as far as is known.
+    file_id: Option<Uuid>,
     /// The folder's version as its shares were read, or as this computer made it.
     version: Uuid,
     shares: Shares,
     learnt: At,
-    /// The notifications' connection that vouches for it: up as it was learnt, or as the
-    /// feed was read to its end since ([`Folders::feed_ended`]).
+    /// The notifications' connection that was up as it was learnt: while that one holds, a
+    /// change of the folder would have been heard. None for a folder they can't name.
     listening: Option<u64>,
     /// The server refused its shares with an upload ([`Folders::refused`]): none are given.
     refused: bool,
@@ -119,15 +126,26 @@ struct Reading {
     overtaken: bool,
 }
 
+impl Reading {
+    /// One more told, of `told` so far: past [`TOLD`] the read is overtaken, and no more
+    /// are kept.
+    fn told<T>(&mut self, told: fn(&mut Reading) -> &mut Vec<T>, one: T) {
+        match told(self).len() < TOLD {
+            true => told(self).push(one),
+            false => self.overtaken = true,
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 struct State {
     folders: HashMap<NodeId, Known>,
     /// The known folders by their files ([`Known::file_id`]).
     by_file: HashMap<Uuid, NodeId>,
-    /// The notifications' connections so far, and the one that is up now, with when it
-    /// came up ([`Folders::listening`]).
+    /// The notifications' connections so far, and the one that is up now
+    /// ([`Folders::listening`]).
     connects: u64,
-    listening: Option<(u64, Instant)>,
+    listening: Option<u64>,
     reading: Option<Reading>,
     /// As many folders known has the ones not gone by any more dropped ([`MANY`], then
     /// twice what was left).
@@ -135,27 +153,30 @@ struct State {
 }
 
 impl State {
-    fn connection(&self) -> Option<u64> {
-        self.listening.map(|(connection, _)| connection)
+    /// The notifications' connection that is up heard every change of the folder since
+    /// `known` was learnt: the one it was learnt under, and no sleep since.
+    fn heard_all(&self, known: &Known) -> bool {
+        known.listening.is_some() && known.listening == self.listening && !known.learnt.slept()
     }
 
     /// Whether what is `known` of a folder is still gone by ([`Folders::known`]).
     fn holds(&self, known: &Known) -> bool {
-        if known.refused {
-            return known.learnt.within(REFUSED);
+        match known.refused {
+            true => known.learnt.within(REFUSED),
+            false => self.heard_all(known) || known.learnt.within(KEPT),
         }
-        let vouched = known.listening.is_some() && known.listening == self.connection();
-        vouched || known.learnt.within(KEPT)
     }
 
     /// Nothing is known of `folder` any more.
     fn forget(&mut self, folder: NodeId) {
-        if let Some(known) = self.folders.remove(&folder) {
-            self.by_file.remove(&known.file_id);
+        if let Some(file) = self.folders.remove(&folder).and_then(|known| known.file_id) {
+            self.by_file.remove(&file);
         }
     }
 
-    fn learn(&mut self, folder: NodeId, at: RemoteRef, shares: Shares) {
+    /// `folder` is shared as `shares`: the file `at`, or (`None`) one the notifications
+    /// can't name, which their connection doesn't vouch for.
+    fn learn(&mut self, folder: NodeId, at: Option<RemoteRef>, shares: Shares) {
         if self.folders.len() >= self.full.max(MANY) {
             let mut folders = std::mem::take(&mut self.folders);
             folders.retain(|_, known| self.holds(known));
@@ -165,18 +186,19 @@ impl State {
             self.full = folders.len() * 2;
             self.folders = folders;
         }
+        self.forget(folder);
         let known = Known {
-            file_id: at.file_id.0,
-            version: at.version.0,
+            file_id: at.map(|at| at.file_id.0),
+            version: at.map(|at| at.version.0).unwrap_or_default(),
             shares,
             learnt: At::now(),
-            listening: self.connection(),
+            listening: self.listening.filter(|_| at.is_some()),
             refused: false,
         };
-        if let Some(before) = self.folders.insert(folder, known) {
-            self.by_file.remove(&before.file_id);
+        self.folders.insert(folder, known);
+        if let Some(at) = at {
+            self.by_file.insert(at.file_id.0, folder);
         }
-        self.by_file.insert(at.file_id.0, folder);
     }
 }
 
@@ -212,36 +234,30 @@ impl Fed {
     }
 }
 
-/// Where a read of the feed began ([`Folders::feed_begins`]).
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct FeedRead {
-    listening: Option<(u64, Instant)>,
-    began: Instant,
-}
-
 impl Folders {
     fn state(&self) -> MutexGuard<'_, State> {
         self.0.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// `folder`'s shares, if a change of them since they were learnt would have been told:
-    /// vouched for by the notifications' connection that is up (a change of the folder is
-    /// announced within seconds, [`Folders::heard`]), else for [`KEPT`]. A folder whose
-    /// shares the server refused has none for [`REFUSED`].
+    /// for as long as the notifications' connection they were learnt under holds (a change
+    /// of the folder is announced within seconds, [`Folders::heard`]) and this computer
+    /// didn't sleep, else for [`KEPT`]. A folder whose shares the server refused has none
+    /// for [`REFUSED`].
     pub(crate) fn known(&self, folder: NodeId) -> Option<Shares> {
         let state = self.state();
         let known = state.folders.get(&folder)?;
         (state.holds(known)).then(|| Arc::clone(&known.shares))
     }
 
-    /// The notifications connected (`true`), or their connection broke. What they missed
-    /// meanwhile the feed tells: what was learnt before is vouched for again once it has
-    /// been read to its end ([`Folders::feed_ended`]).
+    /// The notifications connected (`true`), or their connection broke. What was learnt
+    /// under another connection is gone by for [`KEPT`] from then on: what they missed, the
+    /// feed tells.
     pub(crate) fn listening(&self, connected: bool) {
         let mut state = self.state();
         state.listening = connected.then(|| {
             state.connects += 1;
-            (state.connects, Instant::now())
+            state.connects
         });
         if let (true, Some(reading)) = (connected, &mut state.reading) {
             reading.overtaken = true;
@@ -253,22 +269,25 @@ impl Folders {
     pub(crate) fn reading(&self) {
         let mut state = self.state();
         state.reading = Some(Reading {
-            listening: state.connection(),
+            listening: state.listening,
             ..Reading::default()
         });
     }
 
-    /// The read that began ([`Folders::reading`]) says `folder` (the file `at`) is shared as
-    /// `shares`: kept, unless something was told of the folder meanwhile, or the
-    /// notifications' connection isn't the one it began under.
-    pub(crate) fn read(&self, folder: NodeId, at: RemoteRef, shares: Shares) {
+    /// The read that began ([`Folders::reading`]) ended: without an answer (`None`), or
+    /// saying `folder` is shared as the shares given, as the file given; no file for a
+    /// folder whose row isn't there or doesn't read, which is kept as sharing nothing for
+    /// [`KEPT`] (not asked about with every node added to it). An answer is kept unless
+    /// something was told of the folder meanwhile, or the notifications' connection isn't
+    /// the one it began under.
+    pub(crate) fn read(&self, folder: NodeId, answer: Option<(Option<RemoteRef>, Shares)>) {
         let mut state = self.state();
-        let Some(reading) = state.reading.take() else {
+        let (Some(reading), Some((at, shares))) = (state.reading.take(), answer) else {
             return;
         };
         let overtaken = reading.overtaken
-            || reading.listening != state.connection()
-            || reading.heard.contains(&at.file_id.0)
+            || reading.listening != state.listening
+            || at.is_some_and(|at| reading.heard.contains(&at.file_id.0))
             || reading.fed.contains(&folder);
         if !overtaken {
             state.learn(folder, at, shares);
@@ -277,32 +296,59 @@ impl Folders {
 
     /// This computer made `folder` (the file `at`), shared as `shares`.
     pub(crate) fn made(&self, folder: NodeId, at: RemoteRef, shares: Shares) {
-        self.state().learn(folder, at, shares);
+        self.state().learn(folder, Some(at), shares);
     }
 
-    /// This computer wrote `folder`, known or not, to the version `at`: its shares are as
-    /// they were (a write keeps them), and its own write coming back in the feed is no news.
+    /// This computer wrote `folder` to the version `at`: its shares are as they were (a
+    /// write keeps them), and its own write coming back in the feed is no news. Only where
+    /// the notifications heard every change of it so far: else a share's change they missed
+    /// would pass for this write in the feed (both move `updated`), so the folder is read
+    /// again.
     pub(crate) fn rewritten(&self, folder: NodeId, at: RemoteRef) {
         let mut state = self.state();
-        if let Some(known) = state.folders.get_mut(&folder)
-            && known.file_id == at.file_id.0
-        {
-            known.version = at.version.0;
+        let heard_all = |known: &Known| {
+            known.file_id == Some(at.file_id.0) && (known.refused || state.heard_all(known))
+        };
+        match state.folders.get(&folder).map(heard_all) {
+            Some(true) => {
+                if let Some(known) = state.folders.get_mut(&folder) {
+                    known.version = at.version.0;
+                }
+            }
+            Some(false) => state.forget(folder),
+            None => {}
         }
     }
 
-    /// The server refused an upload into `folder` that carried the folder's shares: what is
-    /// added to it goes up without them for [`REFUSED`], or until the folder changes.
-    /// Whether the folder was known (else its shares are read again, and tried again).
-    pub(crate) fn refused(&self, folder: NodeId) -> bool {
+    /// The server refused an upload into `folder` that carried the shares `sent`: what is
+    /// added to it goes up without them for [`REFUSED`], or until the folder changes. Only
+    /// where `sent` is still what is known of the folder (whether it was): one read again
+    /// meanwhile shares what it shares now, which nothing refused.
+    pub(crate) fn refused(&self, folder: NodeId, sent: &Shares) -> bool {
         let mut state = self.state();
         let Some(known) = state.folders.get_mut(&folder) else {
             return false;
         };
+        if !Arc::ptr_eq(&known.shares, sent) {
+            return false;
+        }
         known.shares = Shares::default();
         known.learnt = At::now();
         known.refused = true;
         true
+    }
+
+    /// An upload into `folder` was refused without shares too: it wasn't for them that the
+    /// one before it was ([`Folders::refused`]). The folder is read, and shared, again.
+    pub(crate) fn not_for_its_shares(&self, folder: NodeId) {
+        let mut state = self.state();
+        if state
+            .folders
+            .get(&folder)
+            .is_some_and(|known| known.refused)
+        {
+            state.forget(folder);
+        }
     }
 
     /// The notifications named `file`, or the feed has a row of it that doesn't read: if it
@@ -316,8 +362,7 @@ impl Folders {
             state.forget(folder);
         }
         if let Some(reading) = &mut state.reading {
-            reading.overtaken |= reading.heard.len() >= TOLD;
-            reading.heard.push(file.0);
+            reading.told(|reading| &mut reading.heard, file.0);
         }
     }
 
@@ -336,33 +381,7 @@ impl Folders {
             state.forget(row.node);
         }
         if let Some(reading) = &mut state.reading {
-            reading.overtaken |= reading.fed.len() >= TOLD;
-            reading.fed.push(row.node);
-        }
-    }
-
-    /// A read of the feed begins: what [`Folders::feed_ended`] is given back.
-    pub(crate) fn feed_begins(&self) -> FeedRead {
-        FeedRead {
-            listening: self.state().listening,
-            began: Instant::now(),
-        }
-    }
-
-    /// The feed was read to its end, each row of a folder told ([`Folders::fed`]). Begun
-    /// [`SETTLED`] after the notifications' connection that is still up came up, it held
-    /// every change made before they listened: what is known now is as the drive has it,
-    /// and that connection vouches for it from here on.
-    pub(crate) fn feed_ended(&self, read: FeedRead) {
-        let mut state = self.state();
-        let (Some((connection, since)), Some(now)) = (read.listening, state.connection()) else {
-            return;
-        };
-        if connection != now || read.began.duration_since(since) < SETTLED {
-            return;
-        }
-        for known in state.folders.values_mut() {
-            known.listening = Some(connection);
+            reading.told(|reading| &mut reading.fed, row.node);
         }
     }
 }
@@ -419,15 +438,9 @@ pub(crate) mod tests {
         true
     }
 
-    /// The notifications connected long enough ago for a feed read begun now to vouch.
-    fn settled(folders: &Folders) -> bool {
-        let Some(since) = Instant::now().checked_sub(SETTLED) else {
-            return false;
-        };
-        if let Some((_, connected)) = &mut folders.state().listening {
-            *connected = since;
-        }
-        true
+    /// The read on its way answers that `folder` is the file `at`, shared as `shares`.
+    fn answer(folders: &Folders, folder: NodeId, at: RemoteRef, shares: Shares) {
+        folders.read(folder, Some((Some(at), shares)));
     }
 
     #[test]
@@ -437,7 +450,7 @@ pub(crate) mod tests {
         let shares: Shares = Arc::from([share(7, None)]);
         assert_eq!(folders.known(a), None);
         folders.reading();
-        folders.read(a, at(100, 10), Arc::clone(&shares));
+        answer(&folders, a, at(100, 10), Arc::clone(&shares));
         folders.made(b, at(200, 20), Shares::default());
         assert_eq!(folders.known(a), Some(Arc::clone(&shares)));
         assert_eq!(folders.known(b).map(|s| s.len()), Some(0));
@@ -452,14 +465,28 @@ pub(crate) mod tests {
         assert_eq!(folders.known(a), None);
         folders.fed(fed(b, 21, true));
         assert_eq!(folders.known(b), None);
+    }
 
-        // This computer's own write of a known folder: its new version coming back is no news.
-        folders.made(b, at(200, 20), Shares::default());
-        folders.rewritten(b, at(200, 23));
-        folders.fed(fed(b, 23, true));
-        assert!(folders.known(b).is_some());
+    /// This computer's own write of a folder is no news in the feed, where the
+    /// notifications heard every change of the folder so far; else the folder is read
+    /// again: a share's change they missed moved `updated` as this write does.
+    #[test]
+    fn a_folder_written_here_stays_known_only_where_all_was_heard() {
+        let folders = Folders::default();
+        let (a, b) = (node(1), node(2));
+        folders.made(a, at(100, 10), Shares::default());
         folders.rewritten(a, at(100, 11));
-        assert_eq!(folders.known(a), None, "not known: nothing to keep");
+        assert_eq!(folders.known(a), None, "learnt while they were down");
+        folders.listening(true);
+        folders.made(a, at(100, 10), Shares::default());
+        folders.rewritten(a, at(100, 11));
+        folders.fed(fed(a, 11, true));
+        assert!(folders.known(a).is_some());
+        folders.rewritten(b, at(200, 21));
+        assert_eq!(folders.known(b), None, "not known: nothing to keep");
+        folders.listening(false);
+        folders.rewritten(a, at(100, 12));
+        assert_eq!(folders.known(a), None, "the connection broke since");
     }
 
     #[test]
@@ -478,11 +505,13 @@ pub(crate) mod tests {
         assert!(folders.known(b).is_some());
         folders.heard(file(201));
         assert!(folders.known(b).is_none());
+        assert!(folders.state().by_file.is_empty());
     }
 
     /// A read isn't kept where something was told of its folder while it was on its way:
     /// by the notifications (they name its file, which only the read's answer ties to the
     /// folder), by the feed, or by the notifications connecting; nor a second answer.
+    /// What is told is kept for the read on its way alone, and no more than [`TOLD`].
     #[test]
     fn a_read_that_a_change_overtook_is_not_kept() {
         let folders = Folders::default();
@@ -491,7 +520,7 @@ pub(crate) mod tests {
         let read = |told: &dyn Fn(&Folders)| {
             folders.reading();
             told(&folders);
-            folders.read(a, at(100, 10), shares());
+            answer(&folders, a, at(100, 10), shares());
             let kept = folders.known(a).is_some();
             folders.state().forget(a);
             kept
@@ -503,16 +532,27 @@ pub(crate) mod tests {
         assert!(!read(&|f| f.fed(fed(a, 10, true))), "a feed row of it");
         assert!(!read(&|f| f.listening(true)), "connected meanwhile");
         assert!(!read(&|f| f.listening(false)), "the connection broke");
-        let many = |f: &Folders| (0..=TOLD as u128).for_each(|n| f.heard(file(1000 + n)));
+        let many = |f: &Folders| {
+            (0..=TOLD as u128).for_each(|n| f.heard(file(1000 + n)));
+            let state = f.state();
+            let told = state.reading.as_ref().map(|reading| reading.heard.len());
+            assert_eq!(told, Some(TOLD), "no more are kept");
+        };
         assert!(!read(&many), "more told than is kept");
-        // Without a read begun, an answer is nobody's.
-        folders.read(a, at(100, 10), shares());
+        // Without a read begun, an answer is nobody's; and nothing is kept of what is told.
+        answer(&folders, a, at(100, 10), shares());
         assert!(folders.known(a).is_none());
+        folders.heard(file(100));
+        assert!(folders.state().reading.is_none());
+        // A read that ended without an answer isn't on its way any more.
+        folders.reading();
+        folders.read(a, None);
+        assert!(folders.state().reading.is_none() && folders.known(a).is_none());
     }
 
     /// Learnt while the notifications are connected, a folder stays known for as long as
-    /// they are; learnt before, or once they broke, for [`KEPT`] by both clocks. A feed read
-    /// to its end, begun once the new connection settled, vouches for what is known again.
+    /// that connection holds and this computer doesn't sleep; learnt before, or once it
+    /// broke, for [`KEPT`] by both clocks.
     #[test]
     fn what_was_learnt_is_kept_while_a_change_would_be_told() {
         let folders = Folders::default();
@@ -530,52 +570,82 @@ pub(crate) mod tests {
         folders.listening(true);
         assert!(folders.known(b).is_none(), "another: something was missed");
 
-        // A feed read begun as they connect may lack what the feed still holds back.
-        folders.feed_ended(folders.feed_begins());
-        assert!(folders.known(b).is_none());
-        // One begun before another connection says nothing of this one.
-        assert!(settled(&folders));
-        let before = folders.feed_begins();
-        folders.listening(true);
-        assert!(settled(&folders));
-        folders.feed_ended(before);
-        assert!(folders.known(b).is_none());
-        // Begun once it settled, and read to its end: all that is known is as the drive is.
-        folders.feed_ended(folders.feed_begins());
-        assert!(folders.known(a).is_some() && folders.known(b).is_some());
+        // A sleep since (the wall clock ahead of the steady one): the connection heard
+        // nothing meanwhile, whatever it says now.
+        let slept = |by: Duration| {
+            folders.made(a, at(100, 10), Shares::default());
+            let wall = SystemTime::now().checked_sub(by).expect("past 1970");
+            for known in folders.state().folders.values_mut() {
+                known.learnt.1 = wall;
+            }
+            folders.known(a).is_some()
+        };
+        assert!(slept(SLEPT / 2), "the clocks' own drift");
+        assert!(
+            slept(SLEPT * 2),
+            "a nap: for the ten minutes, as when they are down"
+        );
+        assert!(!slept(KEPT + SLEPT * 2), "a night");
+    }
 
-        // The wall clock alone past it (a sleep, which the steady clock doesn't count).
-        folders.listening(false);
-        folders.made(a, at(100, 10), Shares::default());
-        assert!(folders.known(a).is_some());
-        let long_ago = SystemTime::now().checked_sub(KEPT + Duration::from_secs(1));
-        for known in folders.state().folders.values_mut() {
-            known.learnt.1 = long_ago.expect("a wall clock past 1970");
+    /// A folder whose row isn't there, or doesn't read, is kept as sharing nothing for
+    /// [`KEPT`], connected or not: the notifications can't name it, the feed can.
+    #[test]
+    fn a_folder_that_does_not_read_shares_nothing_for_a_while() {
+        let folders = Folders::default();
+        let a = node(1);
+        folders.listening(true);
+        folders.reading();
+        folders.read(a, Some((None, Shares::default())));
+        assert_eq!(folders.known(a).map(|s| s.len()), Some(0));
+        assert!(folders.state().by_file.is_empty());
+        folders.fed(fed(a, 10, true));
+        assert!(
+            folders.known(a).is_none(),
+            "a row of it in the feed: asked again"
+        );
+        folders.reading();
+        folders.read(a, Some((None, Shares::default())));
+        if aged(&folders, KEPT) {
+            assert!(folders.known(a).is_none(), "asked again");
         }
-        assert!(folders.known(a).is_none());
     }
 
     /// A folder whose shares the server refused gives none, connected or not, until it
-    /// changes or an hour passed.
+    /// changes or an hour passed; only where the shares refused are still what is known of
+    /// it. Refused without them too, it wasn't for the shares.
     #[test]
     fn a_folder_whose_shares_were_refused_gives_none_for_a_while() {
         let folders = Folders::default();
         let a = node(1);
-        assert!(!folders.refused(a), "not known: read again");
+        let sent: Shares = Arc::from([share(7, None)]);
+        assert!(!folders.refused(a, &sent), "not known: read again");
         folders.listening(true);
-        folders.made(a, at(100, 10), Arc::from([share(7, None)]));
-        assert!(folders.refused(a));
+        folders.made(a, at(100, 10), Arc::clone(&sent));
+        assert!(folders.refused(a, &sent));
         assert_eq!(folders.known(a).map(|s| s.len()), Some(0));
         if aged(&folders, REFUSED) {
             assert!(folders.known(a).is_none(), "tried again");
         }
-        folders.made(a, at(100, 10), Arc::from([share(7, None)]));
-        folders.refused(a);
+        folders.made(a, at(100, 10), Arc::clone(&sent));
+        folders.refused(a, &sent);
         folders.heard(file(100));
         assert!(
             folders.known(a).is_none(),
             "it changed: read and tried again"
         );
+
+        // Read again since the upload began: what it shares now wasn't refused.
+        let now: Shares = Arc::from([share(8, None)]);
+        folders.made(a, at(100, 10), Arc::clone(&now));
+        assert!(!folders.refused(a, &sent));
+        assert_eq!(folders.known(a), Some(Arc::clone(&now)));
+
+        folders.not_for_its_shares(a);
+        assert!(folders.known(a).is_some(), "not refused: left as it is");
+        assert!(folders.refused(a, &now));
+        folders.not_for_its_shares(a);
+        assert!(folders.known(a).is_none(), "read, and shared, again");
     }
 
     #[test]
@@ -592,7 +662,7 @@ pub(crate) mod tests {
         let mut state = folders.state();
         assert_eq!((state.folders.len(), state.by_file.len()), (1, 1));
         assert_eq!(state.full, 0, "few left: as many as before fill it again");
-        // Vouched for, none is dropped however long ago it was learnt.
+        // Heard all the while, none is dropped however long ago it was learnt.
         state.folders.clear();
         state.by_file.clear();
         drop(state);
@@ -609,8 +679,8 @@ pub(crate) mod tests {
 
     #[test]
     fn a_share_lasts_past_the_upload_or_is_not_given() {
-        let ends = share(1, Some(5_000_000_000));
         let end = 5_000_000_000;
+        let ends = share(1, Some(end));
         assert!(ends.lasts(end - ENDING - 1, 0));
         assert!(!ends.lasts(end - ENDING, 0), "about to end");
         // A file of a gigabyte is taken to need over half an hour.

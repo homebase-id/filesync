@@ -1004,26 +1004,36 @@ shares a folder writes the rows of what is in it then (**[verified]** chat-kmp
   withdrawn by another device, and a file added there 3 s later went up with no share,
   after one new read. So:
   - what was learnt while the notifications are connected is gone by for as long as that
-    connection holds;
-  - what was learnt otherwise, for 10 minutes at most (by the steady clock and the wall's:
-    a sleep counts): the feed is read every 5 minutes while they are down;
-  - after they connect again, what they missed is in the feed: once a feed read begun 2.5 s
-    after the connection (twice what the feed holds back) has reached its end, all that is
-    still known is as the drive has it, and gone by under the new connection. Until then
-    a folder added to is read again;
+    one connection holds, and this computer doesn't sleep (the wall clock running ahead of
+    the steady one tells, on Linux and macOS);
+  - what was learnt otherwise, or under an earlier connection, for 10 minutes at most by
+    both clocks: the feed is read every 5 minutes while they are down, and as they
+    connect. So each reconnect costs one read per folder added to afterwards;
   - a read is kept only if nothing was said of its folder while it was on its way (a
     notice of its file, a feed row of it, the notifications connecting);
+  - a folder this computer writes itself (a rename, a move) stays known only where the
+    notifications heard all since it was learnt: a share's change they missed moves
+    `updated` as that write does, and would pass for it in the feed;
   - a login's own writes aren't announced to it (`excludeOwnWrites`): a share written with
     this computer's own token isn't heard here (seen live; nothing of this client writes
     one, but with a new node).
   Of the uploads that go into one folder at once, one reads and the others wait for it.
 - **The file goes up whatever becomes of its shares.**
   - A share that doesn't read (its circle, its permissions or its end) isn't given, nor one
-    whose circle's key isn't to be had (none set, one that doesn't open): said in the log,
-    once per circle and run.
-  - An upload the server refuses with shares is sent again a few seconds later without
-    them (twice the bytes, once), and what is added to that folder goes up unshared for an
-    hour, or until the folder changes: said in the log. Nothing shares those files later.
+    whose circle's key isn't to be had: none set, one that doesn't open, or the server
+    refusing it. A circle deleted leaves its rows on the files, live, and its key is
+    refused with a 403 (**[verified]** odin-core `CircleDefinitionService.DeleteAsync`,
+    `GetCircleCallerMayManageAsync`): not this login's refusal. Said in the log, once per
+    circle and run.
+  - An upload the server refuses with shares, by a code a share is refused with (a 400
+    `argumentError`, `circleShareKeyNotSet`, `invalidShareKey`, or a 403), is sent again a
+    few seconds later without them (twice the bytes, once), and what is added to that
+    folder goes up unshared for an hour, or until the folder changes: said in the log.
+    Nothing shares those files later. Refused without them too, it wasn't for the shares:
+    the folder is read, and shared, again, and the refusal is what it is (the login's own
+    403 stops the sync as ever).
+  - A folder whose row isn't there, or doesn't read, is taken to share nothing for 10
+    minutes: said in the log.
   - How the folder is shared not read because the server isn't reached fails the upload as
     the upload itself would fail.
 - **Limits.**
@@ -1031,17 +1041,22 @@ shares a folder writes the rows of what is in it then (**[verified]** chat-kmp
     has: moved in, it reaches no member; moved out, it stays shared. Rows can't ride on an
     update: they are written and withdrawn on their own routes (`PUT /drives/{d}/shares`,
     `DELETE …/files/{id}/shares/{circleId}`), which this client doesn't use yet.
-  - A node added in the seconds between a share's change and its notice goes up as the
-    folder was shared before: one added just after a withdrawal stays shared, one added
-    just after a folder is first shared isn't (the app that shared wrote the rows of what
-    was there then). With the notifications down, until the feed is next read, 10 minutes
-    at most. A notice the server never sent isn't made up for while they stay connected
-    (as for any other change it didn't announce); nor is a change made while this computer
-    slept, in the seconds between its waking and the notifications connecting again.
+  - A file goes up shared as its folder was **when its upload began**: the server looks at
+    the shares once the bytes are in and writes them whatever became of the folder's
+    meanwhile. One added just before a withdrawal stays shared (for a large file, "just
+    before" is its whole upload: said in the log), and nothing here takes a share back
+    yet; one added just after a folder is first shared isn't shared (the app that shared
+    wrote the rows of what was there then).
+  - Before that, a share's change is known here once its notice came: seconds. With the
+    notifications down, once the feed is next read, 10 minutes at most. A notice the
+    server never sent isn't made up for while they stay connected (as for any other change
+    it didn't announce).
   - The folder's other circles get no row for what a **member** adds ("Writing to what
     others share").
   - What was learnt of the folders is this run's: after a start, the first add to each
     folder reads it again.
+  - A login that isn't the owning app's is sent no shares, and no error: it would add
+    everything unshared (this client's login is that app's).
 
 ## Conventions
 - camelCase JSON, enums as camelCase strings, bytes as standard base64, times as Unix ms.

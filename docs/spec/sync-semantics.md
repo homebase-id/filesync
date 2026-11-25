@@ -2096,11 +2096,12 @@ it tomorrow. So a computer of the owner's shares what it adds itself:
   for good is a new file, shared as its folder is then.
 - **The file goes up whatever becomes of its shares.** A share that can't be given (one
   that doesn't read, a circle's key not to be had, one that ends before the upload can be
-  up) is left out, and said in the log. An upload the server refuses with its shares is
-  sent again without them, and what is added to that folder goes up unshared for an hour,
-  or until the folder changes. Nothing shares such a file later; but it is on the drive.
-- **By what this computer last heard.** How a folder is shared is read when something is
-  first added to it, and gone by for as long as a change of it would be told: by the
-  notifications while they stay connected; else by the feed, 10 minutes at most. So a file
-  added within seconds of a share's withdrawal may go up shared all the same, and one added
+  up) is left out, and said in the log. An upload the server refuses for its shares is sent
+  again without them, and what is added to that folder goes up unshared for an hour, or
+  until the folder changes. Nothing shares such a file later; but it is on the drive.
+- **By what this computer last heard, as the upload begins.** How a folder is shared is
+  read when something is first added to it, and gone by for as long as a change of it
+  would be told: by the notifications while their one connection holds; else by the feed,
+  10 minutes at most. A file goes up shared as its folder was when its upload began: one
+  on its way while a share is withdrawn stays shared (said in the log), and one added
   within seconds of a folder first being shared may go up unshared.

@@ -493,7 +493,10 @@ pub(crate) struct SharedFolder {
 /// A folder's row of [`shares_query`], read for its shares alone, each row strictly: one
 /// whose circle, permissions or end doesn't read is counted, not guessed at (a share with
 /// an end that doesn't read would be given without one). A row with no `shares` at all has
-/// none: the server leaves them out on a drive that has no shares.
+/// none: the server sets them only on a Selective Share drive, for a caller that manages its
+/// shares (**[verified]** odin-core `DriveStorageServiceBase.AttachSharesAsync`), so a login
+/// that isn't the owning app's reads every folder as unshared, without an error to tell it
+/// by (this client's is that app's: **[verified]** live).
 pub(crate) fn shared_folder(row: &str) -> Result<SharedFolder, serde_json::Error> {
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase")]
