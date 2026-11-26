@@ -22,6 +22,7 @@ use crate::HomebaseError;
 use crate::crypto::{Key, WriteOnlyKey, aes_cbc_encrypt};
 use crate::drive::sealed::{KeyHeader, SealedKeyHeader, checked_sealed_len, iv16, sealed_len};
 use crate::drive::share_keys::CircleKey;
+use crate::drive::shared_as::{Fed, Share};
 
 pub(crate) const CONTENT_TYPE: &str = "application/octet-stream";
 
@@ -54,7 +55,8 @@ pub struct FileHeader {
     pub shared_secret_encrypted_key_header: Option<SealedKeyHeader>,
     /// To a member, the live shares the file reaches them through, by circle id: its key header
     /// is the first one's (**[verified]** odin-core `CallerShares.LiveRowsOf`,
-    /// `DriveFileUtility.CreateClientFileHeader`). None on this identity's own drive.
+    /// `DriveFileUtility.CreateClientFileHeader`). None on this identity's own drive, where
+    /// only a folder asked about with its shares has them, read strictly ([`shared_folder`]).
     #[serde(default, deserialize_with = "share_rows")]
     pub shares: Option<Vec<ShareRow>>,
 }
@@ -92,6 +94,31 @@ pub struct ShareRow {
     /// doesn't read.
     #[serde(default, deserialize_with = "permissions")]
     pub permissions: u32,
+}
+
+/// A share row's `permissions` read strictly ([`shared_folder`]): a number, or names this
+/// client knows every one of. A name it doesn't know fails the row, where [`permissions`]
+/// leaves the name out: a new file would be given less than its folder's row gives.
+fn all_permissions<'de, D>(d: D) -> Result<u32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error;
+    let sent = Value::deserialize(d)?;
+    let unknown = |name: &str| D::Error::custom(format!("a permission not known: {name:?}"));
+    match &sent {
+        Value::Number(n) => {
+            (n.as_u64().and_then(|n| u32::try_from(n).ok())).ok_or_else(|| unknown(&n.to_string()))
+        }
+        Value::String(names) => names.split(',').try_fold(0, |all, name| {
+            let flags = permissions(json!(name.trim())).map_err(|_| unknown(name))?;
+            // (No bits: a name [`permissions`] doesn't know. The server names no flag so.)
+            (flags != 0)
+                .then_some(all | flags)
+                .ok_or_else(|| unknown(name))
+        }),
+        other => Err(unknown(&other.to_string())),
+    }
 }
 
 /// A share row's `permissions` as odin-core's `DrivePermission` flags ([`crate::app`]'s
@@ -316,7 +343,7 @@ pub(crate) fn cursor_time(cursor: &str) -> Option<i64> {
 }
 
 /// One row of a minimal `query-batch` page (odin-core #1967 `QueryBatchFileRef`, **[verified]**):
-/// the fields the client reads; the others (created, uniqueId, …) are skipped.
+/// the fields the client reads; the others (created, …) are skipped.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FileRef {
@@ -327,6 +354,9 @@ pub struct FileRef {
     pub archival_status: i32,
     /// The parent node, as the header's: omitted when empty.
     pub group_id: Option<Uuid>,
+    /// The node, as the header's `uniqueId`.
+    #[serde(default)]
+    pub unique_id: Option<Uuid>,
     /// Unix ms, as the header's `updated` (read as that one is); `None` if the row doesn't
     /// say.
     #[serde(default)]
@@ -341,6 +371,13 @@ pub struct FileRef {
 }
 
 impl FileRef {
+    /// What the row says of its folder's shares ([`Fed`]): none for a row that isn't a
+    /// folder's.
+    pub(crate) fn fed(&self) -> Option<Fed> {
+        let node = (self.unique_id).filter(|_| self.file_type == Some(FILE_TYPE_FOLDER));
+        Fed::of(node, self.version_tag, self.updated, self.version_updated)
+    }
+
     /// Whether the row is another app's file, not a sync node (its type says so).
     pub(crate) fn not_a_node(&self) -> bool {
         self.file_type.is_some_and(|t| !node_type(t))
@@ -462,6 +499,85 @@ pub(crate) fn query(
 pub fn feed_query(cursor: Option<&str>, limit: usize, shape: Shape) -> Value {
     let params = json!({ "fileType": [FILE_TYPE_FOLDER, FILE_TYPE_FILE] });
     query(params, cursor, limit, shape, Order::Changes)
+}
+
+/// A folder of this identity's own drive, as far as its shares go ([`shared_folder`]).
+#[derive(Debug)]
+pub(crate) struct SharedFolder {
+    pub at: RemoteRef,
+    /// Deleted for good: its tombstone still lists the rows it had (**[verified]** live).
+    pub deleted: bool,
+    /// The live shares that read: its manager is sent the live rows alone (**[verified]**
+    /// odin-core `DriveStorageServiceBase.AttachSharesAsync`), and one without the right to
+    /// read is a withdrawn one.
+    pub shares: Vec<Share>,
+    /// The rows that don't read: not given to what is added to the folder.
+    pub unread: usize,
+}
+
+/// A folder's row of [`shares_query`], read for its shares alone, each row strictly: one
+/// whose circle, permissions or end doesn't read is counted, not guessed at (a share with
+/// an end that doesn't read would be given without one). A row with no `shares` at all has
+/// none: the server sets them only on a Selective Share drive, for a caller that manages its
+/// shares (**[verified]** odin-core `DriveStorageServiceBase.AttachSharesAsync`), so a login
+/// that isn't the owning app's reads every folder as unshared, without an error to tell it
+/// by (this client's is that app's: **[verified]** live).
+pub(crate) fn shared_folder(row: &str) -> Result<SharedFolder, serde_json::Error> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Row {
+        file_id: Uuid,
+        file_state: String,
+        file_metadata: Meta,
+        #[serde(default)]
+        shares: Option<Vec<Value>>,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Meta {
+        version_tag: Uuid,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Shared {
+        circle_id: Uuid,
+        #[serde(deserialize_with = "all_permissions")]
+        permissions: u32,
+        #[serde(default)]
+        expires_at: Option<i64>,
+    }
+    let row: Row = serde_json::from_str(row)?;
+    let rows = row.shares.unwrap_or_default();
+    let read: Vec<Shared> = (rows.iter())
+        .filter_map(|row| Shared::deserialize(row).ok())
+        .collect();
+    let unread = rows.len() - read.len();
+    let shares = (read.into_iter())
+        .filter(|share| share.permissions & crate::app::READ != 0)
+        .map(|share| Share {
+            circle: share.circle_id,
+            permissions: share.permissions,
+            expires_at: share.expires_at,
+        })
+        .collect();
+    Ok(SharedFolder {
+        at: RemoteRef {
+            file_id: RemoteFileId(row.file_id),
+            version: VersionTag(row.file_metadata.version_tag),
+        },
+        deleted: row.file_state == "deleted",
+        shares,
+        unread,
+    })
+}
+
+/// The `query-batch` body for the folder `node` alone, with its live shares (`includeShares`:
+/// **[verified]** odin-core `QueryBatchResultOptionsRequest`, chat-kmp `FilesyncSharing.inherit`).
+pub(crate) fn shares_query(node: NodeId) -> Value {
+    json!({
+        "queryParams": { "clientUniqueIdAtLeastOne": [node.0], "fileType": [FILE_TYPE_FOLDER] },
+        "resultOptionsRequest": { "maxRecords": 1, "includeShares": true },
+    })
 }
 
 /// The `query-batch` body for a page of the active files in `folders` (their `groupId`), of
@@ -599,6 +715,14 @@ where
 }
 
 impl FileHeader {
+    /// What the header says of its folder's shares ([`Fed`]), as its slim row does
+    /// ([`FileRef::fed`]): none for one that isn't a folder's.
+    pub(crate) fn fed(&self) -> Option<Fed> {
+        let (meta, app) = (&self.file_metadata, &self.file_metadata.app_data);
+        let node = (app.unique_id).filter(|_| app.file_type == FILE_TYPE_FOLDER);
+        Fed::of(node, meta.version_tag, meta.updated, meta.version_updated)
+    }
+
     /// The file key and header IV, opened with `keys`. Every node is encrypted.
     pub(crate) fn key(&self, keys: Keys<'_>) -> Result<KeyHeader, HomebaseError> {
         if !self.file_metadata.is_encrypted {
@@ -818,12 +942,16 @@ pub(crate) fn instructions(
 /// Homebase replaces the whole header on update, so every field is always sent: node id,
 /// parent, kind, content, and the owner-only ACL. The file is encrypted: its `key` sealed with
 /// the shared secret (locked with the drive's key on a private drive), the content with the key.
+/// A new file in a shared folder goes up `shared` as the folder is ([`NewShares`]): the
+/// server writes the header and its shares as one (**[verified]** odin-core
+/// `StandardFileStreamWriter.ProcessNewFileUpload`), and refuses shares on any other write.
 pub(crate) fn metadata(
     meta: &NodeMeta,
     version: Option<VersionTag>,
     keys: Keys<'_>,
     transfer_iv: &[u8; 16],
     key: &KeyHeader,
+    shared: Option<&NewShares>,
 ) -> Vec<u8> {
     let key_header = match keys.drive {
         Some(drive_key) => key.lock(drive_key),
@@ -831,8 +959,27 @@ pub(crate) fn metadata(
     };
     // Owner-only, and not sent on: every write of the owner's own computers (a share lifts
     // the group, on the server).
-    let plain = descriptor(meta, version, key, key_header, "owner", false);
+    let mut plain = descriptor(meta, version, key, key_header, "owner", false);
+    if let Some(shared) = shared {
+        shared.sent_with(&mut plain);
+    }
     aes_cbc_encrypt(keys.shared, transfer_iv, plain.to_string().as_bytes())
+}
+
+/// The shares a new file goes up with ([`share_of_new`]), and the global transit id picked
+/// for it, which its keys are locked to: it has no file id yet.
+#[derive(Debug)]
+pub(crate) struct NewShares {
+    pub global_transit_id: Uuid,
+    pub shares: Vec<Value>,
+}
+
+impl NewShares {
+    /// Named in a new file's descriptor `plain`.
+    fn sent_with(&self, plain: &mut Value) {
+        plain["shares"] = json!(self.shares);
+        plain["globalTransitId"] = json!(self.global_transit_id);
+    }
 }
 
 /// The identity's transient temp drive (its alias and its type): where its server stages
@@ -890,15 +1037,20 @@ pub(crate) fn deposit_instructions(
     instructions
 }
 
-/// One share of a new file, as its adder sends it along: as `row` shares the folder it goes
-/// into (the same circle, permissions and end), with the file's key `locked` under that
+/// One share of a new file, as its adder sends it along: as the folder it goes into is shared
+/// with `circle` (the same `permissions` and end), with the file's key `locked` under that
 /// circle's key ([`CircleKey::lock_file_key`]). The file has no id yet.
-pub(crate) fn share_of_new(row: &ShareRow, circle: Uuid, locked: &[u8]) -> Value {
+pub(crate) fn share_of_new(
+    circle: Uuid,
+    permissions: u32,
+    expires_at: Option<i64>,
+    locked: &[u8],
+) -> Value {
     json!({
         "fileId": Uuid::nil(),
         "circleId": circle,
-        "permissions": row.permissions,
-        "expiresAt": row.expires_at,
+        "permissions": permissions,
+        "expiresAt": expires_at,
         "lockedFileKey": STANDARD.encode(locked),
     })
 }
@@ -912,12 +1064,10 @@ pub(crate) fn deposit(
     transfer_iv: &[u8; 16],
     key: &KeyHeader,
     key_header: Value,
-    global_transit_id: Uuid,
-    shares: Vec<Value>,
+    shares: &NewShares,
 ) -> Vec<u8> {
     let mut plain = descriptor(meta, None, key, key_header, "owner", true);
-    plain["shares"] = json!(shares);
-    plain["globalTransitId"] = json!(global_transit_id);
+    shares.sent_with(&mut plain);
     aes_cbc_encrypt(shared_secret, transfer_iv, plain.to_string().as_bytes())
 }
 
@@ -1070,7 +1220,7 @@ mod tests {
             removed: false,
         };
         let transfer_iv = sealed::strong()?;
-        let sent = metadata(&meta, None, private, &transfer_iv, &kh);
+        let sent = metadata(&meta, None, private, &transfer_iv, &kh, None);
         let plain: Value = serde_json::from_slice(&aes_cbc_decrypt(&SS, &transfer_iv, &sent)?)?;
         let key: SealedKeyHeader = serde_json::from_value(plain["encryptedKeyHeader"].clone())?;
         assert!(key.locked_with_drive_key());
@@ -1614,7 +1764,7 @@ mod tests {
             "circleId": Uuid::new_v4(), "permissions": "readWrite", "expiresAt": 5_000,
         }))?;
         let circle = row.circle_id.ok_or("circle")?;
-        let share = share_of_new(&row, circle, b"locked");
+        let share = share_of_new(circle, row.permissions, row.expires_at, b"locked");
         assert_eq!(share["fileId"], json!(Uuid::nil()));
         assert_eq!(share["circleId"], json!(circle));
         assert_eq!(
@@ -1632,15 +1782,11 @@ mod tests {
         };
         let gtid = Uuid::new_v4();
         let key_header = json!({ "type": "sealed" });
-        let sealed = deposit(
-            &meta,
-            &SS,
-            &transfer_iv,
-            &kh,
-            key_header.clone(),
-            gtid,
-            vec![share.clone()],
-        );
+        let shares = NewShares {
+            global_transit_id: gtid,
+            shares: vec![share.clone()],
+        };
+        let sealed = deposit(&meta, &SS, &transfer_iv, &kh, key_header.clone(), &shares);
         let plain: Value = serde_json::from_slice(&aes_cbc_decrypt(&SS, &transfer_iv, &sealed)?)?;
         assert_eq!(plain["encryptedKeyHeader"], key_header);
         assert_eq!(plain["globalTransitId"], json!(gtid));
@@ -1650,6 +1796,145 @@ mod tests {
         assert_eq!(file["accessControlList"]["requiredSecurityGroup"], "owner");
         assert_eq!(file["versionTag"], Value::Null);
         assert_eq!(file["appData"]["fileType"], FILE_TYPE_FOLDER);
+        Ok(())
+    }
+
+    /// A new node in a shared folder goes up with its shares and the global transit id its
+    /// keys are locked to; any other write names neither (the server refuses them there).
+    #[test]
+    fn a_new_node_goes_up_with_the_shares_it_is_given() -> R {
+        let transfer_iv = [7u8; 16];
+        let kh = KeyHeader::random()?;
+        let meta = NodeMeta {
+            node: NodeId::new(),
+            parent: NodeId::new(),
+            kind: NodeKind::File,
+            content: NodeContent::file("added.txt", 1, 1, false),
+            removed: false,
+        };
+        let open = |sealed: Vec<u8>| -> Result<Value, Box<dyn std::error::Error>> {
+            let plain = aes_cbc_decrypt(&SS, &transfer_iv, &sealed)?;
+            Ok(serde_json::from_slice(&plain)?)
+        };
+        let share = share_of_new(Uuid::from_u128(9), 3, None, b"locked");
+        let shared = NewShares {
+            global_transit_id: Uuid::from_u128(4),
+            shares: vec![share.clone()],
+        };
+        let plain = open(metadata(
+            &meta,
+            None,
+            SHARED,
+            &transfer_iv,
+            &kh,
+            Some(&shared),
+        ))?;
+        assert_eq!(plain["shares"], json!([share]));
+        assert_eq!(plain["globalTransitId"], json!(Uuid::from_u128(4)));
+        // As any write of the owner's: its group is lifted by the shares, on the server.
+        let file = &plain["fileMetadata"];
+        assert_eq!(file["accessControlList"]["requiredSecurityGroup"], "owner");
+        assert_eq!(file["allowDistribution"], false);
+
+        let plain = open(metadata(&meta, None, SHARED, &transfer_iv, &kh, None))?;
+        let sent = plain.as_object().ok_or("an object")?;
+        assert!(!sent.contains_key("shares") && !sent.contains_key("globalTransitId"));
+        Ok(())
+    }
+
+    /// A folder's shares are read strictly: the live ones that read are its shares, a
+    /// withdrawn one is none, and one that doesn't read is counted, never guessed at.
+    #[test]
+    fn a_folders_shares_are_read_strictly() -> R {
+        const FILE: &str = "11111111-1111-1111-1111-111111111111";
+        const VERSION: &str = "22222222-2222-2222-2222-222222222222";
+        let circle = |n: u128| Uuid::from_u128(n);
+        let folder = |state: &str, shares: Value| {
+            let row = json!({
+                "fileId": FILE, "fileState": state, "shares": shares,
+                "fileMetadata": { "versionTag": VERSION, "appData": { "content": 7 } },
+            });
+            shared_folder(&row.to_string())
+        };
+        let read = folder(
+            "active",
+            json!([
+                { "circleId": circle(1), "permissions": "readWrite", "expiresAt": 5_000 },
+                { "circleId": circle(2), "permissions": "read", "expiresAt": null },
+                { "circleId": circle(3), "permissions": 1 },
+                // Withdrawn: no bits.
+                { "circleId": circle(4), "permissions": 0 },
+                // These don't read: an end that isn't a time, no circle, no permissions, a
+                // permission this client doesn't know.
+                { "circleId": circle(5), "permissions": "read", "expiresAt": "soon" },
+                { "circleId": "x", "permissions": "read" },
+                { "circleId": circle(6) },
+                { "circleId": circle(7), "permissions": "read, someLaterOne" },
+                { "circleId": circle(8), "permissions": null },
+                "a row",
+            ]),
+        )?;
+        assert_eq!(
+            (read.at.file_id.0, read.at.version.0),
+            (FILE.parse()?, VERSION.parse()?)
+        );
+        assert!(!read.deleted);
+        let shares: Vec<_> = (read.shares.iter())
+            .map(|s| (s.circle, s.permissions, s.expires_at))
+            .collect();
+        assert_eq!(
+            shares,
+            [
+                (circle(1), 15, Some(5_000)),
+                (circle(2), 1, None),
+                (circle(3), 1, None)
+            ]
+        );
+        assert_eq!(read.unread, 6);
+        // No shares at all on the row: none, and nothing unread.
+        let none = folder("active", Value::Null)?;
+        assert!(none.shares.is_empty() && none.unread == 0);
+        assert!(folder("deleted", json!([]))?.deleted);
+        assert!(shared_folder("{}").is_err(), "not a folder's row");
+        Ok(())
+    }
+
+    /// What a feed row says of a folder's shares, slim and whole alike: a folder as it was
+    /// written, one changed since (a share given or withdrawn moves `updated` alone), and
+    /// nothing for a file's row or one that doesn't name its node.
+    #[test]
+    fn a_feed_row_says_whether_a_folder_is_as_it_was_written() -> R {
+        const NODE: &str = "33333333-3333-3333-3333-333333333333";
+        const VERSION: &str = "22222222-2222-2222-2222-222222222222";
+        let slim = |file_type: i32, updated: Option<i64>, node: Option<&str>| {
+            let row = json!({
+                "fileId": "11111111-1111-1111-1111-111111111111", "fileState": "active",
+                "fileType": file_type, "versionTag": VERSION, "uniqueId": node,
+                "updated": updated, "versionUpdated": 9,
+            });
+            serde_json::from_value::<FileRef>(row).map(|row| row.fed())
+        };
+        let whole = |file_type: i32, updated: Option<i64>, node: Option<&str>| {
+            let row = json!({
+                "fileId": "11111111-1111-1111-1111-111111111111", "fileState": "active",
+                "fileMetadata": {
+                    "versionTag": VERSION, "updated": updated, "versionUpdated": 9,
+                    "appData": { "uniqueId": node, "fileType": file_type, "content": "x" },
+                },
+            });
+            serde_json::from_value::<FileHeader>(row).map(|row| row.fed())
+        };
+        let (node, version): (Uuid, Uuid) = (NODE.parse()?, VERSION.parse()?);
+        let said = |fed: Option<Fed>| fed.map(|f| (f.node.0, f.version, f.as_written));
+        for (updated, as_written) in [(Some(9), true), (Some(12), false), (None, false)] {
+            let folder = Some((node, version, as_written));
+            assert_eq!(said(slim(FILE_TYPE_FOLDER, updated, Some(NODE))?), folder);
+            assert_eq!(said(whole(FILE_TYPE_FOLDER, updated, Some(NODE))?), folder);
+        }
+        assert_eq!(said(slim(FILE_TYPE_FILE, Some(12), Some(NODE))?), None);
+        assert_eq!(said(whole(FILE_TYPE_FILE, Some(12), Some(NODE))?), None);
+        assert_eq!(said(slim(FILE_TYPE_FOLDER, Some(12), None)?), None);
+        assert_eq!(said(whole(FILE_TYPE_FOLDER, Some(12), None)?), None);
         Ok(())
     }
 
@@ -1739,7 +2024,7 @@ mod tests {
             removed: false,
         };
         let version = VersionTag(Uuid::from_u128(5));
-        let sealed = metadata(&meta, Some(version), SHARED, &transfer_iv, &kh);
+        let sealed = metadata(&meta, Some(version), SHARED, &transfer_iv, &kh, None);
         let plain: Value = serde_json::from_slice(&aes_cbc_decrypt(&SS, &transfer_iv, &sealed)?)?;
         let file = &plain["fileMetadata"];
         assert_eq!(file["isEncrypted"], true);
@@ -1754,7 +2039,7 @@ mod tests {
             removed: true,
             ..meta.clone()
         };
-        let sealed_gone = metadata(&gone, Some(version), SHARED, &transfer_iv, &kh);
+        let sealed_gone = metadata(&gone, Some(version), SHARED, &transfer_iv, &kh, None);
         let plain_gone: Value =
             serde_json::from_slice(&aes_cbc_decrypt(&SS, &transfer_iv, &sealed_gone)?)?;
         let app_gone = &plain_gone["fileMetadata"]["appData"];

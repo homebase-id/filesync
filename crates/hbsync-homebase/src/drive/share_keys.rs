@@ -10,6 +10,8 @@ use crate::crypto::{Key, WriteOnlyKey, gcm_open, gcm_seal, key_of, random};
 
 /// The `ZkSeal` version of a sealed circle key.
 const SEALED_VERSION: u8 = 2;
+/// The format of a circle key locked with its app's key.
+const LOCKED_VERSION: u8 = 2;
 /// The format of a locked file key bound to its file id.
 const BY_FILE_ID: u8 = 2;
 /// The format of a locked file key bound to its global transit id (one a member added, whose
@@ -52,6 +54,35 @@ impl CircleKey {
         let mut aad = circle.to_bytes_le().to_vec();
         aad.extend_from_slice(member.to_ascii_lowercase().as_bytes());
         let opened = write_only.unseal(sealed, SEALED_VERSION, &aad)?;
+        Ok(CircleKey {
+            key: Zeroizing::new(key_of(&opened, "a circle's key")?),
+            circle,
+            drive,
+        })
+    }
+
+    /// The key of `circle`, one of this identity's own, as its server keeps it for the app
+    /// that owns the circle (`appKeyLockedShareKey`): `format ‖ nonce (12) ‖ ciphertext (16) ‖
+    /// tag (16)` under the app's zero-knowledge key, bound to the circle (**[verified]**
+    /// odin-core's golden vector `SelectiveShareKeyVectorTests`, chat-kmp
+    /// `ShareKeys.openCircleKey`). `drive` is this identity's drive the circle shares.
+    pub(crate) fn own(
+        locked: &[u8],
+        app_key: &Key,
+        circle: Uuid,
+        drive: Uuid,
+    ) -> Result<CircleKey, HomebaseError> {
+        if locked.len() != 1 + 12 + 16 + 16 || locked[0] != LOCKED_VERSION {
+            return Err(HomebaseError::Protocol(
+                "a circle's locked key: not 45 bytes of format 2".into(),
+            ));
+        }
+        let opened = gcm_open(
+            app_key,
+            &locked[1..13],
+            &locked[13..],
+            &circle.to_bytes_le(),
+        )?;
         Ok(CircleKey {
             key: Zeroizing::new(key_of(&opened, "a circle's key")?),
             circle,
@@ -138,6 +169,10 @@ pub(crate) mod tests {
     pub(crate) const GTID: &str = "12345678-9abc-def0-1234-56789abcdef0";
     pub(crate) const CIRCLE: &str = "bbbbbbbb-cccc-dddd-eeee-ffffffffffff";
     pub(crate) const MEMBER: &str = "Sam.DotYou.Cloud";
+    /// The app's zero-knowledge key of the vectors, and [`CIRCLE`]'s key locked with it.
+    pub(crate) const APP_KEY: &str = "QEFCQ0RFRkdISUpLTE1OTw==";
+    pub(crate) const LOCKED_CIRCLE_KEY: &str =
+        "AmBhYmNkZWZnaGlqa8AlHXzCApsgaEfKX1KFpSBA7DLsgycVGxPm/K9OaD6A";
     pub(crate) const LOCKED: &str = "AlBRUlNUVVZXWFlaWyNALFXaUVoKLLDbDk0g5bIydyRsCSpKQjTVXgru8mq5";
     pub(crate) const LOCKED_BY_GTID: &str =
         "A1BRUlNUVVZXWFlaWyNALFXaUVoKLLDbDk0g5bID6/ZsXceCKma5R4GJLiTG";
@@ -212,6 +247,33 @@ pub(crate) mod tests {
         assert!(unseal_with(&key, "säm.dotyou.cloud").is_err());
         let other_circle = CircleKey::unseal(&bytes(SEALED), &key, id(FILE), id(DRIVE), MEMBER);
         assert!(other_circle.is_err());
+    }
+
+    /// odin-core `SelectiveShareKeyVectorTests.AnAppKeyLockedShareKeyIsTheCircleKeyUnderTheAppsKey`.
+    #[test]
+    fn a_circles_key_opens_with_the_apps_key() {
+        let app_key = key_of(&bytes(APP_KEY), "vector").expect("16 bytes");
+        let locked = bytes(LOCKED_CIRCLE_KEY);
+        let own =
+            |locked: &[u8], circle: &str| CircleKey::own(locked, &app_key, id(circle), id(DRIVE));
+        let opened = own(&locked, CIRCLE).expect("opens");
+        assert_eq!(STANDARD.encode(*opened.key), CIRCLE_KEY);
+        // What it locks, the member's sealed copy of the key opens.
+        let file_key = key_of(&bytes(FILE_KEY), "vector").expect("16 bytes");
+        let row = opened.lock_file_key(&file_key, id(GTID)).expect("locks");
+        let member = WriteOnlyKey::from_pkcs8(&bytes(WRITE_ONLY_PKCS8)).expect("pkcs8");
+        let theirs = unseal_with(&member, MEMBER).expect("opens");
+        assert_eq!(
+            theirs
+                .file_key(&row, id(FILE), Some(id(GTID)))
+                .expect("opens"),
+            file_key
+        );
+        assert!(own(&locked, FILE).is_err(), "another circle's");
+        assert!(own(&locked[..44], CIRCLE).is_err(), "cut short");
+        let mut other_format = locked.clone();
+        other_format[0] = 3;
+        assert!(own(&other_format, CIRCLE).is_err(), "another format");
     }
 
     #[test]

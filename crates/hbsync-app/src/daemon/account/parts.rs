@@ -148,7 +148,7 @@ impl AccountParts {
         events: impl Into<Events>,
     ) -> Result<Self, RunnerError> {
         let drive = Self::open_drive(identity, Arc::clone(&remote), db)?;
-        let notifier = Notifier::spawn(remote.client().clone(), remote.drive(), events);
+        let notifier = remote.notifier(events);
         Ok(AccountParts {
             notifier,
             notifications: Notifications::new(Puller::spawn(Arc::clone(&drive)), Instant::now()),

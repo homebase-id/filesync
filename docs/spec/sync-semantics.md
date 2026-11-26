@@ -988,6 +988,9 @@ here (or put up anew, if edited). That takes proof (`hbsync-engine/src/gone.rs`)
    it and withdrawn one by one, converges to what is shared with it (an item without its
    folder at the top, one of a name kept where names meet there), never writes, and plans
    the same on the engine's path over the state DB, also in pages and through crashes.
+   What a computer of the owner's adds to a shared folder is shared as that folder is, with
+   the write itself (§13, "What the owner's computer adds"): the member converges to that
+   too.
 
 ## 10. Filters
 
@@ -2074,3 +2077,31 @@ rules hold too:
     folders at the top against 10 ms on an own drive; 132 ms where all 100,000 rows are at
     the top for want of their folders);
   - a folder arriving marks what the mirror holds in it dirty (one indexed read).
+
+### What the owner's computer adds
+
+A share is given file by file (above): a folder shared today doesn't share what goes into
+it tomorrow. So a computer of the owner's shares what it adds itself:
+
+- **A node made in a shared folder is shared as that folder is**, with the write that makes
+  it: the same people, for reading or editing, until the same time. A folder made there
+  shares what goes into it the same way. Nothing is asked at the top of the drive, where
+  nothing is shared (`HomebaseRemote::shares_of_new`; API notes, "Sharing what this
+  identity's computer adds"; the fake's `FakeServer::shared_as`, contract
+  `the_sharer_adds_to_a_shared_folder`; the simulator's server shares a new file as its
+  folder is, `Server::share_as_its_folder`, and its member converges to that).
+- **Only the making shares.** A node moved into a shared folder isn't shared by the move,
+  and one moved out stays shared: the shares don't follow a move yet. A node put back from
+  Recently deleted, or written again, keeps the shares it has; one made again after it went
+  for good is a new file, shared as its folder is then.
+- **The file goes up whatever becomes of its shares.** A share that can't be given (one
+  that doesn't read, a circle's key not to be had, one that ends before the upload can be
+  up) is left out, and said in the log. An upload the server refuses for its shares is sent
+  again without them, and what is added to that folder goes up unshared for an hour, or
+  until the folder changes. Nothing shares such a file later; but it is on the drive.
+- **By what this computer last heard, as the upload begins.** How a folder is shared is
+  read when something is first added to it, and gone by for as long as a change of it
+  would be told: by the notifications while their one connection holds; else by the feed,
+  10 minutes at most. A file goes up shared as its folder was when its upload began: one
+  on its way while a share is withdrawn stays shared (said in the log), and one added
+  within seconds of a folder first being shared may go up unshared.

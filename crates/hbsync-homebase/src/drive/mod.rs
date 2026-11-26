@@ -5,12 +5,15 @@
 //! Facts: `docs/spec/homebase-api-notes.md`.
 
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::ops::Range;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
 
 use hbsync_fileio::{HashAlgorithm, Hasher};
 use hbsync_remote::{
@@ -19,7 +22,7 @@ use hbsync_remote::{
 };
 use hbsync_types::schema::{ARCHIVAL_REMOVED, NodeContent, PAYLOAD_KEY};
 use hbsync_types::{
-    ContentHash, Doomed, NodeId, RemoteFileId, RemoteRef, Target, VersionTag, Written,
+    ContentHash, Doomed, NodeId, NodeKind, RemoteFileId, RemoteRef, Target, VersionTag, Written,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -31,7 +34,9 @@ use crate::drive::sealed::{
     CipherRange, Decrypting, Encrypting, KeyHeader, SealedKeyHeader, sealed_len,
 };
 use crate::drive::share_keys::CircleKey;
+use crate::drive::shared_as::{Folders, Shares};
 use crate::multipart::{Multipart, Part, SourceEnded};
+use crate::notify::{Event, Events, Notifier};
 use crate::peer::{PeerToken, SealedKey};
 use crate::{ApiError, HomebaseError, app};
 
@@ -39,6 +44,7 @@ pub mod markers;
 pub mod sealed;
 mod share_keys;
 pub mod shared;
+mod shared_as;
 pub mod wire;
 
 use wire::Keys;
@@ -60,6 +66,11 @@ const UNLISTED: &str = "your Homebase cloud doesn't hand this app its private dr
 /// what others share, and the owner hasn't given it since ([`app::update_url`]).
 const NOT_PERMITTED: &str = "your Homebase cloud hasn't given Filesync the permission to read what \
                              others share with you yet";
+
+/// The most shares one request takes, an upload's too (**[verified]** odin-core
+/// `DriveShareService.MaxSharesPerRequest`): a file whose folder has more goes up with so
+/// many of them.
+const MOST_SHARES: usize = 100;
 
 /// Why nothing shared opens: this identity's drive has no write-only key that opens, which
 /// sharers seal their circles' keys to.
@@ -118,6 +129,15 @@ pub struct HomebaseRemote {
     /// Held by whoever asks whether the app may send ([`HomebaseRemote::may_send`]): one
     /// asks, and the rest go by its answer.
     sends_asking: Mutex<()>,
+    /// How the folders this computer adds to are shared ([`HomebaseRemote::shared_as`]).
+    folders: Folders,
+    /// Held by whoever reads how a folder is shared, or a circle's key: of the uploads that
+    /// go into one folder at once, one reads, and the rest go by what it learnt.
+    shares_reading: Mutex<()>,
+    /// The keys of this identity's own circles, each read once ([`HomebaseRemote::own_circle`]):
+    /// a circle's key is set once and stays (**[verified]** odin-core
+    /// `CircleShareKeyAlreadySet`). None: one that isn't to be had in this run.
+    circles: Mutex<HashMap<Uuid, Option<Arc<CircleKey>>>>,
 }
 
 /// How [`read_pages`] ended.
@@ -568,6 +588,9 @@ impl HomebaseRemote {
             made: answer.created,
             drive_key: DriveKey(Mutex::new(state)),
             sends_asking: Mutex::default(),
+            folders: Folders::default(),
+            shares_reading: Mutex::default(),
+            circles: Mutex::default(),
         })
     }
 
@@ -835,7 +858,8 @@ impl HomebaseRemote {
             check_size(p.size)?;
         }
         let at = target.map(|t| t.at);
-        let look_first = payload.as_ref().is_some_and(|p| p.size >= LOOK_FIRST);
+        let size = payload.as_ref().map_or(0, |p| p.size);
+        let look_first = size >= LOOK_FIRST;
         let key = match target {
             None => KeyHeader::random().map_err(remote_error)?,
             Some(t) => self.update_key(t, look_first)?,
@@ -849,7 +873,15 @@ impl HomebaseRemote {
             target.is_some(),
         );
         let drive = self.drive_key(false)?;
-        let metadata = wire::metadata(meta, version, self.keys(drive.as_ref()), &transfer_iv, &key);
+        // A new node only: a write of one that is there keeps its shares as they are. And on
+        // a private drive only: shares are a Selective Share drive's, which is one.
+        let shared = match (target, &drive) {
+            (None, Some(_)) => self.shares_of_new(meta, &key, size)?,
+            _ => None,
+        };
+        let keys = self.keys(drive.as_ref());
+        let sent = shared.as_ref().map(|given| &given.sent);
+        let metadata = wire::metadata(meta, version, keys, &transfer_iv, &key, sent);
         let parts = parts(&instructions, metadata, sending.as_mut(), &key);
         let (method, path) = match at {
             None => (UploadMethod::Post, self.files()),
@@ -863,13 +895,50 @@ impl HomebaseRemote {
         } = self
             .client
             .upload(method, &path, Multipart::new(boundary, parts))
-            .map_err(|e| self.write_error(e))?;
+            .map_err(|e| {
+                let for_shares = may_be_for_shares(&e);
+                let e = self.write_error(e);
+                match &shared {
+                    Some(given) if for_shares => self.sent_shared(e, meta, given),
+                    // Refused without shares too: it wasn't for them the last time.
+                    None if for_shares && target.is_none() => {
+                        self.folders.not_for_its_shares(meta.parent);
+                        e
+                    }
+                    _ => e,
+                }
+            })?;
+        let at = RemoteRef {
+            file_id: RemoteFileId(file_id),
+            version: VersionTag(new_version_tag),
+        };
+        match (target, meta.kind) {
+            // What is added to a new folder is shared as the folder was made, or not at all:
+            // nothing is asked for it (a new tree costs no request per folder).
+            (None, NodeKind::Folder) if drive.is_some() => {
+                let shares = shared.as_ref().map(|given| Arc::clone(&given.shares));
+                (self.folders).made(meta.node, at, shares.unwrap_or_default());
+            }
+            // A folder written again is shared as it was: its new version is this write's.
+            (Some(_), NodeKind::Folder) => self.folders.rewritten(meta.node, at),
+            _ => {}
+        }
+        // The shares went up as the folder was shared when the upload began: the server
+        // looks at them once the bytes are in, and writes them whatever became of the
+        // folder's meanwhile. Nothing takes one back here yet: said, where that may be.
+        if let Some(given) = &shared {
+            let as_then = |now: Shares| now[..] == given.folder[..];
+            if !self.folders.known(meta.parent).is_some_and(as_then) {
+                tracing::warn!(
+                    "{:?} went up shared as its folder was when its upload began: how the \
+                     folder is shared may have changed since",
+                    meta.content.name
+                );
+            }
+        }
         Ok(Written {
             target: Target {
-                at: RemoteRef {
-                    file_id: RemoteFileId(file_id),
-                    version: VersionTag(new_version_tag),
-                },
+                at,
                 token: Some(key.token(self.client.key())),
             },
             changed_at: version_updated,
@@ -890,6 +959,208 @@ impl HomebaseRemote {
         // its key here, before a page that leaves its files out.
         self.drive_key(false)?;
         feed_page(|body| self.query_batch(body), cursor, limit, shape)
+    }
+
+    /// What becomes of the error `e` of an upload of the new node `meta` that went up
+    /// shared as `given`, where the server's refusal may be for the shares
+    /// ([`may_be_for_shares`]): a circle disabled or gone since, a share that ended on the
+    /// way (the server looks at the shares only once the bytes are in). The file is to go
+    /// up all the same, so it is tried again soon:
+    /// - where a share that was sent has ended since, with the folder's shares read again
+    ///   (the ones that last: the others weren't refused);
+    /// - else without them, as is what is added to that folder for a while
+    ///   ([`Folders::refused`]; where the folder changed meanwhile, with what it shares now).
+    ///   Which share it was for, the server doesn't say: none is given. The circles' keys
+    ///   are asked again by then, and the share of a circle that is gone is left out
+    ///   ([`HomebaseRemote::own_circle`]).
+    ///
+    /// One refused for something else is refused again then, and held (or stops the sync)
+    /// as any other. Told as an outage is (there is no class for one node sent again at
+    /// once): what else was to go up waits one backoff.
+    fn sent_shared(&self, e: RemoteError, meta: &NodeMeta, given: &Given) -> RemoteError {
+        let now = hbsync_types::unix_now_ms();
+        let mut circles = self.circles.lock().unwrap_or_else(|e| e.into_inner());
+        circles.retain(|circle, _| !given.shares.iter().any(|share| share.circle == *circle));
+        drop(circles);
+        if given.shares.iter().any(|share| !share.lasts(now, 0)) {
+            self.folders.forget(meta.parent);
+        } else if self.folders.refused(meta.parent, &given.folder) {
+            tracing::warn!(
+                "{:?} was refused with its folder's shares ({e}): what is added to that \
+                 folder goes up unshared for now",
+                meta.content.name
+            );
+        }
+        RemoteError::Transient(format!("{e} (sent with its folder's shares)"))
+    }
+
+    /// The drive's notifications ([`Notifier::spawn`]), their events sent to `events`: what
+    /// they say of a folder this computer adds to is taken here first ([`Folders::heard`]):
+    /// a share of it given or withdrawn keeps its version, which the feed isn't read for.
+    /// And whether they are connected ([`Folders::listening`]).
+    pub fn notifier(self: &Arc<Self>, events: impl Into<Events>) -> std::io::Result<Notifier> {
+        let (remote, events) = (Arc::clone(self), events.into());
+        let heard = move |event: Event| {
+            match &event {
+                Event::Changed(Some(change)) => remote.folders.heard(change.file_id),
+                Event::Connected => remote.folders.listening(true),
+                Event::Lost(_) | Event::Refused(_) => remote.folders.listening(false),
+                Event::Changed(None) | Event::Markers => {}
+            }
+            events.send(event)
+        };
+        let notifier = Notifier::spawn(self.client.clone(), self.drive, Events::to(heard))?;
+        // Asked to connect again (this computer woke, the network changed) or stopped, the
+        // connection it had hears nothing more, and says so only once the next is made.
+        let remote = Arc::clone(self);
+        Ok(notifier.before_it_drops_a_connection(move || remote.folders.listening(false)))
+    }
+
+    /// How `folder` of this drive, a private one, is shared: what a node added to it goes up
+    /// with. From what is known of it ([`Folders`]), else read: one request, a `query-batch`
+    /// for the folder alone with its shares (`includeShares`: for the app that owns the
+    /// drive, **[verified]** live 2026-11-25 and odin-core
+    /// `SelectiveShareDrives.CallerManagesShares`). Nothing is shared at the top: no request.
+    ///
+    /// A folder that isn't on the drive, or whose row doesn't read, shares nothing, as far
+    /// as is known for a while; a share of it that doesn't read isn't given. Said in the log:
+    /// what is added there goes up all the same.
+    fn shared_as(&self, folder: NodeId) -> Result<Shares> {
+        if folder.is_root() {
+            return Ok(Shares::default());
+        }
+        if let Some(shares) = self.folders.known(folder) {
+            return Ok(shares);
+        }
+        // One read for all that ask at once (a folder's files go up side by side).
+        let _one_reads = (self.shares_reading.lock()).unwrap_or_else(|e| e.into_inner());
+        if let Some(shares) = self.folders.known(folder) {
+            return Ok(shares);
+        }
+        self.folders.reading();
+        let read = self.read_shares(folder);
+        let answer = (read.as_ref().ok()).map(|(at, shares)| (*at, Arc::clone(shares)));
+        self.folders.read(folder, answer);
+        Ok(read?.1)
+    }
+
+    /// `folder`'s row with its shares, asked of the server: the file it is, and its live
+    /// shares that read. No file for a folder that isn't there or whose row doesn't read.
+    fn read_shares(&self, folder: NodeId) -> Result<(Option<RemoteRef>, Shares)> {
+        let page = self.query_batch(&wire::shares_query(folder))?;
+        let Some(row) = page.search_results.first() else {
+            return Ok((None, Shares::default()));
+        };
+        let read = match wire::shared_folder(row.get()) {
+            Ok(read) => read,
+            Err(e) => {
+                tracing::warn!("how a folder is shared can't be read ({e}): added to unshared");
+                return Ok((None, Shares::default()));
+            }
+        };
+        if read.unread > 0 {
+            tracing::warn!(
+                "{} of a folder's shares can't be read: what is added to it isn't given them",
+                read.unread
+            );
+        }
+        if read.shares.len() > MOST_SHARES {
+            tracing::warn!(
+                "a folder has more shares than a new file goes up with: what is added to \
+                 it is given {MOST_SHARES} of them"
+            );
+        }
+        // (A tombstone still lists the rows it had: nothing is shared by it.)
+        let shares = match read.deleted {
+            true => Shares::default(),
+            false => Shares::from(read.shares),
+        };
+        Ok((Some(read.at), shares))
+    }
+
+    /// The key of `circle`, one of this identity's own, which the files shared with it are
+    /// locked under: read once (one request, `GET /api/v2/connections/circles/{id}/share-key`)
+    /// and opened with the app's key ([`CircleKey::own`]). None where it isn't to be had: no
+    /// key set for the circle, one that doesn't open, a login without the app's key, or the
+    /// server refusing it (a circle deleted leaves its rows on the files, and its key is
+    /// refused with a 403: **[verified]** odin-core `CircleDefinitionService.DeleteAsync`,
+    /// `GetCircleCallerMayManageAsync`). Said once, and not asked again in this run.
+    fn own_circle(&self, circle: Uuid) -> Result<Option<Arc<CircleKey>>> {
+        let circles = || self.circles.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(key) = circles().get(&circle) {
+            return Ok(key.clone());
+        }
+        // One read for all that ask at once, as of the folder's shares.
+        let _one_reads = (self.shares_reading.lock()).unwrap_or_else(|e| e.into_inner());
+        if let Some(key) = circles().get(&circle) {
+            return Ok(key.clone());
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Locked {
+            app_key_locked_share_key: Option<String>,
+        }
+        let opened = || -> Result<std::result::Result<CircleKey, &'static str>> {
+            let Some(app_key) = self.client.zk_key() else {
+                return Ok(Err("this login lacks the app's key (log in again)"));
+            };
+            let route = format!("/api/v2/connections/circles/{circle}/share-key");
+            let answer: Locked = match self.client.get(&route, &[]).map_err(remote_error) {
+                Ok(answer) => answer,
+                // A refusal of this key isn't one of the login: the upload says if it is.
+                Err(RemoteError::Denied(..) | RemoteError::Fatal(_) | RemoteError::NotFound) => {
+                    return Ok(Err(
+                        "the server refuses the circle's key (is the circle gone?)",
+                    ));
+                }
+                Err(e) => return Err(e),
+            };
+            let locked =
+                (answer.app_key_locked_share_key).and_then(|key| STANDARD.decode(key).ok());
+            let Some(locked) = locked else {
+                return Ok(Err("the circle has no key"));
+            };
+            Ok(CircleKey::own(&locked, app_key, circle, self.drive.alias)
+                .map_err(|_| "the circle's key doesn't open"))
+        };
+        let key = match opened()? {
+            Ok(key) => Some(Arc::new(key)),
+            Err(why) => {
+                tracing::warn!(
+                    "what is added to a folder shared with circle {circle} isn't shared \
+                     with it: {why}"
+                );
+                None
+            }
+        };
+        circles().insert(circle, key.clone());
+        Ok(key)
+    }
+
+    /// The shares a new node `meta` goes up with, its payload `size` bytes: those of the
+    /// folder it is added to that last past the upload ([`Share::lasts`]), the most a
+    /// request takes ([`MOST_SHARES`]), its `key` locked under each circle's key
+    /// ([`new_shares`]). None where the folder isn't shared.
+    ///
+    /// The node goes up whatever becomes of its shares: one that can't be given (a circle's
+    /// key not to be had) is left out, and said. Only what would fail the upload too fails
+    /// this (the server not reached).
+    fn shares_of_new(&self, meta: &NodeMeta, key: &KeyHeader, size: u64) -> Result<Option<Given>> {
+        let folder = self.shared_as(meta.parent)?;
+        if folder.is_empty() {
+            return Ok(None);
+        }
+        let now = hbsync_types::unix_now_ms();
+        let lasting = folder.iter().filter(|share| share.lasts(now, size));
+        let shares: Shares = lasting.take(MOST_SHARES).copied().collect();
+        let given = (shares.iter()).map(|s| (s.circle, s.permissions, s.expires_at));
+        let sent = new_shares(key, given, |circle| self.own_circle(circle))?;
+        let given = Given {
+            folder,
+            shares,
+            sent,
+        };
+        Ok((!given.sent.shares.is_empty()).then_some(given))
     }
 
     /// The header of `at`, which must still be that version and not deleted.
@@ -1086,13 +1357,31 @@ impl Remote for HomebaseRemote {
     /// Rows that aren't usable sync nodes come back in [`ChangesPage::skipped`], with why.
     fn changes(&self, cursor: Option<&str>, limit: usize) -> Result<ChangesPage> {
         let (page, cursor) = self.feed_page(cursor, limit, wire::Shape::Full)?;
-        changes_page(page, cursor, |h| self.to_remote(h))
+        let page = changes_page(page, cursor, |h| {
+            if let Some(fed) = h.fed() {
+                self.folders.fed(fed);
+            }
+            self.to_remote(h)
+        })?;
+        // A row that doesn't read says nothing of its folder's shares: read again, if known.
+        for at in page.skipped.iter().filter_map(|skipped| skipped.at) {
+            self.folders.heard(at.file_id);
+        }
+        Ok(page)
     }
 
     /// A minimal page (odin-core #1967): what changed, without the headers.
     fn change_refs(&self, cursor: Option<&str>, limit: usize) -> Result<RefsPage> {
         let (page, cursor) = self.feed_page(cursor, limit, wire::Shape::Minimal)?;
-        refs_page(page, cursor)
+        refs_page(page, cursor, |row| match row {
+            Ok(row) => {
+                if let Some(fed) = row.fed() {
+                    self.folders.fed(fed);
+                }
+            }
+            // One that doesn't read says nothing of its folder's shares: read again, if known.
+            Err(file) => self.folders.heard(file),
+        })
     }
 
     fn cursor_time(&self, cursor: &str) -> Option<i64> {
@@ -1397,8 +1686,64 @@ fn changes_page(
     })
 }
 
-/// A minimal feed page (odin-core #1967): what changed, without the headers.
-fn refs_page(page: wire::QueryBatchResponse, cursor: String) -> Result<RefsPage> {
+/// What a new node goes up shared as ([`HomebaseRemote::shares_of_new`]).
+struct Given {
+    /// Its folder's shares as they were known when the upload began: the very list, so
+    /// what is known of the folder later is told from it ([`Folders::refused`]).
+    folder: Shares,
+    /// The ones given to it: a new folder is shared so from then on.
+    shares: Shares,
+    sent: wire::NewShares,
+}
+
+/// Whether the server's refusal `e` of an upload may be for the shares it carried: the
+/// codes it refuses a share with (**[verified]** odin-core `DriveShareService`: a 400
+/// `argumentError` for a share that ended, a circle disabled or not granting what the share
+/// gives, too many shares; `circleShareKeyNotSet`, `invalidShareKey`), and its 403 for a
+/// circle that isn't the app's any more (`GetCircleCallerMayShareWithAsync`), which this
+/// login's own refusal is too: the upload without shares tells them apart.
+fn may_be_for_shares(e: &HomebaseError) -> bool {
+    const CODES: [&str; 3] = ["argumentError", "circleShareKeyNotSet", "invalidShareKey"];
+    match e {
+        HomebaseError::Denied(_) => true,
+        HomebaseError::Api { error, .. } => CODES.iter().any(|code| error.is(code)),
+        _ => false,
+    }
+}
+
+/// The shares a new file goes up with: its `key` locked under the key of each circle of
+/// `given` (with what the circle may do with the file, and until when), as `circle_key`
+/// gives it, bound to a global transit id picked for the file, which has no id yet
+/// ([`CircleKey::lock_file_key`]). A circle whose key isn't to be had (`None`) is left out.
+pub(crate) fn new_shares(
+    key: &KeyHeader,
+    given: impl Iterator<Item = (Uuid, u32, Option<i64>)>,
+    circle_key: impl Fn(Uuid) -> Result<Option<Arc<CircleKey>>>,
+) -> Result<wire::NewShares> {
+    let global_transit_id = Uuid::new_v4();
+    let mut shares = Vec::new();
+    for (circle, permissions, ends) in given {
+        let Some(circle_key) = circle_key(circle)? else {
+            continue;
+        };
+        let locked = circle_key
+            .lock_file_key(&key.key, global_transit_id)
+            .map_err(remote_error)?;
+        shares.push(wire::share_of_new(circle, permissions, ends, &locked));
+    }
+    Ok(wire::NewShares {
+        global_transit_id,
+        shares,
+    })
+}
+
+/// A minimal feed page (odin-core #1967): what changed, without the headers. Each row is
+/// shown to `each` as it is read: one that doesn't read, as the file it names (if it reads).
+fn refs_page(
+    page: wire::QueryBatchResponse,
+    cursor: String,
+    mut each: impl FnMut(std::result::Result<&wire::FileRef, RemoteFileId>),
+) -> Result<RefsPage> {
     // A server without #1967 ignores the shape and sends headers: an empty page there would
     // skip what changed.
     let rows = page.file_refs.ok_or_else(|| {
@@ -1408,8 +1753,16 @@ fn refs_page(page: wire::QueryBatchResponse, cursor: String) -> Result<RefsPage>
     let mut unread = 0;
     for row in &rows {
         match serde_json::from_str::<wire::FileRef>(row.get()) {
-            Ok(r) => refs.push(r.to_ref()),
-            Err(_) => unread += 1,
+            Ok(r) => {
+                each(Ok(&r));
+                refs.push(r.to_ref());
+            }
+            Err(_) => {
+                if let Some(file) = wire::file_id_of(row.get()) {
+                    each(Err(RemoteFileId(file)));
+                }
+                unread += 1;
+            }
         }
     }
     Ok(RefsPage {
@@ -2384,6 +2737,9 @@ mod tests {
             made: 0,
             drive_key: DriveKey(Mutex::new(state)),
             sends_asking: Mutex::default(),
+            folders: Folders::default(),
+            shares_reading: Mutex::default(),
+            circles: Mutex::default(),
         })
     }
 
@@ -2402,6 +2758,168 @@ mod tests {
         assert_eq!(refused.to_string(), format!("access denied: {PRIVATE}"));
         *remote.drive_key.lock() = state(Some([1; 16]));
         assert_eq!(remote.drive_key(false).ok(), Some(Some([1; 16])));
+        Ok(())
+    }
+
+    /// What a new node goes up with, without a request where none is needed: nothing at the
+    /// top; a known folder's shares that last past the upload, the node's key locked under
+    /// each circle's key; none for a circle whose key isn't to be had, nor from a folder
+    /// whose shares the server refused. A folder that isn't known is asked about (nothing
+    /// answers here).
+    #[test]
+    fn a_new_node_is_given_what_its_folder_is_known_to_share()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        use crate::drive::shared_as::{Share, tests::at};
+        use share_keys::tests::{APP_KEY, CIRCLE, LOCKED_CIRCLE_KEY, bytes, id};
+        let remote = unreachable_remote(private_state(Some([1; 16]), None))?;
+        let key = KeyHeader::random()?;
+        let given = |parent: NodeId, size: u64| {
+            let meta = NodeMeta {
+                node: NodeId::new(),
+                parent,
+                kind: NodeKind::File,
+                content: NodeContent::file("added", 1, 1, false),
+                removed: false,
+            };
+            remote.shares_of_new(&meta, &key, size)
+        };
+        assert!(
+            given(NodeId::ROOT, 0)?.is_none(),
+            "nothing is shared at the top"
+        );
+        let folder = NodeId::new();
+        assert!(given(folder, 0).is_err(), "not known: asked about");
+
+        let app_key = key_of(&bytes(APP_KEY), "the vector's")?;
+        let (opens, lacks) = (id(CIRCLE), Uuid::from_u128(9));
+        let alias = remote.drive.alias;
+        let circle_key = Arc::new(CircleKey::own(
+            &bytes(LOCKED_CIRCLE_KEY),
+            &app_key,
+            opens,
+            alias,
+        )?);
+        let circles = [(opens, Some(Arc::clone(&circle_key))), (lacks, None)];
+        (remote.circles.lock().expect("unpoisoned")).extend(circles);
+        let share = |circle: Uuid, expires_at: Option<i64>| Share {
+            circle,
+            permissions: app::READ | app::WRITE,
+            expires_at,
+        };
+        let shares = [share(opens, None), share(lacks, None)];
+        (remote.folders).made(folder, at(100, 10), Arc::from(shares));
+        let went = given(folder, 0)?.ok_or("shared")?;
+        assert_eq!(
+            *went.shares, shares,
+            "what a folder made here shares in turn"
+        );
+        assert_eq!(went.sent.shares.len(), 1, "{:?}", went.sent.shares);
+        let row = &went.sent.shares[0];
+        assert_eq!(
+            (&row["circleId"], &row["permissions"]),
+            (&json!(opens), &json!(3))
+        );
+        assert_eq!(
+            (&row["fileId"], &row["expiresAt"]),
+            (&json!(Uuid::nil()), &json!(null))
+        );
+        let locked = STANDARD.decode(row["lockedFileKey"].as_str().ok_or("a key")?)?;
+        let bound_to = Some(went.sent.global_transit_id);
+        let opened = circle_key.file_key(&locked, Uuid::new_v4(), bound_to)?;
+        assert_eq!(opened, key.key, "bound to the transit id it goes up with");
+
+        // A share that ends before the upload can be up isn't given: by the file's size.
+        let ending = NodeId::new();
+        let in_ten_minutes = hbsync_types::unix_now_ms() + 600_000;
+        let ends = [share(opens, Some(in_ten_minutes))];
+        (remote.folders).made(ending, at(200, 20), Arc::from(ends));
+        assert!(given(ending, 0)?.is_some());
+        assert!(given(ending, 1 << 30)?.is_none(), "a gigabyte takes longer");
+
+        // Refused by the server with an upload that carried them: tried again soon, and
+        // none are given for now; the keys of the circles sent are asked again by then.
+        let meta = |parent: NodeId| NodeMeta {
+            node: NodeId::new(),
+            parent,
+            kind: NodeKind::File,
+            content: NodeContent::file("added", 1, 1, false),
+            removed: false,
+        };
+        let refused = || RemoteError::Fatal("400".into());
+        let keys = || remote.circles.lock().expect("unpoisoned").len();
+        assert_eq!(keys(), 2);
+        let again = remote.sent_shared(refused(), &meta(folder), &went);
+        assert!(matches!(again, RemoteError::Transient(_)), "{again:?}");
+        assert!(given(folder, 0)?.is_none());
+        assert_eq!(keys(), 0);
+
+        // Refused as a share that was sent has ended since: not for the others. The folder
+        // is read again (nothing answers here), and what lasts of it is given then.
+        (remote.circles.lock().expect("unpoisoned")).insert(opens, Some(circle_key));
+        let went = given(ending, 0)?.ok_or("shared")?;
+        let ended = Given {
+            shares: Arc::from([share(opens, Some(hbsync_types::unix_now_ms() - 1))]),
+            ..went
+        };
+        let again = remote.sent_shared(refused(), &meta(ending), &ended);
+        assert!(matches!(again, RemoteError::Transient(_)), "{again:?}");
+        assert!(
+            given(ending, 0).is_err(),
+            "asked about again, not taken as unshared"
+        );
+        Ok(())
+    }
+
+    /// Which of the server's refusals of an upload may be for the shares it carried.
+    #[test]
+    fn a_refusal_may_be_for_the_shares_by_its_code() {
+        let api = |code: &str| HomebaseError::Api {
+            what: "upload".into(),
+            error: ApiError::parse(
+                400,
+                json!({ "status": 400, "errorCode": code })
+                    .to_string()
+                    .as_bytes(),
+            ),
+        };
+        for code in ["argumentError", "circleShareKeyNotSet", "invalidShareKey"] {
+            assert!(may_be_for_shares(&api(code)), "{code}");
+        }
+        assert!(may_be_for_shares(&HomebaseError::Denied("403".into())));
+        assert!(!may_be_for_shares(&api("existingFileWithUniqueId")));
+        assert!(!may_be_for_shares(&HomebaseError::Network("down".into())));
+        assert!(!may_be_for_shares(&HomebaseError::Protocol(
+            "not json".into()
+        )));
+    }
+
+    /// A slim page shows each row as it is read: one that reads, and the file of one that
+    /// doesn't where its id does.
+    #[test]
+    fn a_slim_page_shows_each_of_its_rows() -> Result<()> {
+        const FOLDER: &str = "11111111-1111-1111-1111-111111111111";
+        const BROKEN: &str = "44444444-4444-4444-4444-444444444444";
+        let page: wire::QueryBatchResponse = serde_json::from_value(json!({
+            "cursorState": "c", "hasMoreRows": false, "queryTime": 1, "fileRefs": [
+                { "fileId": FOLDER, "fileState": "active", "fileType": 7101,
+                  "versionTag": "22222222-2222-2222-2222-222222222222",
+                  "uniqueId": "33333333-3333-3333-3333-333333333333",
+                  "updated": 12, "versionUpdated": 9 },
+                { "fileId": BROKEN, "fileState": 7 },
+                { "fileState": "active" },
+            ],
+        }))
+        .expect("a page");
+        let mut shown = Vec::new();
+        let read = refs_page(page, "c".into(), |row| {
+            shown.push(match row {
+                Ok(row) => (row.file_id, row.fed().map(|fed| fed.as_written)),
+                Err(file) => (file.0, None),
+            });
+        })?;
+        assert_eq!((read.refs.len(), read.unread), (1, 2));
+        let id = |s: &str| s.parse::<Uuid>().expect("a uuid");
+        assert_eq!(shown, [(id(FOLDER), Some(false)), (id(BROKEN), None)]);
         Ok(())
     }
 

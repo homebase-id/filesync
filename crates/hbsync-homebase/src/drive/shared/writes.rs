@@ -22,8 +22,8 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 use super::super::{
-    Sending, check_size, files_route, finish, lacks_permission, not_connected, not_connected_to,
-    parts, remote_error, wire,
+    Sending, check_size, files_route, finish, lacks_permission, new_shares, not_connected,
+    not_connected_to, parts, remote_error, wire,
 };
 use super::PeerRemote;
 use crate::app::{APP_SLUG, SYNC_DRIVE};
@@ -512,23 +512,16 @@ impl PeerRemote {
             return Err(self.read_only());
         }
         let key = KeyHeader::random().map_err(remote_error)?;
-        let global_transit_id = Uuid::new_v4();
         // Shared as the folder is with this identity. The circles it isn't in get theirs from
         // a device of the owner's.
-        let mut shares = Vec::new();
-        for row in folder.shares.iter().flatten() {
-            let Some(circle) = row.circle_id.filter(|_| row.permissions != 0) else {
-                continue;
-            };
-            let locked = self
-                .circle_key(circle)?
-                .lock_file_key(&key.key, global_transit_id)
-                .map_err(remote_error)?;
-            shares.push(wire::share_of_new(row, circle, &locked));
-        }
+        let given = (folder.shares.iter().flatten())
+            .filter(|row| row.permissions != 0)
+            .filter_map(|row| Some((row.circle_id?, row.permissions, row.expires_at)));
+        let shares = new_shares(&key, given, |circle| self.circle_key(circle).map(Some))?;
+        let global_transit_id = shares.global_transit_id;
         // Without a share it would be its owner's alone: this identity couldn't read what
         // it added.
-        if shares.is_empty() {
+        if shares.shares.is_empty() {
             return Err(not_here());
         }
         let key_header = key.sealed_to(&self.their_point()?).map_err(remote_error)?;
@@ -541,15 +534,7 @@ impl PeerRemote {
             self.owner(),
             &self.their_drive(),
         );
-        let metadata = wire::deposit(
-            meta,
-            own.key(),
-            &transfer_iv,
-            &key,
-            key_header,
-            global_transit_id,
-            shares,
-        );
+        let metadata = wire::deposit(meta, own.key(), &transfer_iv, &key, key_header, &shares);
         let form = Multipart::new(
             Uuid::new_v4().simple().to_string(),
             parts(&instructions, metadata, sending.as_mut(), &key),

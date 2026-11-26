@@ -160,6 +160,19 @@ lists it follows the desktops:
 - Write nothing there, the purge included: Recently deleted and the tombstones are the
   owner's devices' to delete for good.
 
+## What you share, and the computers
+A share is a row on each file, and the computers write rows in one case: what a computer
+adds to a shared folder goes up with that folder's shares (the same circles, permissions
+and ends), in the upload itself, so it is shared at once (sync semantics §13, "What the
+owner's computer adds"). Such a file has a `globalTransitId` the computer picked, and its
+rows' keys are in format 3, bound to that id: open a row's key by its format byte, as for a
+file a member added (encryption spec, "Files shared with you"). What the computers don't
+do yet:
+- A node a computer moves into a shared folder keeps the rows it had, and one it moves out
+  keeps them too: a shared folder can hold a node that isn't shared, and a folder that
+  isn't shared one that is.
+- They add no rows for a folder's other circles to what a member added.
+
 ## Downloading
 - Fetch payload `sync_data` and decrypt it with the file's key (AES-CBC, the same as other
   encrypted payloads; on a private drive with the payload's IV, above).

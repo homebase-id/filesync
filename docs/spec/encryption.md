@@ -237,8 +237,16 @@ odin-core's `SelectiveShareKeyVectorTests` **[verified]**):
   member's lowercased identity, 146 bytes.
 - **A file's key.** Each share row holds the file's key under the circle's key
   (`lockedFileKey`): `format ‖ nonce (12) ‖ ciphertext (16) ‖ tag (16)`, AES-128-GCM, AAD
-  `driveId ‖ fileId ‖ circleId` (format 2) or `driveId ‖ globalTransitId ‖ circleId` (format 3,
-  a file a member added). The file's own IV, from its key header, goes with it.
+  `driveId ‖ fileId ‖ circleId` (format 2) or `driveId ‖ globalTransitId ‖ circleId` (format 3:
+  a file that went up with its shares, before it had a file id: one a member added, or one
+  the owner's computer added to a shared folder). The file's own IV, from its key header,
+  goes with it.
+- **A circle's key, to its owner.** The server keeps it for the app that owns the circle
+  (`appKeyLockedShareKey`): `2 ‖ nonce (12) ‖ ciphertext (16) ‖ tag (16)`, AES-128-GCM under
+  the app's zero-knowledge key, AAD the circle id (**[verified]** odin-core's golden vector
+  `SelectiveShareKeyVectorTests`; `CircleKey::own`). The owner's computer opens it to lock
+  the key of a file it adds to a folder shared with that circle (homebase-api-notes,
+  "Sharing what this identity's computer adds").
 - **As a member reads it.** The sharer's server sends a shared file's key header as type `share`
   (14): `iv` the file's header IV as it is (not wrapped), `encryptedAesKey` the share row's
   `lockedFileKey`, the row being the first of the file's `shares` (by circle id), whose circle
