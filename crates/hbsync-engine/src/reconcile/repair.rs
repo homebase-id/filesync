@@ -317,7 +317,9 @@ impl Reconciler<'_> {
                 .subtree(folder)
                 .into_iter()
                 .filter(|n| {
-                    *n != folder && self.taken.contains(n) && !self.local_change(*n).is_change()
+                    *n != folder
+                        && self.taken.contains(n)
+                        && !self.local_change_to_keep(*n).is_change()
                 })
                 .collect();
             for node in below {

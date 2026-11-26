@@ -244,7 +244,7 @@ impl Reconciler<'_> {
                 continue;
             }
             // Unchanged here: either way. Deleted here: in a piece only. Else: planned now.
-            let unchanged = match self.local_change(n) {
+            let unchanged = match self.local_change_to_keep(n) {
                 Change::Deleted if piece => false,
                 change if change.is_change() => continue,
                 _ => true,

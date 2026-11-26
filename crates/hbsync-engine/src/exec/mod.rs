@@ -188,6 +188,9 @@ struct Placement {
     created_ms: Option<i64>,
     /// What it writes on the file.
     tags: Tags,
+    /// The file gets the executable bit it had here, not the drive's ([`Op::LocalDownload`]'s
+    /// `keep_x`, where the two differ).
+    kept_x: bool,
 }
 
 /// What the commit of a transfer needs to know.

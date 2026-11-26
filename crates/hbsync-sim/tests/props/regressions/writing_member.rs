@@ -653,3 +653,38 @@ fn held_deletes_of_the_members_are_put_back_and_the_owners_removals_are_not() {
     settle(&mut sim);
     assert!(sim.local_paths(2).is_empty(), "{:?}", sim.local_paths(2));
 }
+
+/// A member that writes marks a file shared for editing executable while the owner edits it
+/// (§1, §13): no conflict. The member takes the owner's bytes, keeps its bit and sends it up,
+/// as on its own drive; nothing moves out. (Bytes and bit were one content: the two changes
+/// were edits apart, which a member can keep both of only where it may add the copy, so at
+/// its top it followed the drive, and its bit was dropped.)
+#[test]
+fn a_bit_set_by_the_member_and_the_owner_s_edit_are_both_kept() {
+    use Action::*;
+    let mut sim = Sim::new(2).with_writing_member(1).with_narrow_check();
+    sim.run(&[act(0, CreateFile { parent: 0, name: 0 })]);
+    settle(&mut sim);
+    share(&mut sim, "a");
+    turn(&mut sim, "a");
+    settle(&mut sim);
+    let file = sim.item(0, "a").expect("the file");
+    let (f0, f1) = (
+        sim.file_pick(0, file).expect("picked"),
+        sim.file_pick(1, file).expect("picked"),
+    );
+    sim.run(&[
+        act(1, Chmod { file: f1 }),
+        act(0, Edit { file: f0 }),
+        Event::Plan { client: 0 },
+        Event::Step { client: 0 },
+        Event::Step { client: 0 },
+    ]);
+    settle(&mut sim);
+    assert!(sim.moved_out(1).is_empty(), "{:?}", sim.moved_out(1));
+    assert_eq!(sim.server_paths(), ["a"], "no conflict copy");
+    assert_eq!(sim.local_hash(1, file), sim.drive_hash(file), "the edit");
+    assert_eq!(sim.local_executable(1, file), Some(true));
+    assert_eq!(sim.drive_executable(file), Some(true), "sent up");
+    assert_eq!(sim.local_executable(0, file), Some(true));
+}

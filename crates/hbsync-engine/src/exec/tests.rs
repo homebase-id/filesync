@@ -787,6 +787,7 @@ fn no_placement_takes_tags_off_the_drive_where_none_are_kept() -> R {
                     parent: NodeId::ROOT,
                     name: "x".into(),
                     replace: false,
+                    keep_x: false,
                     tags: work.clone(),
                     drive,
                 },
@@ -900,6 +901,7 @@ fn record_of_a_crashed_download(
         parent: NodeId::ROOT,
         name: "f".into(),
         replace: false,
+        keep_x: false,
         tags: placed.clone(),
         drive: Some(Box::new(DriveVersion {
             state,
@@ -957,6 +959,7 @@ fn base_after_a_download(crash: bool) -> Result<Option<BaseRow>, Box<dyn std::er
         parent: NodeId::ROOT,
         name: "f".into(),
         replace: true,
+        keep_x: false,
         tags: both,
         drive: Some(Box::new(DriveVersion {
             state: NodeState {
@@ -985,6 +988,61 @@ fn base_after_a_download(crash: bool) -> Result<Option<BaseRow>, Box<dyn std::er
         node: NodeId::ROOT,
         ..b
     }))
+}
+
+/// A download whose plan keeps the bit the file has here (`keep_x`: changed here alone, the
+/// drive's bytes alone, §1) puts the drive's bytes in place executable, though the drive's
+/// file isn't; the base settles at the drive's version, and the node is marked: planned again,
+/// its bit goes up. Without `keep_x` the drive's bit comes down, and nothing is marked.
+#[cfg(unix)]
+#[test]
+fn a_download_keeps_the_bit_its_plan_keeps() -> R {
+    use std::os::unix::fs::PermissionsExt;
+    for keep_x in [true, false] {
+        let mut h = Harness::new()?;
+        let (node, at) = h.seed("f", b"B")?;
+        h.local_file("f", node, b"A")?;
+        // Made executable here, and read so by the scan.
+        let path = h.at("f")?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755))?;
+        let meta = hbsync_platform::stat(&path)?;
+        let (a, b) = (h.content(b"A"), h.content(b"B"));
+        let before = some_version();
+        h.db.write(|s| {
+            let row = s.local_by_node(node)?.expect("its row");
+            s.folder().put_local(&LocalRow {
+                fingerprint: meta.fingerprint(),
+                executable: meta.executable,
+                ..row
+            })?;
+            s.folder().put_base(&BaseRow {
+                local_hash: Some(a.hash),
+                ..BaseRow::new(node, NodeState::file(NodeId::ROOT, "f", a), before)
+            })?;
+            // (An operation may come for a node that isn't marked.)
+            s.folder().clear_dirty(node)
+        })?;
+        let report = h.run(vec![Op::LocalDownload {
+            node,
+            parent: NodeId::ROOT,
+            name: "f".into(),
+            replace: true,
+            keep_x,
+            tags: Tags::default(),
+            drive: Some(Box::new(DriveVersion {
+                state: NodeState::file(NodeId::ROOT, "f", b),
+                at,
+                base_at: Some(before.version),
+            })),
+        }])?;
+        assert_eq!(report.done, 1, "keep {keep_x}: {report:?}");
+        assert_eq!(fs::read(&path)?, b"B");
+        assert_eq!(hbsync_platform::stat(&path)?.executable, Some(keep_x));
+        let base = h.base(node)?.expect("a base");
+        assert_eq!(base.state.content, Some(b), "the drive's version");
+        assert_eq!(h.db.read(|s| s.is_dirty(node))?, keep_x);
+    }
+    Ok(())
 }
 
 #[test]
@@ -1017,6 +1075,7 @@ fn a_first_download_records_the_local_spelling() -> R {
                 parent: NodeId::ROOT,
                 name: name.into(),
                 replace: false,
+                keep_x: false,
                 tags: Tags::default(),
                 drive: Some(Box::new(DriveVersion {
                     state: NodeState::file(NodeId::ROOT, name, h.content(b"A")),
@@ -1202,6 +1261,7 @@ fn a_failed_download_leaves_no_record() -> R {
         parent: NodeId::ROOT,
         name: "f".into(),
         replace: false,
+        keep_x: false,
         tags: Tags::default(),
         drive: Some(Box::new(drive)),
     }])?;
@@ -1272,6 +1332,7 @@ fn a_download_runs_only_on_the_version_the_plan_saw() -> R {
         parent: NodeId::ROOT,
         name: "f".into(),
         replace: false,
+        keep_x: false,
         tags: Tags::default(),
         drive: Some(Box::new(planned)),
     }])?;
@@ -1427,6 +1488,7 @@ fn a_delete_while_the_download_is_in_flight_is_taken() -> R {
         parent: NodeId::ROOT,
         name: "f".into(),
         replace: false,
+        keep_x: false,
         tags: Tags::default(),
         drive: Some(Box::new(drive)),
     }])?;
@@ -1519,6 +1581,7 @@ fn a_record_stays_when_the_commit_fails_after_placing() -> R {
             parent: folder,
             name: "f".into(),
             replace: false,
+            keep_x: false,
             tags: Tags::default(),
             drive: Some(Box::new(drive)),
         }]);
@@ -1556,6 +1619,7 @@ fn a_stopped_batch_leaves_no_records() -> R {
             parent: NodeId::ROOT,
             name: name.into(),
             replace: false,
+            keep_x: false,
             tags: Tags::default(),
             drive: Some(Box::new(DriveVersion {
                 state: NodeState::file(NodeId::ROOT, name, h.content(b"A")),
@@ -1764,6 +1828,7 @@ fn an_earlier_runs_record_holds_off_a_placement() -> R {
             parent: NodeId::ROOT,
             name: "f".into(),
             replace: false,
+            keep_x: false,
             tags: Tags::default(),
             drive: Some(Box::new(DriveVersion {
                 state: file_state,
@@ -2019,6 +2084,7 @@ fn a_later_download_that_fails_leaves_no_record() -> R {
         parent: NodeId::ROOT,
         name: name.into(),
         replace,
+        keep_x: false,
         tags: Tags::default(),
         drive: Some(Box::new(DriveVersion {
             state: NodeState {
@@ -2066,6 +2132,7 @@ fn a_placement_whose_commit_fails_is_settled_by_recovery() -> R {
             parent: NodeId::ROOT,
             name: "f".into(),
             replace: false,
+            keep_x: false,
             tags: Tags::default(),
             drive: Some(Box::new(DriveVersion {
                 state: NodeState::file(NodeId::ROOT, "f", h.content(b"A")),
@@ -2160,6 +2227,7 @@ fn files_go_into_a_folder_whose_commit_failed() -> R {
             parent: folder,
             name: name.into(),
             replace: false,
+            keep_x: false,
             tags: Tags::default(),
             drive: Some(Box::new(DriveVersion {
                 state: NodeState::file(folder, name, c),
@@ -2208,6 +2276,7 @@ fn recovery_in_the_run_leaves_a_sibling_edit_alone() -> R {
             parent: NodeId::ROOT,
             name: "a".into(),
             replace: false,
+            keep_x: false,
             tags: Tags::default(),
             drive: Some(Box::new(DriveVersion {
                 state: NodeState::file(NodeId::ROOT, "a", h.content(b"A")),
@@ -2228,6 +2297,7 @@ fn recovery_in_the_run_leaves_a_sibling_edit_alone() -> R {
             parent: NodeId::ROOT,
             name: "b".into(),
             replace: true,
+            keep_x: false,
             tags: Tags::default(),
             drive: Some(Box::new(DriveVersion {
                 state: NodeState::file(NodeId::ROOT, "b", h.content(b"B1")),
@@ -2650,6 +2720,7 @@ fn a_failed_tag_write_removes_nothing(folder: bool, unread: bool) -> R {
             parent: NodeId::ROOT,
             name: "x".into(),
             replace: false,
+            keep_x: false,
             tags: work.clone(),
             drive,
         },
@@ -2750,6 +2821,7 @@ fn a_download_from_another_folder(
         parent: p2,
         name: "f".into(),
         replace: true,
+        keep_x: false,
         tags: Tags::default(),
         drive: Some(Box::new(DriveVersion {
             state: NodeState::file(p2, "f", b),
@@ -3010,6 +3082,7 @@ fn a_record_doesnt_bring_back_a_node_the_drive_deleted() -> R {
             parent: NodeId::ROOT,
             name: remote.clone(),
             replace: true,
+            keep_x: false,
             tags: Tags::default(),
             drive: Some(Box::new(DriveVersion {
                 state: NodeState::file(NodeId::ROOT, &remote, new),
@@ -3092,6 +3165,7 @@ fn a_record_doesnt_bring_back_a_node_taken_along() -> R {
         parent: folder,
         name: "f".into(),
         replace: true,
+        keep_x: false,
         tags: Tags::default(),
         drive: Some(Box::new(DriveVersion {
             state: NodeState::file(folder, "f", new),
@@ -3147,6 +3221,7 @@ fn tags_too_large_dont_mark_the_volume_tagless() -> R {
         parent: NodeId::ROOT,
         name: "f".into(),
         replace: false,
+        keep_x: false,
         tags: large.clone(),
         drive: Some(Box::new(DriveVersion {
             state: NodeState {
@@ -4066,6 +4141,7 @@ fn a_download_whose_tag_write_fails_keeps_a_tag_change_not_sent_up() -> R {
             parent: NodeId::ROOT,
             name: "x".into(),
             replace: true,
+            keep_x: false,
             tags: here.clone(),
             drive: Some(Box::new(DriveVersion {
                 state: NodeState {

@@ -52,9 +52,18 @@ impl Executor<'_> {
                 parent,
                 name,
                 replace,
+                keep_x,
                 tags,
                 drive,
-            } => self.prepare_download(*node, *parent, name, *replace, tags, drive.as_deref()),
+            } => self.prepare_download(
+                *node,
+                *parent,
+                name,
+                *replace,
+                *keep_x,
+                tags,
+                drive.as_deref(),
+            ),
             Op::RemoteCreate {
                 node,
                 parent,
@@ -112,12 +121,14 @@ impl Executor<'_> {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn prepare_download(
         &mut self,
         node: NodeId,
         parent: NodeId,
         name: &str,
         replace: bool,
+        keep_x: bool,
         tags: &Tags,
         drive: Option<&DriveVersion>,
     ) -> Step<(Job, Ctx)> {
@@ -183,6 +194,12 @@ impl Executor<'_> {
             base_at: acted.base_at.into(),
             waiting_since_ms: None,
         };
+        // The drive's bit, or the one the file has here where the plan keeps that (§1): as
+        // this device holds each under the file's new name.
+        let on_disk = |x: bool| executable_on_disk(self.folder.os, name, x);
+        let here = current.as_ref().and_then(|row| row.executable);
+        let x = on_disk(here.filter(|_| keep_x).unwrap_or(file.executable));
+        let kept_x = x != on_disk(file.executable);
         let job = Job::Download(Download {
             node,
             file_id: mirror.file_id,
@@ -190,7 +207,7 @@ impl Executor<'_> {
             size: file.size,
             mtime_ms: file.mtime_ms,
             // Set either way: a partial kept for a retry may have been made for a name that held it.
-            executable: Some(executable_on_disk(self.folder.os, name, file.executable)),
+            executable: Some(x),
             tmp_dir: layout::tmp_dir(&self.folder.root),
             key: download_key(node, &expected),
             local_algorithm: self.folder.algorithm,
@@ -202,6 +219,7 @@ impl Executor<'_> {
                 current,
                 created_ms,
                 tags: tags.clone(),
+                kept_x,
             })),
         ))
     }
@@ -512,6 +530,7 @@ impl Executor<'_> {
             mut current,
             created_ms,
             tags: to_write,
+            kept_x,
         } = placement;
         let (node, target) = (record.base.node, record.target.clone());
         let target = &target;
@@ -660,6 +679,12 @@ impl Executor<'_> {
                 tags,
                 send_hash: false,
             })?;
+            // The bit kept here isn't the drive's, at whose version the base settles: planned
+            // again, it goes up (§1), whatever brought the download (an operation may come
+            // for a node that isn't marked).
+            if kept_x {
+                s.folder().mark_dirty(node)?;
+            }
             // The bytes were just fetched: equal even if the hashes use other algorithms.
             settle_placement(s.folder(), &record, folder).map(Placed::at)
         });

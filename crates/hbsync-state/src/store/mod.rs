@@ -515,7 +515,8 @@ pub struct FolderTx<'a>(&'a ReadTx<'a>);
 /// [`ReadTx`] and writes the drive's picture (the mirror, Recently deleted, the files deleted for
 /// good and their tombstones), the account's settings, its folders and the nodes they share. A
 /// change of the picture marks its node dirty in every folder it concerns (`fan_out`), a node
-/// made again leaves its folders' bases the tags its new file has (`made_again`), and the
+/// made again leaves its folders' bases the tags and the executable bit its new file has
+/// (`made_again`), and the
 /// purge sets any folder's settings; rows are written in the handle's coordinates (a role
 /// folder's top is its root).
 #[derive(Debug, Clone, Copy)]

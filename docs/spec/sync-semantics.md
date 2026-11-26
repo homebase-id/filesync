@@ -31,6 +31,41 @@ set. A move that changes whether the bit is held gives the file what it holds no
 renamed into a launcher loses its bit, a launcher renamed into another name takes the drive's.
 Launchers that an earlier version put in place executable stay so.
 
+**The bit merges apart from the bytes, where it changed here alone.** A file whose bit
+changed here, its bytes the ones synced, is no conflict with what the drive did to it (§4), as
+a tag here and bytes there are none: the drive's bytes come down, and the file keeps the bit
+it has here (the download's `keep_x`). Where the drive's bit is another, the base settles at
+the drive's version and the node is planned again, which sends the bit up: two steps, the
+bytes first. Where the drive changed its bit too (to the same: it has two values), its version
+comes down whole; that is also what a device that doesn't hold the bit reads of a change of
+both on the drive (it took that for a conflict, and kept its unchanged bytes as a copy).
+The other way round stays a conflict, as bytes changed on both sides are (§5): bytes changed
+here against a bit changed on the drive, since the upload would send a bit this device hasn't
+taken yet (#518). So are the same new bytes on both sides with unlike bits, as before: there
+is nothing to fetch, and no base yet to send the bit against. A download that kept its bit
+ends there if its base never settles (a crash before its commit, and a recovery that can't
+settle it): the copy holds the same bytes and the bit, and nothing is lost.
+
+Nor is a bit changed here alone a change to keep against a delete (§4), as a tag changed here
+is none: the drive's delete of the file wins; a folder removed there takes the file along,
+and one brought back keeps it as what is unchanged in it (§6.3); a file that leaves for a
+place this device ignores leaves as one unchanged (§10). Bytes changed here, or a move, are
+kept as ever.
+
+A file deleted for good and made again is another file of the same node, and may come without
+the bit from a device that never saw it. As for tags (§11, "A node made again"): the bit is
+agreed between a device and the drive only while the node's current file has it, so a device
+that holds it reads it as changed here alone: it takes the new file's bytes, keeps its bit
+and sends it up, where it would else have read the new file's lack of it as "cleared on the
+drive" and cleared its own (#450). A device that doesn't hold the bit sends the drive's on, as
+above. Where the new file was deleted since, the device follows the delete (above): the bit
+it held brings nothing back.
+
+In a read-only folder (§13) what follows the drive takes the drive's bit with its bytes, as
+before; while the new file's bytes are the ones it has, it keeps the bit it holds (the base's
+is the drive's again, and a bit changed here stays where that is so). A node the folder may
+change merges as on an identity's own drive.
+
 **Three trees.** For every sync root the client keeps three views keyed by node id:
 - **Base**: the last state both sides agreed on. Written only after an operation succeeds.
   Tags count one by one: one both sides agree on (both hold it, or both lack it) takes that
@@ -141,18 +176,20 @@ Per node, after classifying both sides:
 | change | none | propagate the local change |
 | none | change | propagate the remote change |
 | deleted | deleted | drop from base |
-| edited | edited | same hash → no-op. Different → **conflict copy** (section 5) |
+| edited | edited | same hash and executable bit → no-op. Different → **conflict copy** (section 5); not where only the executable bit changed here and the drive holds other bytes: those come down, the bit stays (§1) |
 | moved | moved | same destination → no-op. Different → **remote wins**; the local move is reverted |
 | edited | moved | apply both: the content goes up, the move comes down (and vice versa) |
 | deleted | edited / moved | **edit wins**: the node is restored locally from the remote |
 | edited / moved | deleted | **edit wins**: the removed node is restored remotely with the local version (an update at its file id: node schema "Recently deleted"). If Recently deleted holds a version of the file this device never had (edited elsewhere, then deleted; or taken along by a folder's delete, §6.3): other bytes than agreed, or an executable bit changed elsewhere that this device doesn't send (§1), that one stays there and the local version goes up as a new node (detached in place) |
+| executable bit alone | deleted | **the delete wins**: a bit changed here is no change to keep (§1) |
 | created | created | impossible for one node id; same-name clashes are handled by section 6 |
 
 A `moved` that only reverts a delete case is applied to the restored node.
 
 ## 5. Conflict copies
 
-When both sides edited a file to different content:
+When both sides edited a file to different content (bytes changed here: an executable bit
+changed here alone is merged, §1):
 - The remote version keeps the node id, name and location.
 - The local version is renamed in place to `<stem> (conflict <device> <YYYY-MM-DD>)<ext>` and
   becomes a new node that is uploaded normally.
@@ -1344,8 +1381,15 @@ own merge and the settle all read that base. What it costs:
   the Mac's colour goes with it (both added the tag: the drive's colour wins).
 - One read of the base by the node's key for each file new to the picture (a first sync: one
   per file, each finding nothing; 0.5 µs each, 1.2 µs with 100,000 bases, a release build), a
-  write only where a base holds a tag the file lacks; and one read of the picture for each
-  base written with tags.
+  write only where a base holds a tag, or the executable bit, that the file lacks; and one read
+  of the picture for each base written with tags or the bit (for an executable file: 1.3 µs
+  on a write of 12 µs, 100,000 bases, a release build).
+
+A file's executable bit is agreed the same way (§1, #450): the base keeps it only where the
+picture's file has it, in the same two places. The device's own bit then reads as changed here
+alone, which the plan merges with the new file's bytes (§1). Its limit is the tags' first one:
+a bit another device cleared on the new file, while this device's base was still agreed with
+the earlier one, comes back.
 
 Listed, not handled (each needs the node made again and something rarer on top): a file made
 again and removed before this device pulled, while its mirror still holds the earlier file
@@ -1802,8 +1846,8 @@ rules hold too:
     drive's version keeps the file, and this device's becomes a conflict copy beside it,
     added there, as on an identity's own drive (§6). Elsewhere (a file shared for editing
     in a folder shared for reading, or at the top) the drive's wins and this device's
-    moves out, as of any item of the folder (an executable bit changed here alone is no
-    edit to keep, as in any read-only folder);
+    moves out, as of any item of the folder. An executable bit changed here alone is no
+    edit on this side: the drive's bytes come down, the bit stays and goes up (§1);
   - a move here to another folder goes up between two folders that may be added to
     (below; also into a folder made here in one, which is added first), and is undone,
     whole, anywhere else (the item goes back to the drive's place

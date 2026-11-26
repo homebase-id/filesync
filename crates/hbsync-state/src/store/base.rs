@@ -90,34 +90,42 @@ impl AccountTx<'_> {
     /// The picture takes `row`, a file new to it (the feed's, `hbsync-engine`'s `mirror::apply`;
     /// this device's own write's, [`AccountTx::answered`]): where that isn't the file a folder's base of
     /// its node was agreed with (deleted for good and made again, by a device that may never
-    /// have seen the tags the old one held), the tags the new file lacks are agreed no more, in
-    /// every folder's base ([`Tags::held_in`]). An item that holds one then reads as having
+    /// have seen the tags the old one held, nor its executable bit), the tags the new file
+    /// lacks are agreed no more, in every folder's base ([`Tags::held_in`]), and neither is the
+    /// bit where the new file isn't executable. An item that holds one then reads as having
     /// added it, and sends it up; left in the base, its absence on the drive read as a removal
-    /// there, and took it off the item (sync semantics §11). A file deleted for good changes
-    /// nothing (a page fetched before: the mirror doesn't take it either). One read by the
-    /// node's key; more (the row's tags read, the write) only where such a base has a tag.
+    /// there, and took it off the item (sync semantics §11; the bit: #450). A file deleted for
+    /// good changes nothing (a page fetched before: the mirror doesn't take it either). One
+    /// read by the node's key; more (the row's tags read, the write) only where such a base
+    /// has a tag or the bit.
     pub fn made_again(&self, row: &MirrorRow) -> Result<()> {
         // (Written out, not formatted with `ID_OF`: once for every file new to the picture.)
         let agreed = self.many(
-            "SELECT folder, tags FROM base WHERE id = (SELECT id FROM nodes WHERE uuid = ?1) \
-             AND remote_file_id != ?2 AND tags IS NOT NULL",
+            "SELECT folder, tags, executable FROM base \
+             WHERE id = (SELECT id FROM nodes WHERE uuid = ?1) \
+             AND remote_file_id != ?2 AND (tags IS NOT NULL OR executable)",
             params![row.node.0.as_bytes(), row.file_id.0.as_bytes()],
-            |r| Ok((r.get::<_, i64>(0)?, tags_from_str(&r.get::<_, String>(1)?))),
+            |r| {
+                let tags: Option<String> = r.get(1)?;
+                let tags = tags.as_deref().map(tags_from_str).unwrap_or_default();
+                Ok((r.get::<_, i64>(0)?, tags, r.get::<_, bool>(2)?))
+            },
         )?;
         if agreed.is_empty() || self.file_gone(row.file_id)? {
             return Ok(());
         }
-        let tags = row.tags();
-        for (folder, was) in agreed {
+        let (tags, executable) = (row.tags(), row.file.as_ref().is_some_and(|f| f.executable));
+        for (folder, was, bit) in agreed {
             let held = was.held_in(&tags);
-            if held != was {
+            if held != was || (bit && !executable) {
                 self.prep(&format!(
-                    "UPDATE base SET tags = ?3 WHERE folder = ?2 AND id = {ID_OF}"
+                    "UPDATE base SET tags = ?3, executable = ?4 WHERE folder = ?2 AND id = {ID_OF}"
                 ))?
                 .execute(params![
                     row.node.0.as_bytes(),
                     folder,
                     (!held.is_empty()).then(|| tags_to_string(&held)),
+                    bit && executable,
                 ])?;
             }
         }
@@ -129,16 +137,17 @@ impl FolderTx<'_> {
     /// Inserts or replaces the base row of `row.node`. Its tags: `row`'s; but where the
     /// picture holds the node as another file than `row` was agreed with (made again since: a
     /// write settles against the version it acted on), only those that file has too, as
-    /// [`AccountTx::made_again`] leaves a base when the file comes. Agreed anew with the old
-    /// file, a tag the new one lacks read as removed on the drive again (sync semantics §11).
-    /// One read of the picture more, for a row with tags.
+    /// [`AccountTx::made_again`] leaves a base when the file comes; and so its executable bit.
+    /// Agreed anew with the old file, a tag the new one lacks read as removed on the drive
+    /// again (sync semantics §11). One read of the picture more, for a row with tags or the
+    /// bit.
     pub fn put_base(&self, row: &BaseRow) -> Result<()> {
         let c = row.state.content.as_ref();
         let (id, parent) = (
             self.key_or_insert(row.node)?,
             self.key_or_insert(row.state.parent)?,
         );
-        let narrowed = self.agreed_with_picture(id, row)?;
+        let (narrowed, executable) = self.agreed_with_picture(id, row)?;
         let tags = narrowed.as_ref().unwrap_or(&row.state.tags);
         self.wrote_base();
         self.prep(
@@ -159,7 +168,7 @@ impl FolderTx<'_> {
                 c.map(|c| codec::hash_to(&c.hash)),
                 c.map(|c| c.size as i64),
                 c.map(|c| c.mtime_ms),
-                c.is_some_and(|c| c.executable),
+                executable,
                 row.remote.file_id.0.as_bytes(),
                 row.remote.version.0.as_bytes(),
                 codec::content_state_to(row.content_state),
@@ -173,28 +182,33 @@ impl FolderTx<'_> {
 
     /// The tags of `row` (its node's key `id`) that the picture's file of the node has too,
     /// live or in Recently deleted, where that is another file than `row`'s and lacks one of
-    /// them; `None` where it is the same, or the picture has none ([`FolderTx::put_base`]).
-    fn agreed_with_picture(&self, id: i64, row: &BaseRow) -> Result<Option<Tags>> {
-        if row.state.tags.is_empty() {
-            return Ok(None);
+    /// them (`None` where it is the same, or the picture has none); and whether its
+    /// executable bit is agreed: `row`'s, unless that other file isn't executable
+    /// ([`FolderTx::put_base`]).
+    fn agreed_with_picture(&self, id: i64, row: &BaseRow) -> Result<(Option<Tags>, bool)> {
+        let executable = row.state.content.as_ref().is_some_and(|c| c.executable);
+        if row.state.tags.is_empty() && !executable {
+            return Ok((None, executable));
         }
-        let other: Option<Option<String>> = self
+        let other: Option<(Option<String>, bool)> = self
             .prep(
-                "SELECT content_extra FROM remote WHERE id = ?1 AND file_id != ?3 \
-                 UNION ALL SELECT content_extra FROM removed WHERE node = ?2 AND file_id != ?3 \
+                "SELECT content_extra, executable FROM remote WHERE id = ?1 AND file_id != ?3 \
+                 UNION ALL SELECT content_extra, executable FROM removed \
+                 WHERE node = ?2 AND file_id != ?3 \
                  AND NOT EXISTS (SELECT 1 FROM remote WHERE id = ?1) LIMIT 1",
             )?
             .query_row(
                 params![id, row.node.0.as_bytes(), row.remote.file_id.0.as_bytes()],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()?;
-        let Some(keys) = other else {
-            return Ok(None);
+        let Some((keys, its_bit)) = other else {
+            return Ok((None, executable));
         };
         let held = keys.as_deref().map(tags_in_keys).unwrap_or_default();
         let agreed = row.state.tags.held_in(&held);
-        Ok((agreed != row.state.tags).then_some(agreed))
+        let tags = (agreed != row.state.tags).then_some(agreed);
+        Ok((tags, executable && its_bit))
     }
 
     pub fn delete_base(&self, node: NodeId) -> Result<bool> {

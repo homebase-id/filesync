@@ -1916,6 +1916,62 @@ fn a_node_made_again_leaves_the_base_only_the_tags_its_new_file_has() -> R {
     Ok(())
 }
 
+/// A file the drive holds as another file than a base of it was agreed with (made again), and
+/// not executable: the base's executable bit is agreed no more, so a device that holds the
+/// bit reads it as set here, and sends it up (#450). The file the base was agreed with
+/// changes nothing; nor does a new file that is executable. And a base written while the
+/// picture holds such another file takes the bit only if that file has it.
+#[test]
+fn a_file_made_again_leaves_the_base_its_executable_bit_only_if_the_new_file_has_it() -> R {
+    let mut db = StateDb::open_in_memory()?;
+    let executable = FileContent {
+        executable: true,
+        ..content(b"run")
+    };
+    let row = base(NodeState::file(NodeId::ROOT, "run.sh", executable));
+    db.write(|s| s.folder().put_base(&row))?;
+    // The drive's row of the node as file `file_id`, executable or not.
+    let drive = |file_id: RemoteFileId, x: bool| {
+        let content = hbsync_types::schema::NodeContent::file("run.sh", 1, 3, x);
+        let at = RemoteRef {
+            file_id,
+            ..remote()
+        };
+        let hash = Some(executable.hash);
+        hbsync_state::MirrorRow::from_content(
+            at,
+            row.node,
+            NodeId::ROOT,
+            NodeKind::File,
+            &content,
+            hash,
+        )
+    };
+    let bit = |db: &mut StateDb| -> Result<Option<bool>, StateError> {
+        let base = db.read(|s| s.get_base(row.node))?;
+        Ok(base.and_then(|b| b.state.content).map(|c| c.executable))
+    };
+    // Its own file without the bit (cleared on the drive), and another file with it: kept.
+    db.write(|s| s.account().made_again(&drive(row.remote.file_id, false)))?;
+    db.write(|s| {
+        s.account()
+            .made_again(&drive(RemoteFileId(Uuid::new_v4()), true))
+    })?;
+    assert_eq!(bit(&mut db)?, Some(true));
+    // Another file without it: agreed no more.
+    let again = drive(RemoteFileId(Uuid::new_v4()), false);
+    db.write(|s| {
+        s.account().made_again(&again)?;
+        s.account().put_mirror(&again)
+    })?;
+    assert_eq!(bit(&mut db)?, Some(false));
+    // The base written again as it was agreed with the old file: the picture's file has no
+    // bit, so none is agreed.
+    db.write(|s| s.folder().put_base(&row))?;
+    assert_eq!(bit(&mut db)?, Some(false));
+    Ok(())
+}
+
 /// A base written while the picture holds its node as another file than the base was agreed
 /// with (made again since: a write settles against the version it acted on) takes only the
 /// tags that file has, live or in Recently deleted; agreed with the picture's file, or the

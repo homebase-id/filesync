@@ -901,11 +901,24 @@ impl FakeServer {
         algorithm: hbsync_fileio::HashAlgorithm,
     ) -> Result<(NodeId, RemoteRef)> {
         let node = NodeId::new();
+        let at = self.seed_file_of(node, parent, (name, false), data, algorithm)?;
+        Ok((node, at))
+    }
+
+    /// [`FakeServer::seed_file`] for node `node` (one made again, say), `executable` or not.
+    pub fn seed_file_of(
+        &mut self,
+        node: NodeId,
+        parent: NodeId,
+        (name, executable): (&str, bool),
+        data: &[u8],
+        algorithm: hbsync_fileio::HashAlgorithm,
+    ) -> Result<RemoteRef> {
         let new = NodeMeta {
             node,
             parent,
             kind: NodeKind::File,
-            content: NodeContent::file(name, 1_700_000_000_000, data.len() as u64, false),
+            content: NodeContent::file(name, 1_700_000_000_000, data.len() as u64, executable),
             removed: false,
         };
         let hash = hbsync_fileio::hash_bytes(data, algorithm);
@@ -915,7 +928,7 @@ impl FakeServer {
             reader: &mut std::io::Cursor::new(data),
             pace: None,
         };
-        Ok((node, self.create(&new, Some(upload))?))
+        self.create(&new, Some(upload))
     }
 
     /// Another writer's write as it sent it, its content unchecked (for tests: a buggy or
