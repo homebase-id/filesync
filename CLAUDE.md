@@ -29,7 +29,8 @@ told apart by it), from odin-core v0.1.973 (PR #2042, #2038): a server without i
 Signing in is on the V2 API's YouAuth routes, which need odin-core v0.1.996 or newer (PR #2066)
 and an owner console that posts its consent to the route the sign-in started on (odin-js #1020):
 an older console fails the sign-in at the consent page (**[verified]** live; logins made before
-work on). A deleted file's
+work on). A released v0.1.996 most likely has that console (inferred: the release builds it from
+odin-js main); one built by hand can lag, as the dev server's did. A deleted file's
 read says so itself (`fileDeleted`) from odin-core PR #2141 (merged as aa560aea9, after v0.1.991): a
 server without it costs one header read to learn the same. When a node was written or removed
 is read from the header's `versionUpdated` (a share change moves `updated`, not it) from odin-core

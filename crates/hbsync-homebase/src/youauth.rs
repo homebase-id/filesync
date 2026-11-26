@@ -259,7 +259,8 @@ struct TokenResponse {
 mod tests {
     use super::*;
 
-    /// The browser is sent to the V2 API's route to sign in.
+    /// The browser is sent to the V2 API's route to sign in, and the token is exchanged on
+    /// V2's too (seen live; here, that neither slips back to V1's).
     #[test]
     fn a_sign_in_starts_on_the_v2_route() -> Result<(), HomebaseError> {
         let pending = begin(
@@ -267,6 +268,7 @@ mod tests {
             "Filesync on a test",
             "http://localhost:1/back",
         )?;
+        assert_eq!(TOKEN, "/api/v2/youauth/token");
         let at = "https://frodo.test/api/v2/youauth/authorize?";
         assert!(
             pending.authorize_url.starts_with(at),
