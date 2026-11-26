@@ -57,9 +57,8 @@ product runs as a per-user daemon (`hbsyncd`) shown and controlled by the tray a
   clear their own; for a benchmark harness outside the repo, after its run)
 
 Server dependencies: every odin-core issue the client waits on has a tracking issue here,
-labelled `odin-core` (`gh issue list -R homebase-id/filesync --label odin-core`). Each one names
-its upstream issue, the workaround in the code meanwhile, and what to do once it's fixed; the
-upstream issue links back. Check upstream state now and then and act on what's fixed.
+labelled `odin-core` (`gh issue list -R homebase-id/filesync --label odin-core`; how one is
+filed: `ISSUES.md`). Check upstream state now and then and act on what's fixed.
 
 Read these first:
 - `docs/foundations.md`: the pinned decisions (client-computed stored + content hashes on
@@ -92,11 +91,10 @@ Ground rules:
   Changes) and, where the file browser is affected, `docs/spec/file-browser.md`, in the same
   PR: other clients (chat-kmp's Filesync mini-app) follow them.
 
-## Working on an issue
+## Issues
 
-Before working on an issue, read `ISSUES.md` and follow it: write the issue's essence on screen
-first (the problem as the person who hit it sees it, not the fix), stay with that problem, and
-open the PR with its `Problem:` and `Core change:` lines.
+Read [`ISSUES.md`](ISSUES.md) before working on an issue or filing one: how to read one, what to
+write on screen, how to stay with the problem, and how its PR starts.
 
 ## Build and test
 
