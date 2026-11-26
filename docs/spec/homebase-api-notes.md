@@ -31,8 +31,9 @@ Use the unified **V2** API under `/api/v2`, as chat-kmp does **[verified]**
     compares the route with the return address's). **[verified]** live 2026-11-26 on the
     dev server, whose console was older: the sign-in stopped at the consent page; with the
     form sent to `/api/v2/youauth/authorize` (as #1020 does) it went through, the token
-    came from `POST /api/v2/youauth/token`, and the login made requests. So an identity's
-    server needs that console before this client can sign in there.
+    came from `POST /api/v2/youauth/token`, and the login made requests; and with the dev
+    console moved to odin-js main (0513b100) the sign-in went through as it is. So an
+    identity's server needs that console before this client can sign in there.
 - **Requests**: `Authorization: Bearer <CAT>` on V2 **[verified]**
   `apps/Odin.Hosting/UnifiedV2/Authentication/UnifiedAuthenticationHandler.cs:203-236`.
 - **Drives**: an app cannot create a drive. The owner app creates a requested drive at
