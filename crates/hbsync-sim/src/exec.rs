@@ -2680,7 +2680,13 @@ impl Sim {
         }
         if let Some(b) = client.base.get(node).cloned() {
             let tags = b.tags.held_in(&drive.state.tags);
-            client.base.insert(node, NodeState { tags, ..b });
+            // And its executable bit, where the drive's file has none (#450).
+            let bit = drive.state.content.is_some_and(|c| c.executable);
+            let content = b.content.map(|c| FileContent {
+                executable: c.executable && bit,
+                ..c
+            });
+            client.base.insert(node, NodeState { tags, content, ..b });
         }
     }
 

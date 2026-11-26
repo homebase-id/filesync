@@ -31,6 +31,13 @@ set. A move that changes whether the bit is held gives the file what it holds no
 renamed into a launcher loses its bit, a launcher renamed into another name takes the drive's.
 Launchers that an earlier version put in place executable stay so.
 
+A file deleted for good and made again is another file of the same node, and may come without
+the bit from a device that never saw it. As for tags (§11): the bit is
+agreed between a device and the drive only while the node's current file has it, so a device
+that holds it reads it as set here and sends it up, where it would else have read the new
+file's lack of it as "cleared on the drive" and cleared its own (#450). A device that doesn't
+hold the bit sends the drive's on, as above.
+
 **Three trees.** For every sync root the client keeps three views keyed by node id:
 - **Base**: the last state both sides agreed on. Written only after an operation succeeds.
   Tags count one by one: one both sides agree on (both hold it, or both lack it) takes that
