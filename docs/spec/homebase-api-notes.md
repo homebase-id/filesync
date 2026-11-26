@@ -10,16 +10,35 @@ Use the unified **V2** API under `/api/v2`, as chat-kmp does **[verified]**
 
 ## Authentication
 - **YouAuth** **[verified]**:
-  1. `GET https://{identity}/api/owner/v1/youauth/authorize` with `client_id` (= app id),
+  1. `GET https://{identity}/api/v2/youauth/authorize` with `client_id` (= app id),
      `client_type=app`, `client_info`, `public_key` (P-384 JWK, base64url),
      `permission_request` (JSON, keys `n`, `appId`, `as`, `fn`, `d` drives, `p`, `return`, `o`),
-     `state`, `redirect_uri`, optional `cipher`. `KMP/youauth/YouAuthFlowManager.kt:212-296`.
+     `state`, `redirect_uri`, optional `cipher`. `KMP/youauth/YouAuthFlowManager.kt:310`.
   2. The owner registers the app (if new) and consents; the callback gets `identity`,
      `public_key`, `salt`, `state`. `apps/Odin.Hosting/Controllers/OwnerToken/YouAuth/YouAuthUnifiedController.cs:140-217`.
-  3. ECDH, then `POST /api/owner/v1/youauth/token` with `secret_digest`. The response carries
+  3. ECDH, then `POST /api/v2/youauth/token` with `secret_digest`. The response carries
      the shared secret and the client auth token (CAT), both AES-CBC encrypted under the exchanged
-     secret. `YouAuthUnifiedController.cs:344-368`, `KMP/youauth/YouAuthProvider.kt:98-154`.
+     secret. `YouAuthUnifiedController.cs:366` (`Token`), `KMP/youauth/YouAuthProvider.kt:105`.
   - Desktop redirect: `http://localhost:{port}/authorization-code-callback` (chat-kmp JVM).
+  - On V2's routes since 2026-11-26 (V1's were `/api/owner/v1/youauth/authorize` and
+    `…/token`): the same flow, parameters and answers (**[verified]** odin-core
+    `V2YouAuthController`, PR #2066, v0.1.996, which subclasses V1's; chat-kmp 6ceba42e7).
+    A login made on either works on, as the token doesn't name a route: nobody signs in
+    again for this.
+  - **The owner console decides where the consent is posted.** One with odin-js #1020
+    posts to the route the sign-in started on; an older one posts to V1's, and the server
+    refuses that for a sign-in started on V2 (`Path mismatch`, a 400: its consent action
+    compares the route with the return address's). **[verified]** live 2026-11-26 on the
+    dev server, whose console was older: the sign-in stopped at the consent page; with the
+    form sent to `/api/v2/youauth/authorize` (as #1020 does) it went through, the token
+    came from `POST /api/v2/youauth/token`, and the login made requests; and with the dev
+    console moved to odin-js main (0513b100) the sign-in went through as it is. So an
+    identity's server needs that console before this client can sign in there. A server
+    released as v0.1.996 or newer most likely has it (**[inferred]**, not seen on a
+    released server): odin-core's release builds the console from odin-js main
+    (`.github/actions/host/build-frontend`, `git_ref` main), and #1020 was merged four
+    hours before v0.1.996 was tagged. A console built by hand can lag, as the dev
+    server's did.
 - **Requests**: `Authorization: Bearer <CAT>` on V2 **[verified]**
   `apps/Odin.Hosting/UnifiedV2/Authentication/UnifiedAuthenticationHandler.cs:203-236`.
 - **Drives**: an app cannot create a drive. The owner app creates a requested drive at

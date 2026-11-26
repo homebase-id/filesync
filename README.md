@@ -38,7 +38,7 @@ From a terminal instead of steps 2 and 3: `hbsync setup <your identity>`.
 
 After an update on Linux, the menu offers **Restart to finish the update**.
 
-Your Homebase needs odin-core v0.1.962 or newer.
+Your Homebase needs odin-core v0.1.997 or newer.
 
 ## Using it
 
