@@ -299,7 +299,7 @@ fn read_pages<G: DerefMut<Target = StateDb>>(
                         .filter_map(|r| r.at.map(|at| at.file_id));
                     r.shown(whole.entries.iter().map(|h| h.file_id).chain(unread));
                 }
-                // What others added, new to this state: the remote sees to it before the
+                // What others added, new to the mirror: the remote sees to it before the
                 // page is taken in, so that a failure reads the page again.
                 let new = new_here(&db, &whole.theirs)?;
                 if !new.is_empty() {
@@ -587,8 +587,10 @@ fn refused_row(at: RemoteRef, why: String) -> Skipped {
     }
 }
 
-/// Of `nodes`, the ones the store knows nothing of yet ([`Remote::others_added`]). Nothing is
-/// read for none: what most pages have of them.
+/// Of `nodes`, the ones the mirror doesn't hold yet ([`Remote::others_added`]): new on the
+/// drive to this state, or back from Recently deleted. Not by whether it knows the node at
+/// all: a folder is known from the first node in it. Nothing is read for none: what most
+/// pages have of them.
 fn new_here<G: DerefMut<Target = StateDb>>(
     db: &impl Fn() -> G,
     nodes: &[NodeId],
@@ -599,7 +601,7 @@ fn new_here<G: DerefMut<Target = StateDb>>(
     db().read(|s| {
         let mut new = Vec::new();
         for node in nodes {
-            if !s.knows_node(*node)? {
+            if !s.in_mirror(*node)? {
                 new.push(*node);
             }
         }

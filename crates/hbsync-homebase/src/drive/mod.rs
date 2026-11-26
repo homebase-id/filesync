@@ -1285,8 +1285,9 @@ impl HomebaseRemote {
     ///   which came with the shares the folder had ([`HomebaseRemote::moving`]). Nothing is
     ///   withdrawn: a member sends no share its folder lacks, and giving alone can't take
     ///   one from a member by mistake.
-    /// - A refusal is said and passed by. The server not reached is returned: the feed's
-    ///   page is read again, and this tried with it.
+    /// - A refusal is said and passed by ([`passed_by`]). Anything else is returned (the
+    ///   server not reached or busy, a node written again meanwhile): the feed's page is
+    ///   read again, and this tried with it.
     fn share_what_others_added(&self, added: &[wire::Added]) -> Result<()> {
         if added.is_empty() || self.drive_key(false)?.is_none() {
             return Ok(());
@@ -1298,12 +1299,7 @@ impl HomebaseRemote {
             folders.entry(a.folder).or_default().push(a.node);
         }
         for (folder, nodes) in folders {
-            match self.share_in_their_folder(folder, &nodes) {
-                Err(e) if !e.is_transient() => tracing::warn!(
-                    "what others added to a shared folder isn't shared as that folder is: {e}"
-                ),
-                done => done?,
-            }
+            passed_by(self.share_in_their_folder(folder, &nodes))?;
         }
         Ok(())
     }
@@ -1320,9 +1316,12 @@ impl HomebaseRemote {
         for some in nodes.chunks(NODES_ASKED) {
             let page = self.query_batch(&wire::nodes_query(some, wire::NODE_TYPES))?;
             for row in &page.search_results {
-                let header: wire::FileHeader = serde_json::from_str(row.get()).map_err(|e| {
-                    RemoteError::Fatal(format!("a node others added doesn't read: {e}"))
-                })?;
+                let Ok(header) = serde_json::from_str::<wire::FileHeader>(row.get()) else {
+                    tracing::warn!(
+                        "a node others added doesn't read: its folder's shares aren't given to it"
+                    );
+                    continue;
+                };
                 // Moved or removed since the feed told of it: not this folder's to share.
                 if !header.live_in(folder) {
                     continue;
@@ -1336,12 +1335,26 @@ impl HomebaseRemote {
         }
         self.give(&files, &lasting)?;
         for folder in folders {
-            let all = self.moving(folder.node, folder.at, &lasting)?;
-            self.give(&all, &lasting)?;
-            // (Known no more as it was read: it shares what it was given here too.)
-            for node in all.iter().filter(|node| node.folder) {
-                self.folders.forget(node.node);
+            passed_by(self.share_their_folder(&folder, &lasting))?;
+        }
+        Ok(())
+    }
+
+    /// Gives `folder`, which another made, and all that is in it the shares `lasting` each
+    /// lacks, `moves` held.
+    fn share_their_folder(&self, folder: &Moving, lasting: &[Share]) -> Result<()> {
+        let all = match self.moving(folder.node, folder.at, lasting) {
+            // Written again since it was read a moment ago: read again, with its page.
+            Err(RemoteError::VersionMismatch) => {
+                let why = "a folder another made changed as its shares were read";
+                return Err(RemoteError::Transient(why.into()));
             }
+            all => all?,
+        };
+        self.give(&all, lasting)?;
+        // (Known no more as it was read: it shares what it was given here too.)
+        for node in all.iter().filter(|node| node.folder) {
+            self.folders.forget(node.node);
         }
         Ok(())
     }
@@ -1583,8 +1596,8 @@ impl HomebaseRemote {
     }
 
     /// Gives the nodes `moving` the shares `entered` each lacks, circle by circle
-    /// ([`HomebaseRemote::share_with`]). A circle's refusal is said, and leaves the others;
-    /// the server not reached is returned.
+    /// ([`HomebaseRemote::share_with`]). A circle's refusal is said, and leaves the others
+    /// ([`is_refusal`]); anything else is returned.
     fn give(&self, moving: &[Moving], entered: &[Share]) -> Result<()> {
         for share in entered {
             match self.share_with(moving, share) {
@@ -1597,7 +1610,7 @@ impl HomebaseRemote {
                      are gone, the server says ({shared} are shared)",
                     share.circle
                 ),
-                Err(e) if e.is_transient() => return Err(e),
+                Err(e) if !is_refusal(&e) => return Err(e),
                 Err(e) => tracing::warn!(
                     "what is in a shared folder isn't all shared as that folder is (circle \
                      {}): {e}",
@@ -2221,6 +2234,29 @@ fn changes_page(
         skipped,
         server_time: page.query_time,
     })
+}
+
+/// Whether `e` is the server's refusal of what was asked of it (a share it won't write, a
+/// circle or a file that is gone; a 403 is a circle's here, or the login's, which the next
+/// request tells). Not the server being out of reach or busy, nor a node written again
+/// meanwhile: those are tried again.
+fn is_refusal(e: &RemoteError) -> bool {
+    matches!(
+        e,
+        RemoteError::Fatal(_) | RemoteError::NotFound | RemoteError::Denied(..)
+    )
+}
+
+/// A step of seeing to what others added: a refusal ([`is_refusal`]) is said and passed by,
+/// so that it keeps no other node from its shares; anything else is the caller's.
+fn passed_by(done: Result<()>) -> Result<()> {
+    match done {
+        Err(e) if is_refusal(&e) => {
+            tracing::warn!("what others added isn't all shared as its folder is: {e}");
+            Ok(())
+        }
+        done => done,
+    }
 }
 
 /// Nodes asked about by their ids in one request
@@ -3379,7 +3415,17 @@ mod tests {
         assert!(remote.share_what_others_added(&[]).is_ok());
         assert!(remote.share_what_others_added(&[added(unshared)]).is_ok());
         let failed = remote.share_what_others_added(&[added(shared)]);
-        assert!(failed.is_err_and(|e| e.is_transient()));
+        assert!(failed.is_err_and(|e| !is_refusal(&e)), "tried again");
+        let busy = RemoteError::Later {
+            why: "503".into(),
+            retry_after: std::time::Duration::from_secs(600),
+        };
+        assert!(!is_refusal(&busy) && !is_refusal(&RemoteError::VersionMismatch));
+        assert!(
+            is_refusal(&RemoteError::Fatal("400".into())) && is_refusal(&RemoteError::NotFound)
+        );
+        assert!(passed_by(Err(RemoteError::NotFound)).is_ok());
+        assert!(passed_by(Err(RemoteError::VersionMismatch)).is_err());
         assert!(
             remote.others_added(&[NodeId::new()]).is_ok(),
             "not of the last page"

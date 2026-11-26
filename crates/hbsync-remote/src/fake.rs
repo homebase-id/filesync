@@ -876,8 +876,10 @@ impl FakeServer {
             None => cursor.unwrap_or("").to_owned(),
         };
         // What a member added, to the owner: its client owes those something.
+        // (Live ones in a folder, as Homebase's adapter names them.)
         let theirs = |h: &RemoteHeader| {
-            (view == View::Owner && self.by_others.contains(&h.file_id)).then(|| h.node())?
+            let named = view == View::Owner && !h.removed && !h.parent.is_root();
+            (named && self.by_others.contains(&h.file_id)).then(|| h.node())?
         };
         Ok(ChangesPage {
             theirs: entries.iter().filter_map(theirs).collect(),

@@ -813,8 +813,9 @@ pub trait Remote: Send + Sync {
         std::time::Duration::ZERO
     }
 
-    /// The engine is about to take `nodes` in for the first time: of a page's
-    /// [`ChangesPage::theirs`], the ones its state knows nothing of yet. A remote that owes
+    /// The engine is about to take `nodes` into its mirror: of a page's
+    /// [`ChangesPage::theirs`], the ones that aren't in it yet (new on the drive, or back from
+    /// Recently deleted). A remote that owes
     /// what others added something does it now (Homebase: the shares of its folder's other
     /// circles, which only a device of the drive's owner can give). Once per node, then: a
     /// later change of it doesn't come here again. An error is the pull's: the page isn't

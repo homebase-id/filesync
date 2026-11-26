@@ -484,6 +484,22 @@ fn what_others_added_is_seen_to_once_as_it_is_taken_in() -> R {
     remote.update(&at, &renamed, None)?;
     drive.pull(None)?;
     assert_eq!(seen_to(), [theirs.node]);
+
+    // A folder told of after a node in it: known by then as that node's folder, and new
+    // to the mirror all the same.
+    let later = NodeMeta {
+        parent: docs.node,
+        ..folder("told of later")
+    };
+    let inside = NodeMeta {
+        parent: later.node,
+        ..folder("inside")
+    };
+    remote.create(&inside, None)?;
+    drive.pull(None)?;
+    member.create(&later, None)?;
+    drive.pull(None)?;
+    assert_eq!(seen_to(), [theirs.node, later.node]);
     Ok(())
 }
 

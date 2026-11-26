@@ -1134,19 +1134,22 @@ shares a folder writes the rows of what is in it then (**[verified]** chat-kmp
     member added (this identity's own writes carry its own, **[verified]** live
     2026-11-26; whoever made the file, as every write of it since keeps the sender:
     **[verified]** odin-core `DriveStorageServiceBase`). A page read whole names them
-    (`ChangesPage::theirs`), and the engine hands the remote the ones its state knows
-    nothing of yet, before it takes the page in: once per node, so a share its owner takes
-    from such a node later isn't given back when the node next changes. A page without
+    (`ChangesPage::theirs`), and the engine hands the remote the ones its mirror doesn't
+    hold yet (new on the drive, or back from Recently deleted), before it takes the page
+    in: once as a node comes, so a share its owner takes from such a node later isn't
+    given back when the node next changes. A page without
     one asks nothing, which is all of it for someone who shares nothing.
   - Per folder, one `query-batch` reads its such nodes with their shares (100 per request;
     a node's key is opened only where it lacks a share; one moved or removed since is
     left out), and one `PUT /drives/{d}/shares` per circle gives what each lacks, as after
     a move. A folder a member made is given with all that is in it (read as a move reads
-    it), whatever page told of which first. Nothing is withdrawn. Nothing is asked for a
+    it), whichever the feed told of first. Nothing is withdrawn. Nothing is asked for a
     folder that isn't shared; one shared with a single circle is asked about too, as that
     circle needn't be the one its sender came in through (theirs may have ended since).
-  - A refusal is said in the log and passed by. The server not reached fails the pull:
-    the page isn't taken in, and is read again with the next one.
+  - A refusal is said in the log and passed by, node by node (a share the server won't
+    write, a circle or a file that is gone, a row that doesn't read). Anything else fails
+    the pull (the server not reached or busy, a folder written again as it was read): the
+    page isn't taken in, and is read again with the next one.
   - Seen live (dev server, a folder shared with two circles, the owner's daemon stopped
     while the member added a file, its second share taken away to stand for a member of
     one circle): the file had the second circle's share 0.3 s after the daemon started.
@@ -1156,8 +1159,9 @@ shares a folder writes the rows of what is in it then (**[verified]** chat-kmp
   - The feed's read waits where it has such nodes and a folder's move that changes shares
     is on its way (a large folder moved out of a shared one: above), and the account's
     sync with it.
-  - "Once" is per state: a computer set up anew sees to every node members added, and
-    gives one back a share its owner had taken from it alone.
+  - "Once" is as a node comes into this state's mirror: a computer set up anew sees to
+    every node members added, and a node put back from Recently deleted is seen to again;
+    either gives one back a share its owner had taken from it alone.
   - A share of the folder that a refusal kept from such a node (a circle disabled, its
     key not to be had) isn't given later.
   - A node added within seconds of a folder first being shared may go up unshared (the
