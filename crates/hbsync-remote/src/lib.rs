@@ -180,6 +180,9 @@ pub struct ChangesPage {
     /// The remote's clock when it answered, Unix ms (Homebase's `queryTime`): the times of
     /// [`RemoteHeader`] are this clock's.
     pub server_time: i64,
+    /// The nodes among `entries` that others added to this drive, where the remote owes
+    /// them something once ([`Remote::others_added`]): none from most.
+    pub theirs: Vec<NodeId>,
 }
 
 /// A feed row a remote couldn't read as a node ([`ChangesPage::skipped`]): what of it it could
@@ -810,6 +813,17 @@ pub trait Remote: Send + Sync {
         std::time::Duration::ZERO
     }
 
+    /// The engine is about to take `nodes` in for the first time: of a page's
+    /// [`ChangesPage::theirs`], the ones its state knows nothing of yet. A remote that owes
+    /// what others added something does it now (Homebase: the shares of its folder's other
+    /// circles, which only a device of the drive's owner can give). Once per node, then: a
+    /// later change of it doesn't come here again. An error is the pull's: the page isn't
+    /// taken in, and is read again.
+    fn others_added(&self, nodes: &[NodeId]) -> Result<()> {
+        let _ = nodes;
+        Ok(())
+    }
+
     /// Whether this is another identity's drive, read as a member of what they share: its feed
     /// lists only what is shared with this identity, so a file may come without its folder, and
     /// a tombstone without a version says a share was withdrawn, not that the file is gone
@@ -917,6 +931,10 @@ impl<T: Remote + ?Sized> Remote for std::sync::Arc<T> {
 
     fn hold_back(&self) -> std::time::Duration {
         (**self).hold_back()
+    }
+
+    fn others_added(&self, nodes: &[NodeId]) -> Result<()> {
+        (**self).others_added(nodes)
     }
 
     fn shared(&self) -> bool {

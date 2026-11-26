@@ -589,7 +589,6 @@ pub(crate) const NODE_TYPES: &[i32] = &[FILE_TYPE_FOLDER, FILE_TYPE_FILE];
 pub(crate) struct Added {
     pub node: NodeId,
     pub folder: NodeId,
-    pub is_folder: bool,
 }
 
 /// The `query-batch` body for the node `node` alone, if it is of one of `types`, with its
@@ -779,11 +778,15 @@ impl FileHeader {
             && app.archival_status != ARCHIVAL_REMOVED
             && !sender.eq_ignore_ascii_case(own)
             && !folder.is_root();
-        theirs.then_some(Added {
-            node,
-            folder,
-            is_folder: app.file_type == FILE_TYPE_FOLDER,
-        })
+        theirs.then_some(Added { node, folder })
+    }
+
+    /// A live sync node in `folder`, not in Recently deleted: what was asked about by its
+    /// id is still what was added there.
+    pub(crate) fn live_in(&self, folder: NodeId) -> bool {
+        let app = &self.file_metadata.app_data;
+        let there = app.group_id == Some(folder.0) && app.archival_status != ARCHIVAL_REMOVED;
+        self.live_node() && there
     }
 
     /// The file key and header IV, opened with `keys`. Every node is encrypted.
@@ -2036,19 +2039,13 @@ mod tests {
             });
             serde_json::from_value::<FileHeader>(row).map(|h| h.added_by_another("me.example"))
         };
-        let theirs = |is_folder: bool| -> Result<Option<Added>, Box<dyn std::error::Error>> {
-            Ok(Some(Added {
-                node: NodeId(NODE.parse()?),
-                folder: NodeId(FOLDER.parse()?),
-                is_folder,
-            }))
-        };
+        let theirs = Some(Added {
+            node: NodeId(NODE.parse()?),
+            folder: NodeId(FOLDER.parse()?),
+        });
         let other = || json!("sam.example");
-        assert_eq!(added(other(), "active", FILE_TYPE_FILE, 0)?, theirs(false)?);
-        assert_eq!(
-            added(other(), "active", FILE_TYPE_FOLDER, 0)?,
-            theirs(true)?
-        );
+        assert_eq!(added(other(), "active", FILE_TYPE_FILE, 0)?, theirs);
+        assert_eq!(added(other(), "active", FILE_TYPE_FOLDER, 0)?, theirs);
         for own in [
             json!("me.example"),
             json!("Me.Example"),
@@ -2073,6 +2070,8 @@ mod tests {
             },
         }))?;
         assert_eq!(at_the_top.added_by_another("me.example"), None);
+        // Asked about by its id later, it is what was added only where it is still there.
+        assert!(at_the_top.live_in(NodeId::ROOT) && !at_the_top.live_in(NodeId(FOLDER.parse()?)));
 
         // Asked about together: one request names them all.
         let (a, b) = (NodeId(NODE.parse()?), NodeId(FOLDER.parse()?));

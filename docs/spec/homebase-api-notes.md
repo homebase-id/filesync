@@ -1125,35 +1125,41 @@ shares a folder writes the rows of what is in it then (**[verified]** chat-kmp
   is up); a new folder that was changed so, or whose folder wasn't read, is asked about
   when next added to.
 - **What a member added reaches the folder's other circles**
-  (`HomebaseRemote::share_what_others_added`). A member's file comes with the rows of the
-  circles the member is in: the member holds no other circle's key, and the file's key is
-  no server's to lock again. Only a login that holds the drive's key and the circles'
-  can: a computer of the owner's (the mobile app holds them too, and doesn't).
+  (`HomebaseRemote::share_what_others_added`, on `Remote::others_added`). A member's file
+  comes with the rows of the circles the member is in: the member holds no other circle's
+  key, and the file's key is no server's to lock again. Only a login that holds the
+  drive's key and the circles' can: a computer of the owner's (the mobile app holds them
+  too, and doesn't).
   - Told by the feed: a live sync node whose `senderOdinId` is another identity's is one a
     member added (this identity's own writes carry its own, **[verified]** live
     2026-11-26; whoever made the file, as every write of it since keeps the sender:
-    **[verified]** odin-core `DriveStorageServiceBase`). Each page's such nodes are seen to
-    as the page is read whole, which a node's is when it is new or changed; a page without
+    **[verified]** odin-core `DriveStorageServiceBase`). A page read whole names them
+    (`ChangesPage::theirs`), and the engine hands the remote the ones its state knows
+    nothing of yet, before it takes the page in: once per node, so a share its owner takes
+    from such a node later isn't given back when the node next changes. A page without
     one asks nothing, which is all of it for someone who shares nothing.
-  - A folder shared with one circle asks nothing either: that circle is its sender's,
-    whose row the node came with (how the folder is shared is read once, as for an add).
-  - Else one `query-batch` reads the folder's such nodes with their shares (100 per
-    request; a node's key is opened only where it lacks a share), and one `PUT
-    /drives/{d}/shares` per circle gives what each lacks, as after a move. Nothing is withdrawn. A folder a member made goes before what is in it,
-    which is shared as that folder is then; this computer learns it anew for what it adds
-    there itself.
-  - The feed goes on whatever fails here: said in the log, and tried again when the node
-    next changes or the daemon starts again.
+  - Per folder, one `query-batch` reads its such nodes with their shares (100 per request;
+    a node's key is opened only where it lacks a share; one moved or removed since is
+    left out), and one `PUT /drives/{d}/shares` per circle gives what each lacks, as after
+    a move. A folder a member made is given with all that is in it (read as a move reads
+    it), whatever page told of which first. Nothing is withdrawn. Nothing is asked for a
+    folder that isn't shared; one shared with a single circle is asked about too, as that
+    circle needn't be the one its sender came in through (theirs may have ended since).
+  - A refusal is said in the log and passed by. The server not reached fails the pull:
+    the page isn't taken in, and is read again with the next one.
   - Seen live (dev server, a folder shared with two circles, the owner's daemon stopped
     while the member added a file, its second share taken away to stand for a member of
-    one circle): the file had the second circle's share as the daemon started and read
-    the feed.
+    one circle): the file had the second circle's share 0.3 s after the daemon started.
 - **Limits.**
   - Members of the folder's other circles see what a member added only once a computer
     of the owner's has been online since.
   - The feed's read waits where it has such nodes and a folder's move that changes shares
     is on its way (a large folder moved out of a shared one: above), and the account's
     sync with it.
+  - "Once" is per state: a computer set up anew sees to every node members added, and
+    gives one back a share its owner had taken from it alone.
+  - A share of the folder that a refusal kept from such a node (a circle disabled, its
+    key not to be had) isn't given later.
   - A node added within seconds of a folder first being shared may go up unshared (the
     app that shared wrote the rows of what was there then).
   - A share's change is known here once its notice came: seconds. With the notifications

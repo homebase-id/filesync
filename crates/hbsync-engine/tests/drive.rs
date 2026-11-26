@@ -437,6 +437,56 @@ fn a_row_fetched_before_a_hard_delete_is_refused_after_it() -> R {
     Ok(())
 }
 
+/// What a member added is handed to the remote once, as its page is first taken in
+/// ([`Remote::others_added`]): the remote failing then fails the pull, which reads the page
+/// again; a later change of the node doesn't hand it over again.
+#[test]
+fn what_others_added_is_seen_to_once_as_it_is_taken_in() -> R {
+    use hbsync_remote::contract::Shares;
+    let dir = tempfile::tempdir()?;
+    let (drive, remote) = drive(dir.path())?;
+    let docs = folder("Docs");
+    let shared = remote.create(&docs, None)?;
+    remote.share_to_edit(shared.at().file_id)?;
+    drive.pull(None)?;
+    let seen_to = || {
+        let server = remote.server_handle();
+        let server = server.lock().expect("unpoisoned");
+        server.seen_to().to_vec()
+    };
+    assert!(seen_to().is_empty(), "its own");
+
+    let member = FakeRemote::member(remote.server_handle()).writing();
+    let theirs = NodeMeta {
+        parent: docs.node,
+        ..folder("theirs")
+    };
+    let made = member.create(&theirs, None)?;
+    // (Every try of the pull's, and its retries.)
+    remote.faults().fail_others_added = 4;
+    assert!(
+        drive.pull(None).is_err(),
+        "not seen to: the page isn't taken in"
+    );
+    assert!(seen_to().is_empty());
+    drive.pull(None)?;
+    assert_eq!(seen_to(), [theirs.node]);
+
+    // Renamed later: known here by then, and not handed over again.
+    let renamed = NodeMeta {
+        content: NodeContent::folder("renamed"),
+        ..theirs.clone()
+    };
+    let at = hbsync_types::Target {
+        at: made.at(),
+        token: None,
+    };
+    remote.update(&at, &renamed, None)?;
+    drive.pull(None)?;
+    assert_eq!(seen_to(), [theirs.node]);
+    Ok(())
+}
+
 /// A remote whose feed reads fail once a whole page was read: a pull that stops partway.
 struct FailsAfterAPage {
     inner: Arc<FakeRemote>,
