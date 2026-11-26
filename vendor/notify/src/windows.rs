@@ -21,8 +21,8 @@ use std::slice;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use windows_sys::Win32::Foundation::{
-    CloseHandle, ERROR_ACCESS_DENIED, ERROR_OPERATION_ABORTED, ERROR_SUCCESS, HANDLE,
-    INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
+    CloseHandle, ERROR_ACCESS_DENIED, ERROR_NOTIFY_ENUM_DIR, ERROR_OPERATION_ABORTED,
+    ERROR_SUCCESS, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, ReadDirectoryChangesW, FILE_ACTION_ADDED, FILE_ACTION_MODIFIED,
@@ -330,7 +330,7 @@ fn start_read(
 
 unsafe extern "system" fn handle_event(
     error_code: u32,
-    _bytes_written: u32,
+    bytes_written: u32,
     overlapped: *mut OVERLAPPED,
 ) {
     let overlapped: Box<OVERLAPPED> = Box::from_raw(overlapped);
@@ -351,7 +351,8 @@ unsafe extern "system" fn handle_event(
                 return;
             }
         }
-        ERROR_SUCCESS => {
+        // hbsync: ERROR_NOTIFY_ENUM_DIR is Windows saying it dropped the changes (below).
+        ERROR_SUCCESS | ERROR_NOTIFY_ENUM_DIR => {
             // Success, continue to handle the event
         }
         _ => {
@@ -374,6 +375,20 @@ unsafe extern "system" fn handle_event(
         request.handle,
         request.action_tx,
     );
+
+    // hbsync: a completion that succeeds without bytes is Windows saying that more changed
+    // than its buffer holds, and that it dropped all of it (ERROR_NOTIFY_ENUM_DIR says the
+    // same, where a completion ever carries it). The buffer holds no entry then: ask for a
+    // rescan instead of reading it (as upstream's main does; 8.2.0 read the empty buffer and
+    // said nothing, so the changes were lost without a word). Not for ERROR_ACCESS_DENIED,
+    // which goes on as before.
+    if error_code == ERROR_NOTIFY_ENUM_DIR || (error_code == ERROR_SUCCESS && bytes_written == 0) {
+        if let Ok(mut guard) = request.event_handler.lock() {
+            let f: &mut dyn EventHandler = &mut *guard;
+            f.handle_event(Ok(Event::new(EventKind::Other).set_flag(Flag::Rescan)));
+        }
+        return;
+    }
 
     // The FILE_NOTIFY_INFORMATION struct has a variable length due to the variable length
     // string as its last member. Each struct contains an offset for getting the next entry in

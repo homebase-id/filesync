@@ -828,7 +828,6 @@ included (service managers restart it then).
     a share stores its journal position (what a start reads on from, macOS and Windows) only
     after a quiet period in which that thread handled nothing, so none while the main folder
     is busy (an older position only reads more at the next start).
-    (On Windows an overflow isn't told at all today, for any folder: #424.)
   - Known limits: a share's folder renamed only in the case of its letters (Windows, macOS)
     isn't watched under its new spelling until the daemon starts again (#426); folders made
     once inotify's watches are used up aren't watched, for a share as for any folder (#425).

@@ -1104,6 +1104,60 @@ mod tests {
             .expect("every call answered");
     }
 
+    /// A burst the OS watcher's buffer can't hold: Windows drops what it couldn't keep and
+    /// answers with nothing. The watcher must say so (a rescan), not pass it by (#424). Its
+    /// handler is held at its first event while the files are made, as a busy daemon's is
+    /// for a moment, so the changes outrun its reads for sure: some 200 KiB of records
+    /// against two buffers of 16 KiB. And it watches on: a file made after the rescan is
+    /// told of.
+    #[cfg(windows)]
+    #[test]
+    fn a_burst_the_watcher_cant_hold_asks_for_a_rescan() {
+        const FILES: usize = 500;
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (first_tx, first_rx) = std::sync::mpsc::channel();
+        let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+        let mut held = false;
+        let mut watcher = notify::recommended_watcher(move |res: notify::Result<Event>| {
+            // Held at the first event until the burst is made (its sender dropped).
+            if !std::mem::replace(&mut held, true) {
+                let _ = first_tx.send(());
+                let _ = go_rx.recv();
+            }
+            let _ = tx.send(res);
+        })
+        .expect("a watcher");
+        watcher
+            .watch(dir.path(), RecursiveMode::Recursive)
+            .expect("watched");
+        // (Long names: a record holds its name, and the buffer few of them.)
+        let name = |i: usize| format!("{i:04}-{}", "a-long-name-".repeat(8));
+        fs::write(dir.path().join(name(0)), b"x").expect("written");
+        first_rx
+            .recv_timeout(Duration::from_secs(20))
+            .expect("the first event");
+        for i in 1..FILES {
+            fs::write(dir.path().join(name(i)), b"x").expect("written");
+        }
+        drop(go_tx);
+        let mut rescan = false;
+        while !rescan && let Ok(res) = rx.recv_timeout(Duration::from_secs(5)) {
+            rescan = res.expect("an event").need_rescan();
+        }
+        assert!(
+            rescan,
+            "no rescan asked for, though {FILES} files outran the buffer"
+        );
+        let after = dir.path().join("after");
+        fs::write(&after, b"x").expect("written");
+        let mut told = false;
+        while !told && let Ok(res) = rx.recv_timeout(Duration::from_secs(5)) {
+            told = res.expect("an event").paths.contains(&after);
+        }
+        assert!(told, "not watched after the rescan");
+    }
+
     fn event(kind: EventKind, paths: &[&str]) -> Event {
         Event {
             kind,
