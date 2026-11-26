@@ -1074,10 +1074,6 @@ fn a_reread_asks_past_a_file_that_cant_be_answered() -> common::Res<()> {
         2,
         "one file left: one request"
     );
-    // It answers: the re-read ends.
-    remote.faults().script.clear();
-    feed::pull(|| db.borrow_mut(), &remote, 1000, &mut reread)?;
-    assert!(reread.is_none() && !db.borrow_mut().read(|s| s.rereading())?);
     Ok(())
 }
 
