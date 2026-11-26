@@ -1135,6 +1135,13 @@ shares a folder writes the rows of what is in it then (**[verified]** chat-kmp
   - Shares withdrawn before a move that then isn't made (the server not reached, and the
     node moved back before the next try) aren't given back: the node is in its shared
     folder unshared until it is moved in again or shared in the app.
+  - "Fewer, never more" is by circle. A circle both folders are shared with keeps its
+    share through the move, and is given the entered folder's rights and end after it:
+    where that folder gives it fewer (reading, not editing) and that request fails, the
+    node keeps the wider share, said in the log, and nothing narrows it later.
+  - A new node whose upload landed and whose answer was lost isn't held to its folder: the
+    next try is told the node exists, and is done. Where the folder moved out of a shared
+    one, or a share of it was withdrawn, in between, the node keeps what it went up with.
   - A large folder moved out of a shared one is slow: one request per share to withdraw,
     as the server has no route that takes several (10,000 files, 10,000 requests, the move
     waiting for them; and with it every other move, and what is first added to a folder

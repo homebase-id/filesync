@@ -1313,8 +1313,10 @@ impl HomebaseRemote {
     /// - The shares of the circles the folder it leaves is shared with, and the one it
     ///   enters isn't, are withdrawn **before** the move; the ones the folder it enters
     ///   shares, and a node lacks (or has with other rights, or another end), are given
-    ///   **after** it. So whatever fails on the way, a node is shared with fewer, never
-    ///   with more, than where it is.
+    ///   **after** it. So whatever fails on the way, a node is shared with fewer circles,
+    ///   never with more, than where it is. (A circle of both folders keeps its share
+    ///   through the move: where the folder entered gives it fewer rights and giving those
+    ///   fails, the node keeps the wider ones. Said, and left: a known limit.)
     /// - What is in the node is read first, with each node's shares and (to give one) its
     ///   key: one request for the node, one per page of 500 nodes per 100 folders below it.
     ///   Withdrawn: one request per share; given: one per 100 shares of a circle.
