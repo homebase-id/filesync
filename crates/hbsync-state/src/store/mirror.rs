@@ -40,6 +40,17 @@ impl ReadTx<'_> {
             .exists([at.file_id.0.as_bytes(), at.version.0.as_bytes()])?)
     }
 
+    /// Whether the mirror holds `node`: on the drive, as far as this state has it. Not one
+    /// in Recently deleted, nor one it only knows as another's folder.
+    pub fn in_mirror(&self, node: NodeId) -> Result<bool> {
+        let held = self.one(
+            "SELECT 1 FROM remote m JOIN nodes n ON n.id = m.id WHERE n.uuid = ?1",
+            node.0.as_bytes(),
+            |_| Ok(()),
+        )?;
+        Ok(held.is_some())
+    }
+
     pub fn mirror_by_file(&self, file_id: RemoteFileId) -> Result<Option<MirrorRow>> {
         match self.one(
             &format!("{MIRROR_SELECT} WHERE m.file_id = ?1"),

@@ -2103,6 +2103,14 @@ it tomorrow. So a computer of the owner's shares what it adds itself:
   Between two folders shared alike, nothing changes. A share given to the node itself, by
   its owner in the app, counts as the folder's where the folder left is shared with the
   same people: it goes with the move out.
+- **What a member added is shared as its folder is.** A member's file comes with the
+  shares of the circles that member is in; where its folder is shared with others too,
+  the owner's computer gives it theirs as it first takes the node in
+  (`Remote::others_added`, `HomebaseRemote::share_what_others_added`): only a device of
+  the owner's holds the keys for that. Once as the node comes (new on the drive, or back
+  from Recently deleted): its later changes change no share, as any write that isn't a
+  move. The remote not reached or busy fails the pull, and the page is read again (engine test `what_others_added_is_seen_to_once_as_it_is_taken_in`; the
+  simulator and the fake know one member and one share, and give nothing).
 - **A write that isn't a move changes no share.** A node put back from Recently deleted,
   renamed or written again keeps the shares it has; one made again after it went for good
   is a new file, shared as its folder is then.

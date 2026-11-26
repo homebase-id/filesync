@@ -113,6 +113,10 @@ pub struct FakeServer {
     /// Feed index: (the file's `modified`, row) → file.
     feed: BTreeMap<(i64, u64), RemoteFileId>,
     clock_ms: i64,
+    /// The files a member added, and the nodes the owner's client was told to see to
+    /// ([`Remote::others_added`]), in the order it was.
+    by_others: std::collections::HashSet<RemoteFileId>,
+    seen_to: Vec<NodeId>,
     /// Files the feed leaves out though they exist (odin-core leaves out a row with a later
     /// `modified` than its holdback, or one the caller may not see), for tests.
     unlisted: std::collections::HashSet<RemoteFileId>,
@@ -175,6 +179,8 @@ impl FakeServer {
             feed: BTreeMap::new(),
             // A server's clock: removal times are compared with the purge's cut-off.
             clock_ms: hbsync_types::unix_now_ms(),
+            by_others: Default::default(),
+            seen_to: Vec::new(),
             unlisted: Default::default(),
             unreadable: Default::default(),
             next_row: 1,
@@ -869,7 +875,14 @@ impl FakeServer {
             Some((t, r)) => format!("{t}:{r}"),
             None => cursor.unwrap_or("").to_owned(),
         };
+        // What a member added, to the owner: its client owes those something.
+        // (Live ones in a folder, as Homebase's adapter names them.)
+        let theirs = |h: &RemoteHeader| {
+            let named = view == View::Owner && !h.removed && !h.parent.is_root();
+            (named && self.by_others.contains(&h.file_id)).then(|| h.node())?
+        };
         Ok(ChangesPage {
+            theirs: entries.iter().filter_map(theirs).collect(),
             entries,
             cursor,
             has_more,
@@ -1044,6 +1057,12 @@ impl FakeServer {
 
     /// Whether the member reads `file_id`: shared with it, the share not withdrawn and not
     /// ended.
+    /// The nodes the owner's client was told to see to ([`Remote::others_added`]), in the
+    /// order it was.
+    pub fn seen_to(&self) -> &[NodeId] {
+        &self.seen_to
+    }
+
     pub fn shared_live(&self, file_id: RemoteFileId) -> bool {
         seen_by(&self.shares, self.clock_ms, file_id, View::Member).is_some_and(Seen::reads)
     }
@@ -1072,6 +1091,8 @@ fn parse_cursor(c: &str) -> Result<(i64, u64)> {
 pub struct Faults {
     /// The next requests fail with [`RemoteError::Transient`] before reaching the server.
     pub fail_next: usize,
+    /// The next so many [`Remote::others_added`] fail so.
+    pub fail_others_added: usize,
     /// Scripted outcomes, consumed one per request: `true` = fail transiently.
     pub script: VecDeque<bool>,
     /// The next upload breaks after this many bytes (a dropped connection).
@@ -1506,9 +1527,11 @@ impl FakeRemote {
                         "the owner's server didn't take the change".into(),
                     ));
                 }
-                replay(held.bytes, |upload| {
+                let written = replay(held.bytes, |upload| {
                     server.create_by(writer, &meta, upload, held.shared_as)
-                })?
+                })?;
+                server.by_others.insert(written.at().file_id);
+                written
             }
             Ask::Update(at, meta) => {
                 self.their_server_takes()?;
@@ -1793,6 +1816,19 @@ impl Remote for FakeRemote {
         self.gate()?;
         self.faults().full_pages += 1;
         self.server().read(cursor, limit, self.view)
+    }
+
+    fn others_added(&self, nodes: &[NodeId]) -> Result<()> {
+        let mut faults = self.faults();
+        if faults.fail_others_added > 0 {
+            faults.fail_others_added -= 1;
+            return Err(RemoteError::Transient(
+                "not seen to: the line went down".into(),
+            ));
+        }
+        drop(faults);
+        self.server().seen_to.extend(nodes);
+        Ok(())
     }
 
     fn change_refs(&self, cursor: Option<&str>, limit: usize) -> Result<RefsPage> {

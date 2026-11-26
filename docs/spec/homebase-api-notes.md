@@ -855,13 +855,16 @@ asked for it syncs a share read-only until its owner approves. **[verified]** li
   `{publicKeyJwk, publicKeyCrc32, callerMayWrite, isZeroKnowledge, sharingModel}`, asked
   once per share and run. The new file's id on their drive isn't in any answer: the client
   reads it by `GET /drives/{alias}/files/by-uid/{uniqueId}/header` on their server (one
-  request). All **[verified]** live. The circles of the folder the member isn't in get no
-  row for the file from anyone: their server stores the rows sent and adds none
-  (**[verified]** odin-core `PeerDriveIncomingTransferService`), and no client writes them
-  (**[verified]** chat-kmp 0ff83254c: `FilesyncShareUpkeep` seals circle keys and keeps the
-  editors' circle, `FilesyncSharing.inherit` runs after that app's own uploads alone; this
-  client's owner side shares what it adds itself, nothing a member added: "Sharing what
-  this identity's computer adds"). So members of those circles don't see it.
+  request). All **[verified]** live. A member in several of the folder's circles sends a
+  row for each (**[verified]** live 2026-11-26). The circles of the folder the member isn't
+  in get no row from the member, who holds none of their keys, nor from their server, which
+  stores the rows sent and adds none (**[verified]** odin-core
+  `PeerDriveIncomingTransferService`), nor from chat-kmp (**[verified]** 0ff83254c:
+  `FilesyncShareUpkeep` seals circle keys and keeps the editors' circle,
+  `FilesyncSharing.inherit` runs after that app's own uploads alone). The owner's computer
+  gives them: "Sharing what this identity's computer adds", "What a member added reaches
+  the folder's other circles". Until one of the owner's computers has, members of those
+  circles don't see the file.
 - **The version a new file lands as** is made by their server (**[verified]** odin-core
   efc317ad4, `PeerFileWriter`: `CreateVersionTag`; live: never the send's `newVersionTag`),
   and told in one place only, the socket's word of the delivery (`versionTag`, below;
@@ -1121,7 +1124,46 @@ shares a folder writes the rows of what is in it then (**[verified]** chat-kmp
   folder's move changes shares meanwhile. What fails there is said in the log (the node
   is up); a new folder that was changed so, or whose folder wasn't read, is asked about
   when next added to.
+- **What a member added reaches the folder's other circles**
+  (`HomebaseRemote::share_what_others_added`, on `Remote::others_added`). A member's file
+  comes with the rows of the circles the member is in: the member holds no other circle's
+  key, and the file's key is no server's to lock again. Only a login that holds the
+  drive's key and the circles' can: a computer of the owner's (the mobile app holds them
+  too, and doesn't).
+  - Told by the feed: a live sync node whose `senderOdinId` is another identity's is one a
+    member added (this identity's own writes carry its own, **[verified]** live
+    2026-11-26; whoever made the file, as every write of it since keeps the sender:
+    **[verified]** odin-core `DriveStorageServiceBase`). A page read whole names them
+    (`ChangesPage::theirs`), and the engine hands the remote the ones its mirror doesn't
+    hold yet (new on the drive, or back from Recently deleted), before it takes the page
+    in: once as a node comes, so a share its owner takes from such a node later isn't
+    given back when the node next changes. A page without
+    one asks nothing, which is all of it for someone who shares nothing.
+  - Per folder, one `query-batch` reads its such nodes with their shares (100 per request;
+    a node's key is opened only where it lacks a share; one moved or removed since is
+    left out), and one `PUT /drives/{d}/shares` per circle gives what each lacks, as after
+    a move. A folder a member made is given with all that is in it (read as a move reads
+    it), whichever the feed told of first. Nothing is withdrawn. Nothing is asked for a
+    folder that isn't shared; one shared with a single circle is asked about too, as that
+    circle needn't be the one its sender came in through (theirs may have ended since).
+  - A refusal is said in the log and passed by, node by node (a share the server won't
+    write, a circle or a file that is gone, a row that doesn't read). Anything else fails
+    the pull (the server not reached or busy, a folder written again as it was read): the
+    page isn't taken in, and is read again with the next one.
+  - Seen live (dev server, a folder shared with two circles, the owner's daemon stopped
+    while the member added a file, its second share taken away to stand for a member of
+    one circle): the file had the second circle's share 0.3 s after the daemon started.
 - **Limits.**
+  - Members of the folder's other circles see what a member added only once a computer
+    of the owner's has been online since.
+  - The feed's read waits where it has such nodes and a folder's move that changes shares
+    is on its way (a large folder moved out of a shared one: above), and the account's
+    sync with it.
+  - "Once" is as a node comes into this state's mirror: a computer set up anew sees to
+    every node members added, and a node put back from Recently deleted is seen to again;
+    either gives one back a share its owner had taken from it alone.
+  - A share of the folder that a refusal kept from such a node (a circle disabled, its
+    key not to be had) isn't given later.
   - A node added within seconds of a folder first being shared may go up unshared (the
     app that shared wrote the rows of what was there then).
   - A share's change is known here once its notice came: seconds. With the notifications
@@ -1146,8 +1188,8 @@ shares a folder writes the rows of what is in it then (**[verified]** chat-kmp
     as the server has no route that takes several (10,000 files, 10,000 requests, the move
     waiting for them; and with it every other move, and what is first added to a folder
     not known yet, as how a folder is shared isn't read while such a move is on its way).
-  - The folder's other circles get no row for what a **member** adds ("Writing to what
-    others share").
+  - What a member added before this client gave the other circles their rows (2026-11-26)
+    isn't caught up with: it is seen to when it next changes.
   - What was learnt of the folders is this run's: after a start, the first add to each
     folder reads it again.
   - A login that isn't the owning app's is sent no shares, and no error: it would add

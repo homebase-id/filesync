@@ -13,7 +13,7 @@ use hbsync_remote::{
     ChangeRef, ChangesPage, ErrorClass, RefsPage, Remote, RemoteError, RemoteHeader, Skipped,
 };
 use hbsync_state::{AccountTx, ReadTx, StateDb, StateError, keys};
-use hbsync_types::{RemoteFileId, RemoteRef};
+use hbsync_types::{NodeId, RemoteFileId, RemoteRef};
 
 use crate::gone::{self, Said};
 use crate::mirror::{self, Applied, apply};
@@ -299,6 +299,12 @@ fn read_pages<G: DerefMut<Target = StateDb>>(
                         .filter_map(|r| r.at.map(|at| at.file_id));
                     r.shown(whole.entries.iter().map(|h| h.file_id).chain(unread));
                 }
+                // What others added, new to the mirror: the remote sees to it before the
+                // page is taken in, so that a failure reads the page again.
+                let new = new_here(&db, &whole.theirs)?;
+                if !new.is_empty() {
+                    with_retries(|| remote.others_added(&new))?;
+                }
                 apply_whole(&db, whole, cursor, remote.shared(), &mut report)?
             }
         };
@@ -579,6 +585,28 @@ fn refused_row(at: RemoteRef, why: String) -> Skipped {
         at: Some(at),
         ..Skipped::why(why)
     }
+}
+
+/// Of `nodes`, the ones the mirror doesn't hold yet ([`Remote::others_added`]): new on the
+/// drive to this state, or back from Recently deleted. Not by whether it knows the node at
+/// all: a folder is known from the first node in it. Nothing is read for none: what most
+/// pages have of them.
+fn new_here<G: DerefMut<Target = StateDb>>(
+    db: &impl Fn() -> G,
+    nodes: &[NodeId],
+) -> Result<Vec<NodeId>, StateError> {
+    if nodes.is_empty() {
+        return Ok(Vec::new());
+    }
+    db().read(|s| {
+        let mut new = Vec::new();
+        for node in nodes {
+            if !s.in_mirror(*node)? {
+                new.push(*node);
+            }
+        }
+        Ok(new)
+    })
 }
 
 /// Whether the store knows every one of `refs` ([`first_unknown`]).

@@ -172,6 +172,10 @@ impl Remote for ScopedRemote {
     fn changes(&self, cursor: Option<&str>, limit: usize) -> RemoteResult<ChangesPage> {
         self.inner.changes(cursor, limit)
     }
+
+    fn others_added(&self, nodes: &[NodeId]) -> RemoteResult<()> {
+        self.inner.others_added(nodes)
+    }
     fn change_refs(&self, cursor: Option<&str>, limit: usize) -> RemoteResult<RefsPage> {
         self.inner.change_refs(cursor, limit)
     }
