@@ -1055,8 +1055,7 @@ fn a_reread_asks_past_a_file_that_cant_be_answered() -> common::Res<()> {
     for file in left_out {
         server.lock().map_err(|_| "poisoned")?.unlist(file);
     }
-    // The page reads; the first header asked for doesn't, the other two do.
-    remote.faults().script = [false, true].into();
+    remote.faults().failing_header_of = [left_out[0]].into();
     let mut reread = None;
     let report = feed::pull(|| db.borrow_mut(), &remote, 1000, &mut reread)?;
     assert_eq!(
@@ -1064,23 +1063,23 @@ fn a_reread_asks_past_a_file_that_cant_be_answered() -> common::Res<()> {
         feed::Rereading::Asking,
         "the others answered"
     );
-    assert!(reread.is_some(), "open for the one");
+    let mut asked = std::mem::take(&mut remote.faults().headers_asked);
+    asked.sort();
+    let mut all = left_out;
+    all.sort();
+    assert_eq!(asked, all, "each asked, the one that fails too");
     // It can't be answered yet: asked once more, alone.
-    remote.faults().script = [false, true, true, true].into();
     let report = feed::pull(|| db.borrow_mut(), &remote, 1000, &mut reread)?;
     assert_eq!(report.rereading, feed::Rereading::Stuck);
-    assert_eq!(
-        remote.faults().script.len(),
-        2,
-        "one file left: one request"
-    );
+    assert_eq!(remote.faults().headers_asked, [left_out[0]]);
     Ok(())
 }
 
-/// Requests that fail one after the other aren't one file's trouble but the connection's:
-/// the asking stops at the third, the rest left for the next pull.
+/// The asking ends for a pull at the third request that fails (each can wait out its
+/// timeout), and the next pull begins with the files not asked yet: the ones that failed
+/// come after them, so the same three don't keep the rest from being asked.
 #[test]
-fn a_rereads_asking_stops_where_the_connection_fails() -> common::Res<()> {
+fn a_rereads_asking_ends_at_the_third_failure_and_goes_on_with_the_rest() -> common::Res<()> {
     let server = server();
     let remote = FakeRemote::new(server.clone());
     let mut files = Vec::new();
@@ -1089,14 +1088,26 @@ fn a_rereads_asking_stops_where_the_connection_fails() -> common::Res<()> {
     }
     let db = pulled(&remote)?;
     db.borrow_mut().write(|s| s.account().start_reread())?;
-    for file in files {
-        server.lock().map_err(|_| "poisoned")?.unlist(file);
+    for file in &files {
+        server.lock().map_err(|_| "poisoned")?.unlist(*file);
     }
-    remote.faults().script = [false, true, true, true, true, true].into();
+    // None answers: three are asked, and no more.
+    remote.faults().failing_header_of = files.iter().copied().collect();
     let mut reread = None;
     let report = feed::pull(|| db.borrow_mut(), &remote, 1000, &mut reread)?;
     assert_eq!(report.rereading, feed::Rereading::Stuck);
-    assert_eq!(remote.faults().script.len(), 2, "stopped at the third");
+    let first = std::mem::take(&mut remote.faults().headers_asked);
+    assert_eq!(first.len(), 3, "ended at the third");
+    // The next pull asks the two it hadn't reached, before any of those three again.
+    let report = feed::pull(|| db.borrow_mut(), &remote, 1000, &mut reread)?;
+    assert_eq!(report.rereading, feed::Rereading::Stuck);
+    let second = std::mem::take(&mut remote.faults().headers_asked);
+    assert_eq!(second.len(), 3);
+    assert!(
+        second[..2].iter().all(|f| !first.contains(f)),
+        "the rest first"
+    );
+    assert_eq!(second[2], first[0], "then the one that failed longest ago");
     Ok(())
 }
 

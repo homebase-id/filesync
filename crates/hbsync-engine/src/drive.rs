@@ -351,10 +351,10 @@ impl Drive {
     ///   long): it asks about the files the feed no longer shows a hundred a pull, and takes
     ///   one for gone only when told "not there" a second time, a minute to an hour after
     ///   the first ([`gone::judge`]). Without a pull in that hour the file would never go.
-    ///   So [`gone::ASK_AGAIN`] after a pull whose asking got somewhere; and where it stopped
-    ///   at a file that can't be answered for now, [`STUCK_ASK`] later, twice as long each
-    ///   time it stops so again (up to about a week): one such file doesn't have the drive
-    ///   read every few minutes for good.
+    ///   So [`gone::ASK_AGAIN`] after a pull whose asking got somewhere; and where none of
+    ///   the files it asked about could be answered for now, [`STUCK_ASK`] later, twice as
+    ///   long each time it ends so again (up to about a week): such files don't have the
+    ///   drive read every few minutes for good.
     ///
     /// `None` where neither is: an identity's own drive but for such a read, and before the
     /// first pull.

@@ -1093,6 +1093,10 @@ pub struct Faults {
     pub fail_next: usize,
     /// The next so many [`Remote::others_added`] fail so.
     pub fail_others_added: usize,
+    /// The header reads of these files fail so, for as long as they are here; and the files
+    /// whose header was asked for, in the order they were.
+    pub failing_header_of: HashSet<RemoteFileId>,
+    pub headers_asked: Vec<RemoteFileId>,
     /// Scripted outcomes, consumed one per request: `true` = fail transiently.
     pub script: VecDeque<bool>,
     /// The next upload breaks after this many bytes (a dropped connection).
@@ -1853,7 +1857,9 @@ impl Remote for FakeRemote {
         let (not_found, failing) = {
             let mut faults = self.faults();
             faults.headers += 1;
-            (faults.not_found_headers, faults.failing_headers)
+            faults.headers_asked.push(file_id);
+            let failing = faults.failing_headers || faults.failing_header_of.contains(&file_id);
+            (faults.not_found_headers, failing)
         };
         if failing {
             return Err(RemoteError::Transient("the header's read broke".into()));
