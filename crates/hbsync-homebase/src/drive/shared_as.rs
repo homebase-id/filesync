@@ -74,6 +74,14 @@ impl Share {
 /// A folder's live shares; empty where it isn't shared.
 pub(crate) type Shares = Arc<[Share]>;
 
+/// The ones of `shares` still to be given at `now` to a node that is on the drive
+/// ([`Share::lasts`]).
+pub(crate) fn lasting(shares: &[Share], now: i64) -> Vec<Share> {
+    (shares.iter().filter(|share| share.lasts(now, 0)))
+        .copied()
+        .collect()
+}
+
 /// When something was learnt, by both clocks: the steady one doesn't count a sleep, the
 /// wall's can be set.
 #[derive(Debug, Clone, Copy)]

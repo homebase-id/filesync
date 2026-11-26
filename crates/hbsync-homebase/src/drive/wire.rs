@@ -766,19 +766,22 @@ impl FileHeader {
         Fed::of(node, meta.version_tag, meta.updated, meta.version_updated)
     }
 
-    /// A live sync node that another identity than `own` sent here, with the folder it is
-    /// in and whether it is a folder itself: what a member of a shared folder added to it
-    /// ([`HomebaseRemote::share_what_others_added`](super::HomebaseRemote)).
+    /// A live sync node in a folder that another identity than `own` (a domain, lower case:
+    /// `markers::owner_of`) sent here: what a member of a shared folder added to it
+    /// ([`HomebaseRemote::share_what_others_added`](super::HomebaseRemote)). The sender is
+    /// whoever made the file: every write of it since keeps it (**[verified]** odin-core
+    /// `StandardFileStreamWriter`, `PeerFileWriter`, `DriveStorageServiceBase`).
     pub(crate) fn added_by_another(&self, own: &str) -> Option<Added> {
         let (meta, app) = (&self.file_metadata, &self.file_metadata.app_data);
         let sender = meta.sender_odin_id.as_deref().filter(|s| !s.is_empty())?;
-        let live = self.file_state == "active" && app.archival_status != ARCHIVAL_REMOVED;
-        if sender.eq_ignore_ascii_case(own) || !live || !NODE_TYPES.contains(&app.file_type) {
-            return None;
-        }
-        Some(Added {
-            node: NodeId(app.unique_id?),
-            folder: NodeId(app.group_id?),
+        let (node, folder) = (NodeId(app.unique_id?), NodeId(app.group_id?));
+        let theirs = self.live_node()
+            && app.archival_status != ARCHIVAL_REMOVED
+            && !sender.eq_ignore_ascii_case(own)
+            && !folder.is_root();
+        theirs.then_some(Added {
+            node,
+            folder,
             is_folder: app.file_type == FILE_TYPE_FOLDER,
         })
     }
@@ -2061,6 +2064,15 @@ mod tests {
             None
         );
         assert_eq!(added(other(), "active", 101, 0)?, None);
+        let at_the_top: FileHeader = serde_json::from_value(json!({
+            "fileId": "11111111-1111-1111-1111-111111111111", "fileState": "active",
+            "fileMetadata": {
+                "versionTag": "22222222-2222-2222-2222-222222222222",
+                "senderOdinId": "sam.example",
+                "appData": { "uniqueId": NODE, "groupId": NodeId::ROOT.0, "fileType": FILE_TYPE_FILE },
+            },
+        }))?;
+        assert_eq!(at_the_top.added_by_another("me.example"), None);
 
         // Asked about together: one request names them all.
         let (a, b) = (NodeId(NODE.parse()?), NodeId(FOLDER.parse()?));

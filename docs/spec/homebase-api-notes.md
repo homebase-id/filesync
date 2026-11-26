@@ -1131,14 +1131,15 @@ shares a folder writes the rows of what is in it then (**[verified]** chat-kmp
   can: a computer of the owner's (the mobile app holds them too, and doesn't).
   - Told by the feed: a live sync node whose `senderOdinId` is another identity's is one a
     member added (this identity's own writes carry its own, **[verified]** live
-    2026-11-26). Each page's such nodes are seen to as the page is read, once per node and
-    run; a page without one asks nothing, which is all of it for someone who shares
-    nothing.
+    2026-11-26; whoever made the file, as every write of it since keeps the sender:
+    **[verified]** odin-core `DriveStorageServiceBase`). Each page's such nodes are seen to
+    as the page is read whole, which a node's is when it is new or changed; a page without
+    one asks nothing, which is all of it for someone who shares nothing.
   - A folder shared with one circle asks nothing either: that circle is its sender's,
     whose row the node came with (how the folder is shared is read once, as for an add).
-  - Else one `query-batch` reads the folder's such nodes with their shares and keys (100
-    per request), and one `PUT /drives/{d}/shares` per circle gives what each lacks, as
-    after a move. Nothing is withdrawn. A folder a member made goes before what is in it,
+  - Else one `query-batch` reads the folder's such nodes with their shares (100 per
+    request; a node's key is opened only where it lacks a share), and one `PUT
+    /drives/{d}/shares` per circle gives what each lacks, as after a move. Nothing is withdrawn. A folder a member made goes before what is in it,
     which is shared as that folder is then; this computer learns it anew for what it adds
     there itself.
   - The feed goes on whatever fails here: said in the log, and tried again when the node
@@ -1150,6 +1151,9 @@ shares a folder writes the rows of what is in it then (**[verified]** chat-kmp
 - **Limits.**
   - Members of the folder's other circles see what a member added only once a computer
     of the owner's has been online since.
+  - The feed's read waits where it has such nodes and a folder's move that changes shares
+    is on its way (a large folder moved out of a shared one: above), and the account's
+    sync with it.
   - A node added within seconds of a folder first being shared may go up unshared (the
     app that shared wrote the rows of what was there then).
   - A share's change is known here once its notice came: seconds. With the notifications
