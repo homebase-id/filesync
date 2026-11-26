@@ -6,7 +6,7 @@
 //! back) changes nothing. The feed is drained completely before planning, which is what
 //! makes the mirror complete enough to call an unknown parent truly gone.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::ops::DerefMut;
 
 use hbsync_remote::{
@@ -88,8 +88,8 @@ pub enum Rereading {
     /// Open, and its asking got somewhere (a file answered, or said "not there" a first
     /// time): the next pull gets further.
     Asking,
-    /// Open, and its asking stopped at the first file (it can't be answered for now): the
-    /// next pull may get no further.
+    /// Open, and its asking got nowhere (none of the files it asked about, [`FAILED_A_PULL`]
+    /// at most, could be answered for now): the next pull may get no further.
     Stuck,
 }
 
@@ -327,6 +327,11 @@ fn read_pages<G: DerefMut<Target = StateDb>>(
 /// holds the drive, so it doesn't for long.
 const CONFIRM_PER_PULL: usize = 100;
 
+/// Requests of a re-read's asking that may fail in one pull before it stops for that pull
+/// ([`ask`]): each can wait out its timeout with the drive held, so no more than these; and
+/// where the connection is what fails, no more are spent on it.
+const FAILED_A_PULL: usize = 3;
+
 /// A re-read of the whole feed ([`AccountTx::start_reread`]) on its way: the files the store had
 /// when it began that the feed hasn't shown yet, and when it began (the server's clock). The
 /// caller keeps it between pulls, so a pull an error cut short goes on where it stopped (unless
@@ -334,6 +339,10 @@ const CONFIRM_PER_PULL: usize = 100;
 #[derive(Debug)]
 pub struct Reread {
     missing: HashSet<RemoteFileId>,
+    /// The ones of them whose request failed for now ([`ask`]), the one that failed longest
+    /// ago first: asked after the others, in that order, so that the same few don't come
+    /// first at every pull.
+    later: VecDeque<RemoteFileId>,
     since: Option<i64>,
 }
 
@@ -344,6 +353,7 @@ impl Reread {
         s.start_reread()?;
         Ok(Reread {
             missing: s.drive_file_ids()?.into_iter().collect(),
+            later: VecDeque::new(),
             since: None,
         })
     }
@@ -352,16 +362,34 @@ impl Reread {
         for f in files {
             self.missing.remove(&f);
         }
+        if !self.later.is_empty() {
+            self.later.retain(|f| self.missing.contains(f));
+        }
     }
 
     /// Its pages read, the files the store had that the feed didn't show: to ask the server
-    /// about ([`ask`]), [`CONFIRM_PER_PULL`] at most.
+    /// about ([`ask`]), [`CONFIRM_PER_PULL`] at most. The ones whose request failed before
+    /// come last, the one that failed longest ago first: a file that can't be answered keeps
+    /// none of the others waiting.
     fn to_ask(&self) -> Vec<RemoteFileId> {
-        self.missing
-            .iter()
+        let first = self.missing.iter().filter(|f| !self.later.contains(f));
+        first
+            .chain(&self.later)
             .take(CONFIRM_PER_PULL)
             .copied()
             .collect()
+    }
+
+    /// What a pull's asking came to: the files answered are missing no more; the ones said
+    /// "not there" a first time were answered too, and wait in their turn; the ones whose
+    /// request failed go to the back of the ones asked last.
+    fn asked(&mut self, asked: &Asked) {
+        for file_id in &asked.answered {
+            self.missing.remove(file_id);
+        }
+        let told = |f: &RemoteFileId| asked.answered.contains(f) || asked.not_there.contains(f);
+        self.later.retain(|f| !told(f) && !asked.failed.contains(f));
+        self.later.extend(&asked.failed);
     }
 }
 
@@ -374,15 +402,18 @@ struct Asked {
     not_there: Vec<RemoteFileId>,
     found: Vec<RemoteHeader>,
     answered: Vec<RemoteFileId>,
+    /// Their requests failed for now: asked again at a later pull, after the others.
+    failed: Vec<RemoteFileId>,
 }
 
 /// Asks the server about `files`, which the feed didn't show (it leaves out rows it has: one
 /// changed in its last second, homebase-api-notes): gone if it says it is a tombstone, or not
 /// found (for this app, the file isn't there) a second time a minute on (sync semantics §8b;
 /// till then it is asked again at each pull); one it has is applied as it is
-/// ([`record_answers`]). One it can't tell about now (a broken connection) stops the asking: it
-/// and the rest are asked again later. What it found is written by [`record_answers`], in the
-/// same pull.
+/// ([`record_answers`]). One it can't tell about now is passed by, and asked again at a later
+/// pull, after the others ([`Reread::to_ask`]): so that such a file doesn't hold up the rest.
+/// The asking stops for this pull at the [`FAILED_A_PULL`]th request that fails. What it
+/// found is written by [`record_answers`], in the same pull.
 fn ask(remote: &dyn Remote, files: &[RemoteFileId]) -> Asked {
     let mut asked = Asked::default();
     for &file_id in files {
@@ -402,7 +433,11 @@ fn ask(remote: &dyn Remote, files: &[RemoteFileId]) -> Asked {
             }
             Err(e) => {
                 tracing::info!("{file_id:?} isn't in the feed; asked again later: {e}");
-                break;
+                asked.failed.push(file_id);
+                if asked.failed.len() == FAILED_A_PULL {
+                    break;
+                }
+                continue;
             }
         }
         asked.answered.push(file_id);
@@ -450,9 +485,7 @@ fn record_answers<G: DerefMut<Target = StateDb>>(
     asked.gone.extend(confirmed);
     let done = answers_all(reread, asked.answered.iter());
     if let Some(r) = reread.as_mut() {
-        for file_id in &asked.answered {
-            r.missing.remove(file_id);
-        }
+        r.asked(&asked);
     }
     if done {
         *reread = None;

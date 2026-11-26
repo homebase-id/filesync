@@ -1037,6 +1037,80 @@ fn a_reread_asks_again_what_the_server_couldnt_tell_about() -> common::Res<()> {
     Ok(())
 }
 
+/// One file a re-read can't be told about now doesn't keep it from asking about the others
+/// (#449): they are answered in the same pull, and the one is asked again at the next. Before,
+/// the asking stopped at the first such file, and began with it again at every pull.
+#[test]
+fn a_reread_asks_past_a_file_that_cant_be_answered() -> common::Res<()> {
+    let server = server();
+    seed(&server, "x.txt")?;
+    let left_out = [
+        seed(&server, "y.txt")?,
+        seed(&server, "z.txt")?,
+        seed(&server, "w.txt")?,
+    ];
+    let remote = FakeRemote::new(server.clone());
+    let db = pulled(&remote)?;
+    db.borrow_mut().write(|s| s.account().start_reread())?;
+    for file in left_out {
+        server.lock().map_err(|_| "poisoned")?.unlist(file);
+    }
+    remote.faults().failing_header_of = [left_out[0]].into();
+    let mut reread = None;
+    let report = feed::pull(|| db.borrow_mut(), &remote, 1000, &mut reread)?;
+    assert_eq!(
+        report.rereading,
+        feed::Rereading::Asking,
+        "the others answered"
+    );
+    let mut asked = std::mem::take(&mut remote.faults().headers_asked);
+    asked.sort();
+    let mut all = left_out;
+    all.sort();
+    assert_eq!(asked, all, "each asked, the one that fails too");
+    // It can't be answered yet: asked once more, alone.
+    let report = feed::pull(|| db.borrow_mut(), &remote, 1000, &mut reread)?;
+    assert_eq!(report.rereading, feed::Rereading::Stuck);
+    assert_eq!(remote.faults().headers_asked, [left_out[0]]);
+    Ok(())
+}
+
+/// The asking ends for a pull at the third request that fails (each can wait out its
+/// timeout), and the next pull begins with the files not asked yet: the ones that failed
+/// come after them, so the same three don't keep the rest from being asked.
+#[test]
+fn a_rereads_asking_ends_at_the_third_failure_and_goes_on_with_the_rest() -> common::Res<()> {
+    let server = server();
+    let remote = FakeRemote::new(server.clone());
+    let mut files = Vec::new();
+    for name in ["a", "b", "c", "d", "e"] {
+        files.push(seed(&server, name)?);
+    }
+    let db = pulled(&remote)?;
+    db.borrow_mut().write(|s| s.account().start_reread())?;
+    for file in &files {
+        server.lock().map_err(|_| "poisoned")?.unlist(*file);
+    }
+    // None answers: three are asked, and no more.
+    remote.faults().failing_header_of = files.iter().copied().collect();
+    let mut reread = None;
+    let report = feed::pull(|| db.borrow_mut(), &remote, 1000, &mut reread)?;
+    assert_eq!(report.rereading, feed::Rereading::Stuck);
+    let first = std::mem::take(&mut remote.faults().headers_asked);
+    assert_eq!(first.len(), 3, "ended at the third");
+    // The next pull asks the two it hadn't reached, before any of those three again.
+    let report = feed::pull(|| db.borrow_mut(), &remote, 1000, &mut reread)?;
+    assert_eq!(report.rereading, feed::Rereading::Stuck);
+    let second = std::mem::take(&mut remote.faults().headers_asked);
+    assert_eq!(second.len(), 3);
+    assert!(
+        second[..2].iter().all(|f| !first.contains(f)),
+        "the rest first"
+    );
+    assert_eq!(second[2], first[0], "then the one that failed longest ago");
+    Ok(())
+}
+
 /// A share's end is asked for though a re-read an earlier pull left open can't end (a file it
 /// asks about can't be answered): the feed is started over at the next pull's first page, and
 /// shows the file as no longer shared (sync semantics §13, "A share that ends").

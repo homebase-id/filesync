@@ -1981,7 +1981,11 @@ rules hold too:
   after it last did (`SHARED_REREAD_MS`), which is a re-read as any (§8b): each file the store has that the feed no longer shows is asked
   for by its header, a hundred a pull, and is gone once the identity says "not there" a
   second time, a minute to an hour on. It then leaves this device as any file the sharer
-  deleted does (removed here; moved out where it changed here). Until then the member
+  deleted does (removed here; moved out where it changed here). Of any re-read's asking
+  (§8b): a file whose request fails for now is passed by and asked again at a later pull,
+  after the others and after the ones that failed before it, so such files hold up none
+  (#449); the asking ends for the pull at the third request that fails (`feed::ask`). Until
+  then the member
   keeps it: for up to a week and two syncs (more where over a hundred went). Every item of the sharer's Recently deleted
   ends that way (their purge deletes it for good after 30 days): its row stays in this
   device's Recently deleted until that re-read, and a file here whose folder is such a row
