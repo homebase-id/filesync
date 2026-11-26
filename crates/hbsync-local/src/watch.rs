@@ -1105,17 +1105,25 @@ mod tests {
     }
 
     /// A burst the OS watcher's buffer can't hold: Windows drops what it couldn't keep and
-    /// answers with nothing. The watcher must say so (a rescan), not pass it by: of the
-    /// files made, each is told of, or a rescan is asked for (#424; the watcher's handler is
-    /// slowed here, as a busy daemon's is, so that the changes outrun its reads).
+    /// answers with nothing. The watcher must say so (a rescan), not pass it by (#424). Its
+    /// handler is held at its first event while the files are made, as a busy daemon's is
+    /// for a moment, so the changes outrun its reads for sure: some 600 KiB of records
+    /// against two buffers of 16 KiB.
     #[cfg(windows)]
     #[test]
     fn a_burst_the_watcher_cant_hold_asks_for_a_rescan() {
         const FILES: usize = 3000;
         let dir = tempfile::tempdir().expect("temp dir");
         let (tx, rx) = std::sync::mpsc::channel();
+        let (first_tx, first_rx) = std::sync::mpsc::channel();
+        let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+        let mut held = false;
         let mut watcher = notify::recommended_watcher(move |res: notify::Result<Event>| {
-            std::thread::sleep(Duration::from_millis(1));
+            // Held at the first event until the burst is made (its sender dropped).
+            if !std::mem::replace(&mut held, true) {
+                let _ = first_tx.send(());
+                let _ = go_rx.recv();
+            }
             let _ = tx.send(res);
         })
         .expect("a watcher");
@@ -1123,25 +1131,22 @@ mod tests {
             .watch(dir.path(), RecursiveMode::Recursive)
             .expect("watched");
         // (Long names: a record holds its name, and the buffer few of them.)
-        let name = |i: usize| format!("{i:04}-{}", "a-long-name-".repeat(12));
-        for i in 0..FILES {
+        let name = |i: usize| format!("{i:04}-{}", "a-long-name-".repeat(8));
+        fs::write(dir.path().join(name(0)), b"x").expect("written");
+        first_rx
+            .recv_timeout(Duration::from_secs(20))
+            .expect("the first event");
+        for i in 1..FILES {
             fs::write(dir.path().join(name(i)), b"x").expect("written");
         }
-        let (mut told, mut rescan) = (std::collections::HashSet::new(), false);
-        while let Ok(res) = rx.recv_timeout(Duration::from_secs(5)) {
-            let event = res.expect("an event");
-            rescan |= event.need_rescan();
-            if rescan {
-                break;
-            }
-            told.extend(event.paths);
+        drop(go_tx);
+        let mut rescan = false;
+        while !rescan && let Ok(res) = rx.recv_timeout(Duration::from_secs(5)) {
+            rescan = res.expect("an event").need_rescan();
         }
-        let made = (0..FILES)
-            .filter(|i| told.contains(&dir.path().join(name(*i))))
-            .count();
         assert!(
-            made == FILES || rescan,
-            "{made} of {FILES} files told of, and no rescan asked for"
+            rescan,
+            "no rescan asked for, though {FILES} files outran the buffer"
         );
     }
 

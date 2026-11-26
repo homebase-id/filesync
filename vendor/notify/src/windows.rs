@@ -376,11 +376,17 @@ unsafe extern "system" fn handle_event(
         request.action_tx,
     );
 
-    // hbsync: a completion without bytes, or ERROR_NOTIFY_ENUM_DIR, is Windows saying that
-    // more changed than its buffer holds, and that it dropped all of it. The buffer holds no
-    // entry then: ask for a rescan instead of reading it (as upstream's main does; 8.2.0 read
-    // the empty buffer and said nothing, so the changes were lost without a word).
-    if bytes_written == 0 || error_code == ERROR_NOTIFY_ENUM_DIR {
+    // hbsync: a completion that succeeds without bytes is Windows saying that more changed
+    // than its buffer holds, and that it dropped all of it (ERROR_NOTIFY_ENUM_DIR says the
+    // same, where a completion ever carries it). The buffer holds no entry then: ask for a
+    // rescan instead of reading it (as upstream's main does; 8.2.0 read the empty buffer and
+    // said nothing, so the changes were lost without a word). Not for ERROR_ACCESS_DENIED,
+    // which goes on as before.
+    let dropped = match error_code {
+        ERROR_SUCCESS => bytes_written == 0,
+        code => code == ERROR_NOTIFY_ENUM_DIR,
+    };
+    if dropped {
         if let Ok(mut guard) = request.event_handler.lock() {
             let f: &mut dyn EventHandler = &mut *guard;
             f.handle_event(Ok(Event::new(EventKind::Other).set_flag(Flag::Rescan)));

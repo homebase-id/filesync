@@ -16,11 +16,12 @@ release can't leave the patch unused). Changes in `src/windows.rs`, marked `hbsy
 - The semaphore is shared by the watcher and its thread (an `Arc<OwnedHandle>`) and closed by
   the last one: upstream's thread closed it when it stopped, while `Drop` could still release
   it (a bug with or without the timeout).
-- A completion without bytes, or with `ERROR_NOTIFY_ENUM_DIR`, sends a rescan event
-  (`Flag::Rescan`) instead of reading the buffer: Windows answers so when more changed than
-  its 16 KiB buffer holds, having dropped all of it, and 8.2.0 read the empty buffer and said
-  nothing (filesync #424; upstream's main sends the same event). `hbsync-local`'s
-  `a_burst_the_watcher_cant_hold_asks_for_a_rescan` holds it on Windows' CI.
+- A completion that succeeds without bytes (or says `ERROR_NOTIFY_ENUM_DIR`, should one
+  ever carry it) sends a rescan event (`Flag::Rescan`) instead of reading the buffer: Windows
+  answers so when more changed than its 16 KiB buffer holds, having dropped all of it, and
+  8.2.0 read the empty buffer and said nothing (filesync #424; upstream's main sends the
+  same event). `hbsync-local`'s `a_burst_the_watcher_cant_hold_asks_for_a_rescan` holds it
+  on Windows' CI.
 
 `hbsync-local`'s `an_idle_watcher_answers_every_call` checks that every call returns with nothing
 happening on disk (CI runs it on Windows).
