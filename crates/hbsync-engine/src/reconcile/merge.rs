@@ -233,8 +233,8 @@ impl Reconciler<'_> {
     }
 
     /// Whether file `node`, edited on both sides (`lc`, `rc`), was edited apart: to other
-    /// than the same, and here in more than its executable bit. The conflict
-    /// [`Reconciler::merge_both`] keeps both of.
+    /// bytes, and here in more than its executable bit. The conflict
+    /// [`Reconciler::merge_both`] keeps both of: a copy is made for bytes, never for a bit.
     fn edited_apart(
         &self,
         node: NodeId,
@@ -246,7 +246,7 @@ impl Reconciler<'_> {
         l.kind == NodeKind::File
             && content_changed(lc)
             && content_changed(rc)
-            && !same_edit(l, r)
+            && !same_hash(l, r)
             && !self.bit_alone_here(node, l)
     }
 
@@ -455,6 +455,15 @@ impl Reconciler<'_> {
                 self.plan.conflicts.push(Conflict::EditDelete { node });
                 (r.cloned(), Origin::Remote)
             }
+            // A bit changed here alone is no edit to keep against the drive's delete (§1), as
+            // a tag changed here is none: the delete wins. (A device that held the bit of a
+            // file made again without it reads it as changed here: it brings back nothing
+            // that was deleted since.)
+            (Change::Changed { moved: false, .. }, Change::Deleted)
+                if l.as_ref().is_some_and(|l| self.bit_alone_here(node, l)) =>
+            {
+                (None, Origin::Base)
+            }
             (Change::Created | Change::Changed { .. }, Change::Deleted) => {
                 self.plan.conflicts.push(Conflict::EditDelete { node });
                 (l.clone(), Origin::Local)
@@ -573,16 +582,7 @@ impl Reconciler<'_> {
         let mut origin = Origin::Remote;
         if l.kind == NodeKind::File {
             let same_edit = same_edit(l, r);
-            let both = l_edited && r_edited && !same_edit;
-            if both && self.bit_alone_here(node, l) {
-                // The drive's bytes with the bit as it is here (§1): the drive's too where
-                // that changed (to the same: it has two values). Where it isn't the drive's,
-                // the download keeps it, and the next plan sends it up (the base settles at
-                // the drive's version).
-                if let (Some(t), Some(lc)) = (&mut target.content, l.content) {
-                    t.executable = lc.executable;
-                }
-            } else if both {
+            if self.edited_apart(node, l, r, lc, rc) {
                 debug_assert!(
                     !self.masking.read_only || self.adds_to(l.parent),
                     "{node:?}: a copy where nothing may be added"
@@ -606,6 +606,17 @@ impl Reconciler<'_> {
                 if self.masking.read_only {
                     self.adds.insert(copy);
                 }
+            } else if l_edited && r_edited && !same_edit {
+                // No conflict of bytes: the drive's version (§1). Where the bit alone changed
+                // here, with the bit as it is here: the drive's too where that changed (to
+                // the same: it has two values), else the download keeps it, and the next
+                // plan sends it up (the base settles at the drive's version). Where both
+                // hold the same bytes, their bits unlike, the drive's whole.
+                if self.bit_alone_here(node, l)
+                    && let (Some(t), Some(lc)) = (&mut target.content, l.content)
+                {
+                    t.executable = lc.executable;
+                }
             } else if l_edited && !r_edited {
                 target.content = l.content;
                 origin = Origin::Local;
@@ -617,11 +628,16 @@ impl Reconciler<'_> {
     }
 }
 
-/// Whether both sides hold the same bytes, executable alike: an edit on both sides that isn't a
-/// conflict.
+/// Whether both sides hold the same bytes, executable alike: an edit on both sides that
+/// leaves nothing to do.
 fn same_edit(l: &NodeState, r: &NodeState) -> bool {
+    same_hash(l, r) && l.content.map(|c| c.executable) == r.content.map(|c| c.executable)
+}
+
+/// Whether both sides hold the same bytes, whatever their executable bits.
+fn same_hash(l: &NodeState, r: &NodeState) -> bool {
     match (&l.content, &r.content) {
-        (Some(lc), Some(rc)) => lc.hash == rc.hash && lc.executable == rc.executable,
+        (Some(lc), Some(rc)) => lc.hash == rc.hash,
         _ => false,
     }
 }

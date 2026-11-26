@@ -2689,15 +2689,17 @@ impl Sim {
         }
         if let Some(b) = client.base.get(node).cloned() {
             let tags = b.tags.held_in(&drive.state.tags);
-            // And its executable bit, where the drive's file has none (#450): one it holds
-            // of the old file is its own to send now (§1), as one its user set.
+            // And its executable bit, where the drive's file has none (#450): one its item
+            // holds of the old file is its own to send now (§1), as one its user set.
             let lost = b.content.is_some_and(|c| c.executable)
                 && !drive.state.content.is_some_and(|c| c.executable);
             let content = b.content.map(|c| FileContent {
                 executable: c.executable && !lost,
                 ..c
             });
-            if lost {
+            let holds =
+                (client.local.get(node)).is_some_and(|l| l.content.is_some_and(|c| c.executable));
+            if lost && holds {
                 client.user_x.insert(node);
             }
             client.base.insert(node, NodeState { tags, content, ..b });

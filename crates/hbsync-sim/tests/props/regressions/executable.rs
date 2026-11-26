@@ -302,3 +302,47 @@ fn regression_a_change_of_bit_and_bytes_makes_no_copy_where_the_bit_isnt_held() 
     assert_eq!(sim.server_paths(), ["a"], "no conflict copy");
     assert_eq!(sim.drive_executable(file), Some(true));
 }
+
+/// The file made again without its bit is deleted before client 1, which held the bit, took
+/// its new bytes: client 1 follows the delete. Its bit, agreed with the new file no more,
+/// read as changed here, and a change here wins over a delete: it put its old bytes back on
+/// the drive, though nobody changed anything on that device. A bit changed here alone is no
+/// edit to keep against a delete (§1).
+#[test]
+fn regression_a_bit_held_of_a_file_made_again_and_deleted_brings_nothing_back() {
+    use Action::*;
+    use Event::*;
+    let synced = |sim: &mut Sim, client: usize| {
+        sim.run(&[Plan { client }]);
+        for _ in 0..6 {
+            sim.run(&[Step { client }]);
+        }
+    };
+    let mut sim = Sim::new(4);
+    sim.run(&[act(0, CreateFile { parent: 0, name: 0 })]);
+    for client in [0, 1, 3] {
+        synced(&mut sim, client);
+    }
+    let file = sim.item(0, "a").expect("the file");
+    sim.run(&[act(0, Chmod { file: 0 })]);
+    synced(&mut sim, 0);
+    synced(&mut sim, 1);
+    // Deleted for good, made again by client 3's edit, without the bit.
+    let node = sim.pick(0, file, false).expect("its pick");
+    sim.run(&[act(0, Delete { node })]);
+    synced(&mut sim, 0);
+    sim.run(&[act(0, ListDeleted), act(0, EmptyListed)]);
+    let edited = sim.file_pick(3, file).expect("client 3's file");
+    sim.run(&[act(3, Edit { file: edited })]);
+    synced(&mut sim, 3);
+    // Client 1 reads the new file, and does nothing yet; client 3 deletes it.
+    sim.run(&[Plan { client: 1 }]);
+    let node = sim.pick(3, file, false).expect("its pick");
+    sim.run(&[act(3, Delete { node })]);
+    synced(&mut sim, 3);
+    assert!(sim.is_removed(file), "in Recently deleted");
+    settle(&mut sim);
+    assert!(sim.is_removed(file), "and stays there");
+    assert_eq!(sim.server_paths(), [""; 0], "nothing made again");
+    assert_eq!(sim.local_paths(1), [""; 0]);
+}

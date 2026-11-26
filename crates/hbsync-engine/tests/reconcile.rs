@@ -5465,15 +5465,16 @@ fn the_bit_kept_through_a_download_goes_up() {
     ));
 }
 
-/// What the merge of bit and bytes doesn't cover stays as it was: bytes changed on both
-/// sides make a conflict copy, whatever the bit, and so do bytes changed here against a bit
-/// changed on the drive (the upload would send a bit this device hasn't taken yet). But a
-/// bit changed here alone never makes one: where the drive changed its bit too, with its
-/// bytes, its version comes down whole (`keep_x` unset: the bits are alike). That is also
-/// what a device that doesn't hold the bit reads, of a change of both on the drive.
+/// A conflict copy is made for bytes, never for a bit. Bytes changed on both sides make
+/// one, whatever the bit, and so do bytes changed here against a bit changed on the drive
+/// (#518: the upload would send a bit this device hasn't taken yet). But a bit changed here
+/// alone makes none: where the drive changed its bit too, with its bytes, its version comes
+/// down whole (`keep_x` unset: the bits are alike), which is also what a device that doesn't
+/// hold the bit reads of a change of both on the drive. Nor do the same bytes on both sides
+/// with unlike bits (a download that kept its bit, its base never settled): the drive's.
 #[test]
 fn only_bytes_changed_here_make_a_conflict_copy() {
-    let [both, here, alike] = ids(3)[..] else {
+    let [both, here, alike, same] = ids(4)[..] else {
         unreachable!()
     };
     let mut w = World::default();
@@ -5488,7 +5489,10 @@ fn only_bytes_changed_here_make_a_conflict_copy() {
         .remote(
             alike,
             Some(executable(file(ROOT, "alike.sh", "theirs"), true)),
-        );
+        )
+        .synced(same, file(ROOT, "same.sh", "old"))
+        .local(same, Some(executable(file(ROOT, "same.sh", "new"), true)))
+        .remote(same, Some(file(ROOT, "same.sh", "new")));
     let plan = w.plan();
     let mut copied: Vec<NodeId> = plan
         .conflicts
@@ -5500,18 +5504,54 @@ fn only_bytes_changed_here_make_a_conflict_copy() {
         .collect();
     copied.sort();
     assert_eq!(copied, [both, here]);
-    let download = plan.ops.iter().find(|op| op.node() == alike);
-    assert!(
-        matches!(
-            download,
-            Some(Op::LocalDownload {
-                replace: true,
-                keep_x: false,
-                ..
-            })
-        ),
-        "{download:?}"
-    );
+    for node in [alike, same] {
+        let download = plan.ops.iter().find(|op| op.node() == node);
+        assert!(
+            matches!(
+                download,
+                Some(Op::LocalDownload {
+                    replace: true,
+                    keep_x: false,
+                    ..
+                })
+            ),
+            "{download:?}"
+        );
+    }
+}
+
+/// A bit changed here alone is no edit to keep against the drive's delete (§1): the file
+/// goes, as one unchanged here, and nothing is made again on the drive. Bytes changed here
+/// still win over the delete, and so does a move.
+#[test]
+fn a_bit_changed_here_alone_doesnt_beat_a_delete() {
+    let [bit, bytes, moved] = ids(3)[..] else {
+        unreachable!()
+    };
+    let mut w = World::default();
+    w.synced(bit, file(ROOT, "bit.sh", "old"))
+        .local(bit, Some(executable(file(ROOT, "bit.sh", "old"), true)))
+        .remote(bit, None)
+        .synced(bytes, file(ROOT, "bytes.sh", "old"))
+        .local(bytes, Some(file(ROOT, "bytes.sh", "mine")))
+        .remote(bytes, None)
+        .synced(moved, file(ROOT, "moved.sh", "old"))
+        .local(
+            moved,
+            Some(executable(file(ROOT, "renamed.sh", "old"), true)),
+        )
+        .remote(moved, None);
+    let plan = w.plan();
+    let mut kept: Vec<NodeId> = plan.conflicts.iter().map(|c| c.node()).collect();
+    kept.sort();
+    let mut want = vec![bytes, moved];
+    want.sort();
+    assert_eq!(kept, want, "{:?}", plan.conflicts);
+    let of_bit: Vec<&str> = (plan.ops.iter().chain(&plan.held))
+        .filter(|op| op.node() == bit)
+        .map(Op::kind)
+        .collect();
+    assert_eq!(of_bit, ["LocalDelete"]);
 }
 
 /// The executable bit of a node that may be changed is as in a folder that syncs both ways:

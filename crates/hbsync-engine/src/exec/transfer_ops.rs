@@ -194,9 +194,12 @@ impl Executor<'_> {
             base_at: acted.base_at.into(),
             waiting_since_ms: None,
         };
-        // The drive's bit, or the one the file has here where the plan keeps that (§1).
+        // The drive's bit, or the one the file has here where the plan keeps that (§1): as
+        // this device holds each under the file's new name.
+        let on_disk = |x: bool| executable_on_disk(self.folder.os, name, x);
         let here = current.as_ref().and_then(|row| row.executable);
-        let x = here.filter(|_| keep_x).unwrap_or(file.executable);
+        let x = on_disk(here.filter(|_| keep_x).unwrap_or(file.executable));
+        let kept_x = x != on_disk(file.executable);
         let job = Job::Download(Download {
             node,
             file_id: mirror.file_id,
@@ -204,7 +207,7 @@ impl Executor<'_> {
             size: file.size,
             mtime_ms: file.mtime_ms,
             // Set either way: a partial kept for a retry may have been made for a name that held it.
-            executable: Some(executable_on_disk(self.folder.os, name, x)),
+            executable: Some(x),
             tmp_dir: layout::tmp_dir(&self.folder.root),
             key: download_key(node, &expected),
             local_algorithm: self.folder.algorithm,
@@ -216,7 +219,7 @@ impl Executor<'_> {
                 current,
                 created_ms,
                 tags: tags.clone(),
-                kept_x: x != file.executable,
+                kept_x,
             })),
         ))
     }
