@@ -41,12 +41,16 @@ comes down whole; that is also what a device that doesn't hold the bit reads of 
 both on the drive (it took that for a conflict, and kept its unchanged bytes as a copy).
 The other way round stays a conflict, as bytes changed on both sides are (§5): bytes changed
 here against a bit changed on the drive, since the upload would send a bit this device hasn't
-taken yet (#518). A conflict copy is made for bytes, never for a bit: where both sides hold the
-same new bytes and their bits are unlike (a download that kept its bit and whose base never
-settled, say), the drive's version comes down whole.
+taken yet (#518). So are the same new bytes on both sides with unlike bits, as before: there
+is nothing to fetch, and no base yet to send the bit against. A download that kept its bit
+ends there if its base never settles (a crash before its commit, and a recovery that can't
+settle it): the copy holds the same bytes and the bit, and nothing is lost.
 
-Nor is a bit changed here alone an edit to keep against a delete (§4): the drive's delete of
-the file wins, as over a tag changed here. Bytes changed here, or a move, still win.
+Nor is a bit changed here alone a change to keep against a delete (§4), as a tag changed here
+is none: the drive's delete of the file wins; a folder removed there takes the file along,
+and one brought back keeps it as what is unchanged in it (§6.3); a file that leaves for a
+place this device ignores leaves as one unchanged (§10). Bytes changed here, or a move, are
+kept as ever.
 
 A file deleted for good and made again is another file of the same node, and may come without
 the bit from a device that never saw it. As for tags (§11, "A node made again"): the bit is
@@ -57,9 +61,10 @@ drive" and cleared its own (#450). A device that doesn't hold the bit sends the 
 above. Where the new file was deleted since, the device follows the delete (above): the bit
 it held brings nothing back.
 
-In a read-only folder (§13) none of this applies to what follows the drive: its bytes come
-down with its bit, as before. A node the folder may change merges as on an identity's own
-drive.
+In a read-only folder (§13) what follows the drive takes the drive's bit with its bytes, as
+before; while the new file's bytes are the ones it has, it keeps the bit it holds (the base's
+is the drive's again, and a bit changed here stays where that is so). A node the folder may
+change merges as on an identity's own drive.
 
 **Three trees.** For every sync root the client keeps three views keyed by node id:
 - **Base**: the last state both sides agreed on. Written only after an operation succeeds.
@@ -171,12 +176,12 @@ Per node, after classifying both sides:
 | change | none | propagate the local change |
 | none | change | propagate the remote change |
 | deleted | deleted | drop from base |
-| edited | edited | same hash → no-op. Different → **conflict copy** (section 5); not where only the executable bit changed here: the drive's bytes come down, the bit stays (§1) |
+| edited | edited | same hash and executable bit → no-op. Different → **conflict copy** (section 5); not where only the executable bit changed here and the drive holds other bytes: those come down, the bit stays (§1) |
 | moved | moved | same destination → no-op. Different → **remote wins**; the local move is reverted |
 | edited | moved | apply both: the content goes up, the move comes down (and vice versa) |
 | deleted | edited / moved | **edit wins**: the node is restored locally from the remote |
 | edited / moved | deleted | **edit wins**: the removed node is restored remotely with the local version (an update at its file id: node schema "Recently deleted"). If Recently deleted holds a version of the file this device never had (edited elsewhere, then deleted; or taken along by a folder's delete, §6.3): other bytes than agreed, or an executable bit changed elsewhere that this device doesn't send (§1), that one stays there and the local version goes up as a new node (detached in place) |
-| executable bit alone | deleted | **the delete wins**: a bit changed here is no edit to keep (§1) |
+| executable bit alone | deleted | **the delete wins**: a bit changed here is no change to keep (§1) |
 | created | created | impossible for one node id; same-name clashes are handled by section 6 |
 
 A `moved` that only reverts a delete case is applied to the restored node.

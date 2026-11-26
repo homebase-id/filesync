@@ -5465,15 +5465,16 @@ fn the_bit_kept_through_a_download_goes_up() {
     ));
 }
 
-/// A conflict copy is made for bytes, never for a bit. Bytes changed on both sides make
-/// one, whatever the bit, and so do bytes changed here against a bit changed on the drive
-/// (#518: the upload would send a bit this device hasn't taken yet). But a bit changed here
-/// alone makes none: where the drive changed its bit too, with its bytes, its version comes
-/// down whole (`keep_x` unset: the bits are alike), which is also what a device that doesn't
-/// hold the bit reads of a change of both on the drive. Nor do the same bytes on both sides
-/// with unlike bits (a download that kept its bit, its base never settled): the drive's.
+/// What the merge of bit and bytes doesn't cover stays as it was. Bytes changed on both
+/// sides make a conflict copy, whatever the bit, and so do bytes changed here against a bit
+/// changed on the drive (#518: the upload would send a bit this device hasn't taken yet),
+/// and the same new bytes on both sides with unlike bits (a download that kept its bit, its
+/// base never settled: nothing to fetch, and no base to send the bit against). But a bit
+/// changed here alone, against other bytes on the drive, makes none: where the drive
+/// changed its bit too, its version comes down whole (`keep_x` unset: the bits are alike),
+/// which is also what a device that doesn't hold the bit reads of a change of both there.
 #[test]
-fn only_bytes_changed_here_make_a_conflict_copy() {
+fn a_bit_changed_here_alone_makes_no_conflict_copy() {
     let [both, here, alike, same] = ids(4)[..] else {
         unreachable!()
     };
@@ -5503,21 +5504,21 @@ fn only_bytes_changed_here_make_a_conflict_copy() {
         })
         .collect();
     copied.sort();
-    assert_eq!(copied, [both, here]);
-    for node in [alike, same] {
-        let download = plan.ops.iter().find(|op| op.node() == node);
-        assert!(
-            matches!(
-                download,
-                Some(Op::LocalDownload {
-                    replace: true,
-                    keep_x: false,
-                    ..
-                })
-            ),
-            "{download:?}"
-        );
-    }
+    let mut want = vec![both, here, same];
+    want.sort();
+    assert_eq!(copied, want);
+    let download = plan.ops.iter().find(|op| op.node() == alike);
+    assert!(
+        matches!(
+            download,
+            Some(Op::LocalDownload {
+                replace: true,
+                keep_x: false,
+                ..
+            })
+        ),
+        "{download:?}"
+    );
 }
 
 /// A bit changed here alone is no edit to keep against the drive's delete (§1): the file
@@ -5552,6 +5553,90 @@ fn a_bit_changed_here_alone_doesnt_beat_a_delete() {
         .map(Op::kind)
         .collect();
     assert_eq!(of_bit, ["LocalDelete"]);
+}
+
+/// As [`a_folder_an_edit_restores_keeps_what_its_delete_took_along`], `y`'s executable bit
+/// changed here alone: no change to keep against the removal (§1), so `y` is as `z`, which
+/// is unchanged in `d`. Where `x`'s edit brings `d` back, both stay with it, and `y`'s bit
+/// goes up as beside a folder that never went (`y` was removed from the drive and deleted
+/// here while `d` came back). Where nothing keeps `d`, both go with it, and nothing is a
+/// conflict (`y` kept `d`, as an edit does).
+#[test]
+fn a_bit_changed_here_alone_keeps_no_folder_and_stays_in_one_brought_back() {
+    for x_edited in [true, false] {
+        let [d, x, y, z] = ids(4)[..] else {
+            unreachable!()
+        };
+        let mut w = World::default();
+        w.input.remote_complete = true;
+        w.synced(d, folder(ROOT, "d"))
+            .synced(x, file(d, "x", "x"))
+            .synced(y, file(d, "y", "y"))
+            .synced(z, file(d, "z", "z"));
+        w.remote(d, None);
+        w.input.removed.insert(
+            d,
+            hbsync_engine::reconcile::Removed {
+                at: 100,
+                state: folder(ROOT, "d"),
+            },
+        );
+        for n in [x, y, z] {
+            w.input.changed_at.insert(n, 10);
+        }
+        if x_edited {
+            w.local(x, Some(file(d, "x", "edited")));
+        }
+        w.local(y, Some(executable(file(d, "y", "y"), true)));
+        w.input.dirty.insert(z);
+        let plan = w.plan();
+        let of = |n: NodeId| -> Vec<&str> {
+            (plan.ops.iter().chain(&plan.held))
+                .filter(|op| op.node() == n)
+                .map(Op::kind)
+                .collect()
+        };
+        match x_edited {
+            true => {
+                assert_eq!(of(d), ["RemoteCreate"], "{:#?}", plan.ops);
+                assert_eq!(of(z), [""; 0], "{:#?}", plan.ops);
+                assert_eq!(of(y), ["RemoteUpdate"], "{:#?}", plan.ops);
+            }
+            false => {
+                assert_eq!(plan.conflicts, [], "{:#?}", plan.ops);
+                assert_eq!(of(d), ["LocalDelete"], "{:#?}", plan.ops);
+                assert_eq!(of(y), of(z), "{:#?}", plan.ops);
+            }
+        }
+    }
+}
+
+/// A file the drive moved to where this device ignores it leaves here alike, its executable
+/// bit changed here or not: a bit alone is no change to keep here (§1, §10). (It was detached
+/// as a change made here, stayed as an item of its own, and went up as a new one.)
+#[test]
+fn a_bit_changed_here_alone_keeps_no_file_that_leaves_for_an_ignored_place() {
+    let [plain, set] = ids(2)[..] else {
+        unreachable!()
+    };
+    let mut w = World {
+        filter: ignoring("*.log\n"),
+        ..World::default()
+    };
+    w.synced(plain, file(ROOT, "a.txt", "x"))
+        .remote(plain, Some(file(ROOT, "a.log", "x")))
+        .synced(set, file(ROOT, "b.txt", "x"))
+        .local(set, Some(executable(file(ROOT, "b.txt", "x"), true)))
+        .remote(set, Some(file(ROOT, "b.log", "x")));
+    let plan = w.plan();
+    let of = |n: NodeId| -> Vec<&str> {
+        (plan.ops.iter())
+            .filter(|op| op.node() == n)
+            .map(Op::kind)
+            .collect()
+    };
+    assert!(!of(plain).is_empty(), "{:#?}", plan.ops);
+    assert_eq!(of(set), of(plain), "{:#?}", plan.ops);
 }
 
 /// The executable bit of a node that may be changed is as in a folder that syncs both ways:

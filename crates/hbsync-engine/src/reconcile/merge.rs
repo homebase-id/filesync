@@ -232,9 +232,9 @@ impl Reconciler<'_> {
         self.edited_apart(node, &l, r, lc, rc)
     }
 
-    /// Whether file `node`, edited on both sides (`lc`, `rc`), was edited apart: to other
-    /// bytes, and here in more than its executable bit. The conflict
-    /// [`Reconciler::merge_both`] keeps both of: a copy is made for bytes, never for a bit.
+    /// Whether file `node`, edited on both sides (`lc`, `rc`), was edited apart: not to the
+    /// same, and not here in its executable bit alone against other bytes on the drive
+    /// (§1). The conflict [`Reconciler::merge_both`] keeps both of.
     fn edited_apart(
         &self,
         node: NodeId,
@@ -246,8 +246,22 @@ impl Reconciler<'_> {
         l.kind == NodeKind::File
             && content_changed(lc)
             && content_changed(rc)
-            && !same_hash(l, r)
-            && !self.bit_alone_here(node, l)
+            && !same_edit(l, r)
+            && !(self.bit_alone_here(node, l) && !same_hash(l, r))
+    }
+
+    /// The change here of `node` as the drive's delete of it meets it: a file's executable
+    /// bit changed here alone is none to keep (§1), as a tag changed here is none. Its
+    /// delete wins, a folder removed there takes it along, and one brought back keeps it as
+    /// what is unchanged in it. (A device that held the bit of a file made again without it
+    /// reads it as changed here: it brings back nothing that was deleted since.)
+    pub(super) fn local_change_to_keep(&self, node: NodeId) -> Change {
+        match (self.local_change(node), self.local_state(node)) {
+            (Change::Changed { moved: false, .. }, Some(l)) if self.bit_alone_here(node, &l) => {
+                Change::Unchanged
+            }
+            (change, _) => change,
+        }
     }
 
     /// Whether file `node` changed here in its executable bit alone, its bytes the ones
@@ -258,7 +272,10 @@ impl Reconciler<'_> {
         let (Some(bc), Some(lc)) = (base, l.content) else {
             return false;
         };
-        lc.executable != bc.executable && !self.bytes_changed_here(node, &bc, &lc)
+        // (Not of an online-only file, whose bytes here were never compared.)
+        lc.executable != bc.executable
+            && self.content_state(node) != ContentState::OnlineOnly
+            && !self.bytes_changed_here(node, &bc, &lc)
     }
 
     /// Whether folder `node`, which waits ([`super::waits`]), may go to `target`: it stays where
@@ -413,7 +430,11 @@ impl Reconciler<'_> {
                 || (i.base.get(node).is_none() && i.remote.get(node).is_none()),
             "{node:?}: a file hashed on send that isn't free"
         );
-        let (lc, rc) = (self.local_change(node), self.remote_change(node));
+        let rc = self.remote_change(node);
+        let lc = match rc {
+            Change::Deleted => self.local_change_to_keep(node),
+            _ => self.local_change(node),
+        };
         // One a folder's removal took along isn't in the tree.
         let r = self.remote_state(node);
         let (b, l) = (i.base.get(node), self.local_state(node));
@@ -454,15 +475,6 @@ impl Reconciler<'_> {
             (Change::Deleted, Change::Created | Change::Changed { .. }) => {
                 self.plan.conflicts.push(Conflict::EditDelete { node });
                 (r.cloned(), Origin::Remote)
-            }
-            // A bit changed here alone is no edit to keep against the drive's delete (§1), as
-            // a tag changed here is none: the delete wins. (A device that held the bit of a
-            // file made again without it reads it as changed here: it brings back nothing
-            // that was deleted since.)
-            (Change::Changed { moved: false, .. }, Change::Deleted)
-                if l.as_ref().is_some_and(|l| self.bit_alone_here(node, l)) =>
-            {
-                (None, Origin::Base)
             }
             (Change::Created | Change::Changed { .. }, Change::Deleted) => {
                 self.plan.conflicts.push(Conflict::EditDelete { node });
@@ -607,14 +619,11 @@ impl Reconciler<'_> {
                     self.adds.insert(copy);
                 }
             } else if l_edited && r_edited && !same_edit {
-                // No conflict of bytes: the drive's version (§1). Where the bit alone changed
-                // here, with the bit as it is here: the drive's too where that changed (to
-                // the same: it has two values), else the download keeps it, and the next
-                // plan sends it up (the base settles at the drive's version). Where both
-                // hold the same bytes, their bits unlike, the drive's whole.
-                if self.bit_alone_here(node, l)
-                    && let (Some(t), Some(lc)) = (&mut target.content, l.content)
-                {
+                // Not apart: the bit alone changed here, and the drive holds other bytes
+                // (§1). Its bytes, with the bit as it is here: the drive's too where that
+                // changed (to the same: it has two values), else the download keeps it, and
+                // the next plan sends it up (the base settles at the drive's version).
+                if let (Some(t), Some(lc)) = (&mut target.content, l.content) {
                     t.executable = lc.executable;
                 }
             } else if l_edited && !r_edited {
