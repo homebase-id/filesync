@@ -59,7 +59,8 @@ impl Executor<'_> {
                 *node,
                 *parent,
                 name,
-                (*replace, *keep_x),
+                *replace,
+                *keep_x,
                 tags,
                 drive.as_deref(),
             ),
@@ -120,12 +121,14 @@ impl Executor<'_> {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn prepare_download(
         &mut self,
         node: NodeId,
         parent: NodeId,
         name: &str,
-        (replace, keep_x): (bool, bool),
+        replace: bool,
+        keep_x: bool,
         tags: &Tags,
         drive: Option<&DriveVersion>,
     ) -> Step<(Job, Ctx)> {
@@ -213,7 +216,7 @@ impl Executor<'_> {
                 current,
                 created_ms,
                 tags: tags.clone(),
-                keep_x,
+                kept_x: x != file.executable,
             })),
         ))
     }
@@ -524,7 +527,7 @@ impl Executor<'_> {
             mut current,
             created_ms,
             tags: to_write,
-            keep_x,
+            kept_x,
         } = placement;
         let (node, target) = (record.base.node, record.target.clone());
         let target = &target;
@@ -676,7 +679,7 @@ impl Executor<'_> {
             // The bit kept here isn't the drive's, at whose version the base settles: planned
             // again, it goes up (§1), whatever brought the download (an operation may come
             // for a node that isn't marked).
-            if keep_x {
+            if kept_x {
                 s.folder().mark_dirty(node)?;
             }
             // The bytes were just fetched: equal even if the hashes use other algorithms.

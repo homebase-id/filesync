@@ -635,12 +635,13 @@ impl Sim {
         self.clients[c].local.get(node)?.content.map(|c| c.hash)
     }
 
-    /// For scripted tests: whether client `c`'s item of `node` is executable, and whether the
-    /// drive's file of it is (live or in Recently deleted).
+    /// For scripted tests: whether client `c`'s item of `node` is executable.
     pub fn local_executable(&self, c: usize, node: NodeId) -> Option<bool> {
         Some(self.clients[c].local.get(node)?.content?.executable)
     }
 
+    /// For scripted tests: whether the drive's file of `node` is executable, live or in
+    /// Recently deleted.
     pub fn drive_executable(&self, node: NodeId) -> Option<bool> {
         Some(self.server.node(node)?.0.state.content?.executable)
     }

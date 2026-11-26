@@ -1005,14 +1005,14 @@ fn a_download_keeps_the_bit_its_plan_keeps() -> R {
         // Made executable here, and read so by the scan.
         let path = h.at("f")?;
         fs::set_permissions(&path, fs::Permissions::from_mode(0o755))?;
-        let fingerprint = hbsync_platform::stat(&path)?.fingerprint();
+        let meta = hbsync_platform::stat(&path)?;
         let (a, b) = (h.content(b"A"), h.content(b"B"));
         let before = some_version();
         h.db.write(|s| {
             let row = s.local_by_node(node)?.expect("its row");
             s.folder().put_local(&LocalRow {
-                fingerprint,
-                executable: Some(true),
+                fingerprint: meta.fingerprint(),
+                executable: meta.executable,
                 ..row
             })?;
             s.folder().put_base(&BaseRow {
@@ -1037,8 +1037,7 @@ fn a_download_keeps_the_bit_its_plan_keeps() -> R {
         }])?;
         assert_eq!(report.done, 1, "keep {keep_x}: {report:?}");
         assert_eq!(fs::read(&path)?, b"B");
-        let executable = fs::metadata(&path)?.permissions().mode() & 0o111 != 0;
-        assert_eq!(executable, keep_x);
+        assert_eq!(hbsync_platform::stat(&path)?.executable, Some(keep_x));
         let base = h.base(node)?.expect("a base");
         assert_eq!(base.state.content, Some(b), "the drive's version");
         assert_eq!(h.db.read(|s| s.is_dirty(node))?, keep_x);

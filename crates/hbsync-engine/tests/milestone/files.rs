@@ -28,30 +28,18 @@ fn large_file_streams_and_resumes() -> R {
 /// the bit is read from disk, so this holds trivially there).
 #[test]
 fn an_edit_keeps_the_executable_bit() -> R {
-    use hbsync_remote::{NodeMeta, RemoteBody, Upload};
-    use hbsync_types::schema::NodeContent;
-    use hbsync_types::{NodeId, NodeKind};
+    use hbsync_remote::RemoteBody;
+    use hbsync_types::NodeId;
 
     let server = server();
     // A Unix client uploaded an executable script.
     let script = b"#!/bin/sh\necho hi\n";
-    server.lock().map_err(|_| "poisoned")?.create(
-        &NodeMeta {
-            node: NodeId::new(),
-            parent: NodeId::ROOT,
-            kind: NodeKind::File,
-            content: NodeContent::file("run.sh", 1_700_000_000_000, script.len() as u64, true),
-            removed: false,
-        },
-        Some(Upload {
-            hash: hbsync_remote::Planned::Known(hbsync_fileio::hash_bytes(
-                script,
-                hbsync_fileio::HashAlgorithm::Blake3,
-            )),
-            size: script.len() as u64,
-            reader: &mut std::io::Cursor::new(&script[..]),
-            pace: None,
-        }),
+    server.lock().map_err(|_| "poisoned")?.seed_file_of(
+        NodeId::new(),
+        NodeId::ROOT,
+        ("run.sh", true),
+        script,
+        hbsync_fileio::HashAlgorithm::Blake3,
     )?;
     let mut a = Client::with_config(&server, "a", |_| {})?;
     assert_clean(&a.sync()?);

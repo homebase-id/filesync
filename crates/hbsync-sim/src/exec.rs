@@ -2655,9 +2655,10 @@ impl Sim {
 
     /// Client `c` reads the drive's file of `node`, live or in Recently deleted, for the first
     /// time: where that is another file than its base was agreed with (the node deleted for
-    /// good and made again), the tags the new file lacks are agreed no more, as the engine's
-    /// picture takes a file new to it (`AccountTx::made_again`, sync semantics §11). Once a
-    /// file, base or none: a tag removed from it later is the drive's removal.
+    /// good and made again), the tags the new file lacks are agreed no more, nor its executable
+    /// bit (§1), as the engine's picture takes a file new to it (`AccountTx::made_again`, sync
+    /// semantics §11). Once a file, base or none: a tag removed from it later is the drive's
+    /// removal.
     fn made_again(&mut self, c: usize, node: NodeId) {
         let server = &self.server;
         let Some(drive) = server.live.get(&node).or(server.removed.get(&node)) else {
@@ -2670,7 +2671,8 @@ impl Sim {
     }
 
     /// Client `c`'s base of `node` holds only the tags the drive's file of it has, live or in
-    /// Recently deleted, where it was agreed with another: as [`Sim::made_again`] leaves it,
+    /// Recently deleted, and the executable bit only if that file has it, where it was agreed
+    /// with another: as [`Sim::made_again`] leaves it,
     /// and as the engine writes a base while its picture holds another file (`put_base`: a
     /// write that settled against the version it acted on). Every id is the server's clock
     /// ([`time`]): a base agreed before the drive's file was made was agreed with another.
@@ -2687,14 +2689,15 @@ impl Sim {
         }
         if let Some(b) = client.base.get(node).cloned() {
             let tags = b.tags.held_in(&drive.state.tags);
-            // And its executable bit, where the drive's file has none (#450).
-            let bit = drive.state.content.is_some_and(|c| c.executable);
+            // And its executable bit, where the drive's file has none (#450): one it holds
+            // of the old file is its own to send now (§1), as one its user set.
+            let lost = b.content.is_some_and(|c| c.executable)
+                && !drive.state.content.is_some_and(|c| c.executable);
             let content = b.content.map(|c| FileContent {
-                executable: c.executable && bit,
+                executable: c.executable && !lost,
                 ..c
             });
-            // A bit it holds of the old file is its own to send now (§1), as one its user set.
-            if b.content.is_some_and(|c| c.executable) && !bit {
+            if lost {
                 client.user_x.insert(node);
             }
             client.base.insert(node, NodeState { tags, content, ..b });

@@ -174,9 +174,7 @@ fn a_tag_stays_where_its_folder_is_made_again_without_it() -> R {
 #[cfg(unix)]
 #[test]
 fn the_executable_bit_stays_where_its_file_is_made_again_without_it() -> R {
-    use hbsync_remote::{Planned, RemoteBody, Upload};
-    use hbsync_types::NodeKind;
-    use hbsync_types::schema::NodeContent;
+    use hbsync_remote::RemoteBody;
     use std::os::unix::fs::PermissionsExt;
     let server = server();
     let mut a = Client::new(&server, "a")?;
@@ -197,25 +195,11 @@ fn the_executable_bit_stays_where_its_file_is_made_again_without_it() -> R {
     // Made again, without the bit.
     {
         let was = common::header_named(&server, "run.sh");
-        let bytes = b"echo new".to_vec();
-        let hash = hbsync_fileio::hash_bytes(&bytes, hbsync_fileio::HashAlgorithm::Blake3);
-        let meta = NodeMeta {
-            node: was.node().ok_or("a node")?,
-            parent: was.parent,
-            kind: NodeKind::File,
-            content: NodeContent::file("run.sh", 1, bytes.len() as u64, false),
-            removed: false,
-        };
-        let mut reader: &[u8] = &bytes;
-        let upload = Upload {
-            hash: Planned::Known(hash),
-            size: bytes.len() as u64,
-            reader: &mut reader,
-            pace: None,
-        };
+        let node = was.node().ok_or("a node")?;
         let mut s = server.lock().map_err(|_| "poisoned")?;
         s.hard_delete(was.file_id, was.version)?;
-        s.create(&meta, Some(upload))?;
+        let blake3 = hbsync_fileio::HashAlgorithm::Blake3;
+        s.seed_file_of(node, was.parent, ("run.sh", false), b"echo new", blake3)?;
     }
     assert!(!on_drive());
     for client in [&mut a, &mut b] {

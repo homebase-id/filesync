@@ -1,5 +1,6 @@
 //! Regressions: executable bits (sync semantics §1).
 
+use super::{act, settle};
 use crate::common::*;
 use hbsync_sim::{Action, Event, Sim};
 
@@ -188,7 +189,6 @@ fn regression_a_restore_keeps_the_bit_in_recently_deleted() {
 fn regression_the_executable_bit_stands_where_the_file_is_made_again_without_it() {
     use Action::*;
     use Event::*;
-    let act = |client, action| Act { client, action };
     let synced = |sim: &mut Sim, client: usize| {
         sim.run(&[Plan { client }]);
         for _ in 0..6 {
@@ -231,8 +231,7 @@ fn regression_the_executable_bit_stands_where_the_file_is_made_again_without_it(
     );
 
     synced(&mut sim, 1);
-    assert!(sim.quiesce(30), "no convergence");
-    sim.check().unwrap_or_else(|e| panic!("{e}"));
+    settle(&mut sim);
     assert_eq!(
         sim.local_executable(1, file),
         Some(true),
@@ -251,7 +250,6 @@ fn regression_the_executable_bit_stands_where_the_file_is_made_again_without_it(
 fn regression_a_bit_set_here_and_an_edit_there_are_both_kept() {
     use Action::*;
     use Event::*;
-    let act = |client, action| Act { client, action };
     let mut sim = Sim::new(3);
     sim.run(&[act(0, CreateFile { parent: 0, name: 0 })]);
     assert!(sim.quiesce(30), "synced");
@@ -269,8 +267,7 @@ fn regression_a_bit_set_here_and_an_edit_there_are_both_kept() {
         Plan { client: 1 },
     ]);
     assert_eq!(sim.planned(1), ["LocalDownload"]);
-    assert!(sim.quiesce(30), "no convergence");
-    sim.check().unwrap_or_else(|e| panic!("{e}"));
+    settle(&mut sim);
     assert_eq!(sim.server_paths(), ["a"], "no conflict copy");
     assert_eq!(sim.local_hash(1, file), sim.drive_hash(file), "the edit");
     for client in [0, 1] {
@@ -287,7 +284,6 @@ fn regression_a_bit_set_here_and_an_edit_there_are_both_kept() {
 fn regression_a_change_of_bit_and_bytes_makes_no_copy_where_the_bit_isnt_held() {
     use Action::*;
     use Event::*;
-    let act = |client, action| Act { client, action };
     let mut sim = Sim::new(3);
     sim.run(&[act(0, CreateFile { parent: 0, name: 0 })]);
     assert!(sim.quiesce(30), "synced");
@@ -302,8 +298,7 @@ fn regression_a_change_of_bit_and_bytes_makes_no_copy_where_the_bit_isnt_held() 
         Plan { client: 2 },
     ]);
     assert_eq!(sim.planned(2), ["LocalDownload"]);
-    assert!(sim.quiesce(30), "no convergence");
-    sim.check().unwrap_or_else(|e| panic!("{e}"));
+    settle(&mut sim);
     assert_eq!(sim.server_paths(), ["a"], "no conflict copy");
     assert_eq!(sim.drive_executable(file), Some(true));
 }
