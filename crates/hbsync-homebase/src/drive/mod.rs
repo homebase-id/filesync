@@ -141,6 +141,9 @@ pub struct HomebaseRemote {
     /// folder is shared once the move is done; and nothing gives or withdraws a share by
     /// what such a move is changing.
     moves: RwLock<()>,
+    /// The nodes other identities added that this run has seen to
+    /// ([`HomebaseRemote::share_what_others_added`]), by their files: not asked about again.
+    seen_to: Mutex<HashSet<Uuid>>,
     /// The keys of this identity's own circles, each read once ([`HomebaseRemote::own_circle`]):
     /// a circle's key is set once and stays (**[verified]** odin-core
     /// `CircleShareKeyAlreadySet`). None: one that isn't to be had in this run.
@@ -598,6 +601,7 @@ impl HomebaseRemote {
             folders: Folders::default(),
             shares_reading: Mutex::default(),
             moves: RwLock::default(),
+            seen_to: Mutex::default(),
             circles: Mutex::default(),
         })
     }
@@ -1271,6 +1275,111 @@ impl HomebaseRemote {
         self.share(nodes, &lasting);
     }
 
+    /// What a member of a shared folder added to it reaches that member's circle alone: the
+    /// member holds no other circle's key, their server stores the shares it is sent, and the
+    /// file's key is no server's to lock again. So this computer, which holds the drive's
+    /// key and its circles', gives each node of `added` the shares of its folder it lacks
+    /// ([`HomebaseRemote::share_with`]): as the feed tells of it, once per node and run.
+    ///
+    /// - Nothing is asked for a feed page without such a node (the usual, and all of it for
+    ///   someone who shares nothing), nor for a node in a folder shared with one circle:
+    ///   that is its sender's, whose share it came with.
+    /// - Else one request reads the nodes of a folder with their shares and keys, and one
+    ///   per circle gives what is lacking. Nothing is withdrawn here.
+    /// - The feed goes on whatever fails: said, and tried again when the node next changes
+    ///   or this starts again.
+    fn share_what_others_added(&self, added: &[wire::Added]) {
+        if added.is_empty() {
+            return;
+        }
+        let new: Vec<wire::Added> = {
+            let seen_to = self.seen_to.lock().unwrap_or_else(|e| e.into_inner());
+            let new = |a: &&wire::Added| !a.folder.is_root() && !seen_to.contains(&a.node.0);
+            added.iter().filter(new).copied().collect()
+        };
+        if new.is_empty() {
+            return;
+        }
+        if let Err(e) = self.share_as_their_folders(new) {
+            tracing::warn!(
+                "what others added to shared folders isn't all shared as those folders are: {e}"
+            );
+        }
+    }
+
+    /// [`HomebaseRemote::share_what_others_added`], on a private drive. A folder among them
+    /// goes first: what is in it is shared as that folder is then. And alone (`moves`, for
+    /// writing): this computer adds to it by what it knows of it, which changes here.
+    fn share_as_their_folders(&self, mut added: Vec<wire::Added>) -> Result<()> {
+        if self.drive_key(false)?.is_none() {
+            return Ok(());
+        }
+        let (_alone, _no_move);
+        match added.iter().any(|a| a.is_folder) {
+            true => _alone = self.moves.write().unwrap_or_else(|e| e.into_inner()),
+            false => _no_move = self.moves.read().unwrap_or_else(|e| e.into_inner()),
+        }
+        while !added.is_empty() {
+            let inside = |a: &wire::Added| added.iter().any(|b| b.node == a.folder);
+            let (later, now): (Vec<_>, Vec<_>) = added.iter().copied().partition(inside);
+            // (In each other: in whatever order.)
+            let (now, later) = match now.is_empty() {
+                true => (later, Vec::new()),
+                false => (now, later),
+            };
+            self.share_in_their_folders(&now)?;
+            added = later;
+        }
+        Ok(())
+    }
+
+    /// Gives each of `added` what its folder shares and it lacks, `moves` held. Folder by
+    /// folder: one that fails (the last such error is this one's) leaves the others.
+    fn share_in_their_folders(&self, added: &[wire::Added]) -> Result<()> {
+        let mut folders: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+        for a in added {
+            folders.entry(a.folder).or_default().push(a.node);
+        }
+        let mut failed = Ok(());
+        for (folder, nodes) in folders {
+            match self.share_in_their_folder(folder, &nodes) {
+                Ok(()) => {
+                    let mut seen_to = self.seen_to.lock().unwrap_or_else(|e| e.into_inner());
+                    if seen_to.len() >= SEEN_TO {
+                        seen_to.clear();
+                    }
+                    seen_to.extend(nodes.iter().map(|node| node.0));
+                }
+                Err(e) => failed = Err(e),
+            }
+        }
+        failed
+    }
+
+    /// Gives each of `nodes`, which others added to `folder`, what that shares and it lacks.
+    fn share_in_their_folder(&self, folder: NodeId, nodes: &[NodeId]) -> Result<()> {
+        let time = hbsync_types::unix_now_ms();
+        let shares = self.shared_as_held(folder)?;
+        let lasting: Vec<Share> = (shares.iter().filter(|share| share.lasts(time, 0)))
+            .copied()
+            .collect();
+        // Shared with one circle: its sender's, whose share it came with.
+        if lasting.len() < 2 {
+            return Ok(());
+        }
+        let (mut theirs, mut seen) = (Vec::new(), HashSet::new());
+        for some in nodes.chunks(CHILDREN_QUERY_FOLDERS) {
+            let page = self.query_batch(&wire::nodes_query(some, wire::NODE_TYPES))?;
+            self.read_moving(&page, true, &mut theirs, &mut seen)?;
+        }
+        self.share(&theirs, &lasting);
+        // (Known no more as it was read: it shares what it was given here too.)
+        for node in theirs.iter().filter(|node| node.folder) {
+            self.folders.forget(node.node);
+        }
+        Ok(())
+    }
+
     /// An update of `meta`, which the drive has in the folder `from`, into another folder:
     /// the node's shares, and those of what is in it, become what the folder it goes into
     /// shares ([`Remote::update_from`], [`HomebaseRemote::moved_as`]).
@@ -1764,16 +1873,19 @@ impl Remote for HomebaseRemote {
     /// Rows that aren't usable sync nodes come back in [`ChangesPage::skipped`], with why.
     fn changes(&self, cursor: Option<&str>, limit: usize) -> Result<ChangesPage> {
         let (page, cursor) = self.feed_page(cursor, limit, wire::Shape::Full)?;
+        let mut theirs = Vec::new();
         let page = changes_page(page, cursor, |h| {
             if let Some(fed) = h.fed() {
                 self.folders.fed(fed);
             }
+            theirs.extend(h.added_by_another(self.client.identity()));
             self.to_remote(h)
         })?;
         // A row that doesn't read says nothing of its folder's shares: read again, if known.
         for at in page.skipped.iter().filter_map(|skipped| skipped.at) {
             self.folders.heard(at.file_id);
         }
+        self.share_what_others_added(&theirs);
         Ok(page)
     }
 
@@ -2112,6 +2224,10 @@ fn changes_page(
         server_time: page.query_time,
     })
 }
+
+/// The nodes others added that are kept as seen to
+/// ([`HomebaseRemote::share_what_others_added`]): past it, all are asked about once more.
+const SEEN_TO: usize = 65_536;
 
 /// Nodes asked for per page of what is in folders ([`HomebaseRemote::holding`],
 /// [`HomebaseRemote::moving`]).
@@ -3184,6 +3300,7 @@ mod tests {
             folders: Folders::default(),
             shares_reading: Mutex::default(),
             moves: RwLock::default(),
+            seen_to: Mutex::default(),
             circles: Mutex::default(),
         })
     }
@@ -3242,6 +3359,43 @@ mod tests {
             "not known now, not read"
         );
         assert!(!settled(NodeId::new(), &unshared));
+        Ok(())
+    }
+
+    /// What others added is seen to without a request where none is needed: nothing for a
+    /// node at the top, nor in a folder shared with one circle (its sender's), and neither
+    /// is asked about again. In a folder shared with two it is read (nothing answers here):
+    /// said, the feed goes on, and it is tried again.
+    #[test]
+    fn what_others_added_asks_nothing_in_a_folder_of_one_circle()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        use crate::drive::shared_as::tests::{at, share};
+        let remote = unreachable_remote(private_state(Some([1; 16]), None))?;
+        let added = |folder: NodeId| wire::Added {
+            node: NodeId::new(),
+            folder,
+            is_folder: false,
+        };
+        let seen_to = |a: &wire::Added| {
+            let seen = remote.seen_to.lock().expect("unpoisoned");
+            seen.contains(&a.node.0)
+        };
+        remote.share_what_others_added(&[]);
+        let top = added(NodeId::ROOT);
+        remote.share_what_others_added(&[top]);
+        assert!(!seen_to(&top), "nothing is shared at the top");
+
+        let (one, two) = (NodeId::new(), NodeId::new());
+        (remote.folders).made(one, at(100, 10), Arc::from([share(1, None)]));
+        (remote.folders).made(
+            two,
+            at(200, 20),
+            Arc::from([share(1, None), share(2, None)]),
+        );
+        let (theirs, lacking) = (added(one), added(two));
+        remote.share_what_others_added(&[theirs, lacking]);
+        assert!(seen_to(&theirs), "its sender's circle is the folder's one");
+        assert!(!seen_to(&lacking), "not read: tried again");
         Ok(())
     }
 

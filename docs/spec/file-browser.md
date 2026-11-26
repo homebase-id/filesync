@@ -172,8 +172,10 @@ by file id), and one it moves out of a shared folder has the rows of that folder
 withdrawn. A circle both folders are shared with keeps its row, rewritten to the entered
 folder's permissions and end where they differ. As when you move one: a share you gave a
 single file counts as its folder's where the folder it leaves is shared with the same
-circle. What the computers don't do yet:
-- They add no rows for a folder's other circles to what a member added.
+circle. And what a member added to a folder you share with several circles comes with
+the rows of the circles that member is in: a computer of yours gives it the others', once
+it is online (the app could, holding the same keys: it doesn't yet). Until then members of
+those circles don't see it.
 
 ## Downloading
 - Fetch payload `sync_data` and decrypt it with the file's key (AES-CBC, the same as other

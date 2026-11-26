@@ -174,6 +174,10 @@ pub struct FileMetadata {
     /// (`CircleKey::file_key`).
     #[serde(default, deserialize_with = "lenient")]
     pub global_transit_id: Option<Uuid>,
+    /// Who sent the file: this identity for what its own apps wrote, the member for what a
+    /// member of a shared folder added there (**[verified]** live 2026-11-26).
+    #[serde(default, deserialize_with = "lenient")]
+    pub sender_odin_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -580,13 +584,27 @@ pub(crate) fn shared_folder(row: &str) -> Result<SharedFolder, serde_json::Error
 /// The file types of the sync nodes.
 pub(crate) const NODE_TYPES: &[i32] = &[FILE_TYPE_FOLDER, FILE_TYPE_FILE];
 
+/// A node another identity added ([`FileHeader::added_by_another`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Added {
+    pub node: NodeId,
+    pub folder: NodeId,
+    pub is_folder: bool,
+}
+
 /// The `query-batch` body for the node `node` alone, if it is of one of `types`, with its
 /// live shares (`includeShares`: **[verified]** odin-core `QueryBatchResultOptionsRequest`,
 /// chat-kmp `FilesyncSharing.inherit`); its content left out, as the server does unasked.
 pub(crate) fn node_query(node: NodeId, types: &[i32]) -> Value {
+    nodes_query(&[node], types)
+}
+
+/// [`node_query`] for each of `nodes`, in one request.
+pub(crate) fn nodes_query(nodes: &[NodeId], types: &[i32]) -> Value {
+    let ids: Vec<Uuid> = nodes.iter().map(|node| node.0).collect();
     json!({
-        "queryParams": { "clientUniqueIdAtLeastOne": [node.0], "fileType": types },
-        "resultOptionsRequest": { "maxRecords": 1, "includeShares": true },
+        "queryParams": { "clientUniqueIdAtLeastOne": ids, "fileType": types },
+        "resultOptionsRequest": { "maxRecords": nodes.len(), "includeShares": true },
     })
 }
 
@@ -746,6 +764,23 @@ impl FileHeader {
         let (meta, app) = (&self.file_metadata, &self.file_metadata.app_data);
         let node = (app.unique_id).filter(|_| app.file_type == FILE_TYPE_FOLDER);
         Fed::of(node, meta.version_tag, meta.updated, meta.version_updated)
+    }
+
+    /// A live sync node that another identity than `own` sent here, with the folder it is
+    /// in and whether it is a folder itself: what a member of a shared folder added to it
+    /// ([`HomebaseRemote::share_what_others_added`](super::HomebaseRemote)).
+    pub(crate) fn added_by_another(&self, own: &str) -> Option<Added> {
+        let (meta, app) = (&self.file_metadata, &self.file_metadata.app_data);
+        let sender = meta.sender_odin_id.as_deref().filter(|s| !s.is_empty())?;
+        let live = self.file_state == "active" && app.archival_status != ARCHIVAL_REMOVED;
+        if sender.eq_ignore_ascii_case(own) || !live || !NODE_TYPES.contains(&app.file_type) {
+            return None;
+        }
+        Some(Added {
+            node: NodeId(app.unique_id?),
+            folder: NodeId(app.group_id?),
+            is_folder: app.file_type == FILE_TYPE_FOLDER,
+        })
     }
 
     /// The file key and header IV, opened with `keys`. Every node is encrypted.
@@ -1974,6 +2009,72 @@ mod tests {
         assert_eq!(said(whole(FILE_TYPE_FILE, Some(12), Some(NODE))?), None);
         assert_eq!(said(slim(FILE_TYPE_FOLDER, Some(12), None)?), None);
         assert_eq!(said(whole(FILE_TYPE_FOLDER, Some(12), None)?), None);
+        Ok(())
+    }
+
+    /// A live sync node another identity sent is one a member added: told by its sender,
+    /// with the folder it is in. Not this identity's own (in whatever case), one without a
+    /// sender, one in Recently deleted, a tombstone, nor another app's file.
+    #[test]
+    fn a_header_tells_what_another_identity_added() -> R {
+        const NODE: &str = "33333333-3333-3333-3333-333333333333";
+        const FOLDER: &str = "44444444-4444-4444-4444-444444444444";
+        let added = |sender: Value, state: &str, file_type: i32, archival: i32| {
+            let row = json!({
+                "fileId": "11111111-1111-1111-1111-111111111111", "fileState": state,
+                "fileMetadata": {
+                    "versionTag": "22222222-2222-2222-2222-222222222222",
+                    "senderOdinId": sender,
+                    "appData": {
+                        "uniqueId": NODE, "groupId": FOLDER, "fileType": file_type,
+                        "archivalStatus": archival,
+                    },
+                },
+            });
+            serde_json::from_value::<FileHeader>(row).map(|h| h.added_by_another("me.example"))
+        };
+        let theirs = |is_folder: bool| -> Result<Option<Added>, Box<dyn std::error::Error>> {
+            Ok(Some(Added {
+                node: NodeId(NODE.parse()?),
+                folder: NodeId(FOLDER.parse()?),
+                is_folder,
+            }))
+        };
+        let other = || json!("sam.example");
+        assert_eq!(added(other(), "active", FILE_TYPE_FILE, 0)?, theirs(false)?);
+        assert_eq!(
+            added(other(), "active", FILE_TYPE_FOLDER, 0)?,
+            theirs(true)?
+        );
+        for own in [
+            json!("me.example"),
+            json!("Me.Example"),
+            json!(""),
+            json!(null),
+            json!(7),
+        ] {
+            assert_eq!(added(own, "active", FILE_TYPE_FILE, 0)?, None);
+        }
+        assert_eq!(added(other(), "deleted", FILE_TYPE_FILE, 0)?, None);
+        assert_eq!(
+            added(other(), "active", FILE_TYPE_FILE, ARCHIVAL_REMOVED)?,
+            None
+        );
+        assert_eq!(added(other(), "active", 101, 0)?, None);
+
+        // Asked about together: one request names them all.
+        let (a, b) = (NodeId(NODE.parse()?), NodeId(FOLDER.parse()?));
+        let body = nodes_query(&[a, b], NODE_TYPES);
+        assert_eq!(
+            body["queryParams"]["clientUniqueIdAtLeastOne"],
+            json!([NODE, FOLDER])
+        );
+        assert_eq!(body["resultOptionsRequest"]["maxRecords"], json!(2));
+        assert_eq!(body["resultOptionsRequest"]["includeShares"], json!(true));
+        assert_eq!(
+            node_query(a, NODE_TYPES)["resultOptionsRequest"]["maxRecords"],
+            json!(1)
+        );
         Ok(())
     }
 

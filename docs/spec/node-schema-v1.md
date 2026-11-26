@@ -466,6 +466,9 @@ write nodes this client syncs. The file browser's own guide, built on these rule
   semantics §12); say so before deleting one. Show them at the top, by their own icons.
 
 ## Changes
+- 2026-11-26: what a member added to a folder shared with several circles is given the
+  other circles' share rows by a computer of the owner's (file browser guide, "What you
+  share, and the computers"). Nothing new in a node's content.
 - 2026-11-26: a node a computer of the owner's moves into a shared folder gets that
   folder's share rows (all that is in it too), and loses the rows of the folder it leaves
   where the one it enters lacks them (file browser guide, "What you share, and the
