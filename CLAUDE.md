@@ -114,9 +114,9 @@ task given in chat gets the same.
 - If the work shows the real problem is a different one, say so and restate the essence before
   going on.
 
-## Opening a PR
+## Opening a PR for an issue
 
-One PR solves one problem. Start the description with two lines:
+A PR that works on an issue starts its description with two lines (other PRs don't need them):
 
 ```
 Problem: <the essence from "Working on an issue", updated if the work changed it>
