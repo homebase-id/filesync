@@ -1037,6 +1037,73 @@ fn a_reread_asks_again_what_the_server_couldnt_tell_about() -> common::Res<()> {
     Ok(())
 }
 
+/// One file a re-read can't be told about now doesn't keep it from asking about the others
+/// (#449): they are answered in the same pull, and the one is asked again at the next. Before,
+/// the asking stopped at the first such file, and began with it again at every pull.
+#[test]
+fn a_reread_asks_past_a_file_that_cant_be_answered() -> common::Res<()> {
+    let server = server();
+    seed(&server, "x.txt")?;
+    let left_out = [
+        seed(&server, "y.txt")?,
+        seed(&server, "z.txt")?,
+        seed(&server, "w.txt")?,
+    ];
+    let remote = FakeRemote::new(server.clone());
+    let db = pulled(&remote)?;
+    db.borrow_mut().write(|s| s.account().start_reread())?;
+    for file in left_out {
+        server.lock().map_err(|_| "poisoned")?.unlist(file);
+    }
+    // The page reads; the first header asked for doesn't, the other two do.
+    remote.faults().script = [false, true].into();
+    let mut reread = None;
+    let report = feed::pull(|| db.borrow_mut(), &remote, 1000, &mut reread)?;
+    assert_eq!(
+        report.rereading,
+        feed::Rereading::Asking,
+        "the others answered"
+    );
+    assert!(reread.is_some(), "open for the one");
+    // It can't be answered yet: asked once more, alone.
+    remote.faults().script = [false, true, true, true].into();
+    let report = feed::pull(|| db.borrow_mut(), &remote, 1000, &mut reread)?;
+    assert_eq!(report.rereading, feed::Rereading::Stuck);
+    assert_eq!(
+        remote.faults().script.len(),
+        2,
+        "one file left: one request"
+    );
+    // It answers: the re-read ends.
+    remote.faults().script.clear();
+    feed::pull(|| db.borrow_mut(), &remote, 1000, &mut reread)?;
+    assert!(reread.is_none() && !db.borrow_mut().read(|s| s.rereading())?);
+    Ok(())
+}
+
+/// Requests that fail one after the other aren't one file's trouble but the connection's:
+/// the asking stops at the third, the rest left for the next pull.
+#[test]
+fn a_rereads_asking_stops_where_the_connection_fails() -> common::Res<()> {
+    let server = server();
+    let remote = FakeRemote::new(server.clone());
+    let mut files = Vec::new();
+    for name in ["a", "b", "c", "d", "e"] {
+        files.push(seed(&server, name)?);
+    }
+    let db = pulled(&remote)?;
+    db.borrow_mut().write(|s| s.account().start_reread())?;
+    for file in files {
+        server.lock().map_err(|_| "poisoned")?.unlist(file);
+    }
+    remote.faults().script = [false, true, true, true, true, true].into();
+    let mut reread = None;
+    let report = feed::pull(|| db.borrow_mut(), &remote, 1000, &mut reread)?;
+    assert_eq!(report.rereading, feed::Rereading::Stuck);
+    assert_eq!(remote.faults().script.len(), 2, "stopped at the third");
+    Ok(())
+}
+
 /// A share's end is asked for though a re-read an earlier pull left open can't end (a file it
 /// asks about can't be answered): the feed is started over at the next pull's first page, and
 /// shows the file as no longer shared (sync semantics §13, "A share that ends").

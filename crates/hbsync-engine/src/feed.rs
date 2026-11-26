@@ -88,8 +88,8 @@ pub enum Rereading {
     /// Open, and its asking got somewhere (a file answered, or said "not there" a first
     /// time): the next pull gets further.
     Asking,
-    /// Open, and its asking stopped at the first file (it can't be answered for now): the
-    /// next pull may get no further.
+    /// Open, and its asking got nowhere (none of the files it asked about could be answered
+    /// for now): the next pull may get no further.
     Stuck,
 }
 
@@ -327,6 +327,10 @@ fn read_pages<G: DerefMut<Target = StateDb>>(
 /// holds the drive, so it doesn't for long.
 const CONFIRM_PER_PULL: usize = 100;
 
+/// Requests of a re-read's asking that fail one after the other before it stops for this
+/// pull ([`ask`]): one file's own trouble is passed by; so many in a row is the connection's.
+const FAILED_IN_A_ROW: usize = 3;
+
 /// A re-read of the whole feed ([`AccountTx::start_reread`]) on its way: the files the store had
 /// when it began that the feed hasn't shown yet, and when it began (the server's clock). The
 /// caller keeps it between pulls, so a pull an error cut short goes on where it stopped (unless
@@ -334,6 +338,8 @@ const CONFIRM_PER_PULL: usize = 100;
 #[derive(Debug)]
 pub struct Reread {
     missing: HashSet<RemoteFileId>,
+    /// The ones of them whose request failed for now ([`ask`]): asked after the others.
+    later: HashSet<RemoteFileId>,
     since: Option<i64>,
 }
 
@@ -344,6 +350,7 @@ impl Reread {
         s.start_reread()?;
         Ok(Reread {
             missing: s.drive_file_ids()?.into_iter().collect(),
+            later: HashSet::new(),
             since: None,
         })
     }
@@ -355,13 +362,12 @@ impl Reread {
     }
 
     /// Its pages read, the files the store had that the feed didn't show: to ask the server
-    /// about ([`ask`]), [`CONFIRM_PER_PULL`] at most.
+    /// about ([`ask`]), [`CONFIRM_PER_PULL`] at most. The ones whose request failed before
+    /// come last: one file that can't be answered keeps none of the others waiting.
     fn to_ask(&self) -> Vec<RemoteFileId> {
-        self.missing
-            .iter()
-            .take(CONFIRM_PER_PULL)
-            .copied()
-            .collect()
+        let first = self.missing.iter().filter(|f| !self.later.contains(f));
+        let last = self.missing.iter().filter(|f| self.later.contains(f));
+        first.chain(last).take(CONFIRM_PER_PULL).copied().collect()
     }
 }
 
@@ -374,22 +380,28 @@ struct Asked {
     not_there: Vec<RemoteFileId>,
     found: Vec<RemoteHeader>,
     answered: Vec<RemoteFileId>,
+    /// Their requests failed for now: asked again at a later pull, after the others.
+    failed: Vec<RemoteFileId>,
 }
 
 /// Asks the server about `files`, which the feed didn't show (it leaves out rows it has: one
 /// changed in its last second, homebase-api-notes): gone if it says it is a tombstone, or not
 /// found (for this app, the file isn't there) a second time a minute on (sync semantics §8b;
 /// till then it is asked again at each pull); one it has is applied as it is
-/// ([`record_answers`]). One it can't tell about now (a broken connection) stops the asking: it
-/// and the rest are asked again later. What it found is written by [`record_answers`], in the
-/// same pull.
+/// ([`record_answers`]). One it can't tell about now is passed by, and asked again at a later
+/// pull, after the others: so that one such file doesn't hold up the rest. The asking stops
+/// where the trouble isn't one file's: this login refused or the server busy (the rest would
+/// be answered alike), or [`FAILED_IN_A_ROW`] requests failing one after the other (the
+/// connection). What it found is written by [`record_answers`], in the same pull.
 fn ask(remote: &dyn Remote, files: &[RemoteFileId]) -> Asked {
     let mut asked = Asked::default();
+    let mut failed_in_a_row = 0;
     for &file_id in files {
         match gone::read(remote, file_id) {
             // Not answered yet: judged in [`record_answers`].
             Ok((Said::NotThere, _)) => {
                 asked.not_there.push(file_id);
+                failed_in_a_row = 0;
                 continue;
             }
             // There, or a tombstone: its header applied as the feed's row would be (a
@@ -402,9 +414,16 @@ fn ask(remote: &dyn Remote, files: &[RemoteFileId]) -> Asked {
             }
             Err(e) => {
                 tracing::info!("{file_id:?} isn't in the feed; asked again later: {e}");
-                break;
+                asked.failed.push(file_id);
+                failed_in_a_row += 1;
+                let for_all = matches!(e.class(), ErrorClass::Denied | ErrorClass::RateLimited);
+                if for_all || failed_in_a_row == FAILED_IN_A_ROW {
+                    break;
+                }
+                continue;
             }
         }
+        failed_in_a_row = 0;
         asked.answered.push(file_id);
     }
     asked
@@ -452,7 +471,9 @@ fn record_answers<G: DerefMut<Target = StateDb>>(
     if let Some(r) = reread.as_mut() {
         for file_id in &asked.answered {
             r.missing.remove(file_id);
+            r.later.remove(file_id);
         }
+        r.later.extend(&asked.failed);
     }
     if done {
         *reread = None;
