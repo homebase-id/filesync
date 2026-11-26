@@ -31,6 +31,7 @@ fn upload_job(dir: &std::path::Path, name: &str, size: usize) -> std::io::Result
             removed: false,
         },
         target: None,
+        from: None,
         path,
         hash: SendHash::Known(hash_bytes(&data, HashAlgorithm::Blake3)),
         size: size as u64,

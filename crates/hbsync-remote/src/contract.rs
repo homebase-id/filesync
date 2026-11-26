@@ -226,6 +226,11 @@ pub const SCENARIOS: &[(&str, Reach, Scenario)] = &[
         the_sharer_adds_to_a_shared_folder,
     ),
     (
+        "a_move_takes_the_shares_along",
+        Reach::SharedOnly,
+        a_move_takes_the_shares_along,
+    ),
+    (
         "a_child_of_a_folder_not_shared",
         Reach::SharedOnly,
         a_child_of_a_folder_not_shared,
@@ -1476,6 +1481,46 @@ fn the_sharer_adds_to_a_shared_folder(b: &Bench) -> Outcome {
     shares(b)?.withdraw(at[1].file_id)?;
     let late = b.create_as_added(&file("late", dir.node, b"3"), Some(b"3"))?;
     ensure_err!(member.header(late.file_id), RemoteError::Fatal(_));
+    Ok(())
+}
+
+/// What the sharer moves out of a shared folder is shared no more, and what it moves into
+/// one is shared as that folder is, a folder with all that is in it
+/// ([`Remote::update_from`]): the member reads it no more, or from then on.
+fn a_move_takes_the_shares_along(b: &Bench) -> Outcome {
+    let member = b.reader();
+    // `meta` moved into `into`, from the folder it is in.
+    let moved = |at: RemoteRef, meta: &mut NodeMeta, into: NodeId| {
+        let from = std::mem::replace(&mut meta.parent, into);
+        let written = (b.remote).update_from(&b.target(at), meta, None, from)?;
+        Ok::<_, RemoteError>(b.keep(written.target))
+    };
+    // A folder at the top, where nothing is shared.
+    let outside = folder(&unshared_name("outside"), NodeId::ROOT);
+    b.create_as_added(&outside, None)?;
+    let mut f = file("moves", b.scratch, b"1");
+    let at = b.create_as_added(&f, Some(b"1"))?;
+    ensure!(member.header(at.file_id).is_ok(), "shared as added");
+    let at = moved(at, &mut f, outside.node)?;
+    ensure_err!(member.header(at.file_id), RemoteError::Fatal(_));
+    let at = moved(at, &mut f, b.scratch)?;
+    ensure!(
+        b.read(at.file_id, None)? == b"1",
+        "shared again, moved back"
+    );
+
+    // A folder made outside, with a file in it: moved in, both are shared; out, neither.
+    let mut dir = folder("a folder that moves", outside.node);
+    let dir_at = b.create_as_added(&dir, None)?;
+    let inner = file("inner", dir.node, b"2");
+    let inner_at = b.create_as_added(&inner, Some(b"2"))?;
+    ensure_err!(member.header(inner_at.file_id), RemoteError::Fatal(_));
+    let dir_at = moved(dir_at, &mut dir, b.scratch)?;
+    ensure!(member.header(dir_at.file_id).is_ok(), "the folder moved in");
+    ensure!(b.read(inner_at.file_id, None)? == b"2", "what is in it");
+    let dir_at = moved(dir_at, &mut dir, outside.node)?;
+    ensure_err!(member.header(dir_at.file_id), RemoteError::Fatal(_));
+    ensure_err!(member.header(inner_at.file_id), RemoteError::Fatal(_));
     Ok(())
 }
 

@@ -212,6 +212,17 @@ impl Remote for ScopedRemote {
     ) -> RemoteResult<hbsync_types::Written> {
         self.inner.update(target, &self.on_drive(meta)?, payload)
     }
+    fn update_from(
+        &self,
+        target: &Target,
+        meta: &NodeMeta,
+        payload: Option<Upload<'_>>,
+        from: NodeId,
+    ) -> RemoteResult<hbsync_types::Written> {
+        // (The mirror's parent of the node, in this folder's coordinates as `meta` is.)
+        let from = self.coords.to_drive(from);
+        (self.inner).update_from(target, &self.on_drive(meta)?, payload, from)
+    }
     fn delete(&self, files: &[Doomed]) -> RemoteResult<hbsync_remote::Deletes> {
         self.inner.delete(files)
     }
@@ -257,6 +268,43 @@ mod tests {
         assert_eq!(main.out_of_scope(&remote), HashSet::from([docs, a, b]));
         assert_eq!(Scope::outside_of(&main.fingerprint()), main.outside);
         assert!(Scope::outside_of("").is_empty());
+    }
+
+    /// A write through a folder's remote names the folder the node is in as the drive has
+    /// it. A node at a role folder's top isn't moved by a write that leaves it there: a move
+    /// would take the top's shares along ([`Remote::update_from`]).
+    #[test]
+    fn a_write_at_the_top_of_a_role_folder_is_no_move() -> Result<(), RemoteError> {
+        use hbsync_remote::contract::Shares;
+        use hbsync_remote::fake::{FakeRemote, FakeServer, ServerConfig};
+        use hbsync_types::NodeKind;
+        use hbsync_types::schema::NodeContent;
+        let docs = Role::Documents.node();
+        let sharer = Arc::new(FakeRemote::new(FakeServer::new(ServerConfig::default())));
+        let member = FakeRemote::member(sharer.server_handle());
+        let folder = |node: NodeId, parent: NodeId, name: &str| NodeMeta {
+            node,
+            parent,
+            kind: NodeKind::Folder,
+            content: NodeContent::folder(name),
+            removed: false,
+        };
+        // The role folder, shared once something was in it already: that isn't shared.
+        let top = sharer.create(&folder(docs, NodeId::ROOT, "Documents"), None)?;
+        let inside = NodeId::new();
+        let made = sharer.create(&folder(inside, docs, "inside"), None)?;
+        sharer.share(top.at().file_id)?;
+        assert!(member.header(made.at().file_id).is_err());
+
+        // Renamed where it is: to this folder, it is at the root before and after.
+        let scoped = Scope::of(docs).remote(sharer.clone());
+        let renamed = folder(inside, NodeId::ROOT, "renamed");
+        let written = scoped.update_from(&made.target, &renamed, None, NodeId::ROOT)?;
+        assert!(
+            member.header(written.at().file_id).is_err(),
+            "shared by a rename: taken for a move from the drive's top"
+        );
+        Ok(())
     }
 
     #[test]

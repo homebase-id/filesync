@@ -2090,10 +2090,22 @@ it tomorrow. So a computer of the owner's shares what it adds itself:
   identity's computer adds"; the fake's `FakeServer::shared_as`, contract
   `the_sharer_adds_to_a_shared_folder`; the simulator's server shares a new file as its
   folder is, `Server::share_as_its_folder`, and its member converges to that).
-- **Only the making shares.** A node moved into a shared folder isn't shared by the move,
-  and one moved out stays shared: the shares don't follow a move yet. A node put back from
-  Recently deleted, or written again, keeps the shares it has; one made again after it went
-  for good is a new file, shared as its folder is then.
+- **A move takes the shares along.** A node this computer moves into a shared folder is
+  shared as that folder is from then on, a folder with all that is in it; moved out of
+  one, it is shared no more with those the folder it left was shared with. The shares
+  that go are taken before the move, the ones that come are given after it: whatever fails
+  between, the node is shared with fewer than where it is, never with more
+  (`Remote::update_from`, `HomebaseRemote::moved`; contract
+  `a_move_takes_the_shares_along`; simulator `Server::moved`,
+  `what_the_owner_moves_takes_its_shares_along`). Shared with the same people in both
+  folders, it is shared as the folder it enters is: for reading or editing, until that
+  folder's share ends (`what_the_owner_moves_is_shared_as_the_folder_it_enters_is`).
+  Between two folders shared alike, nothing changes. A share given to the node itself, by
+  its owner in the app, counts as the folder's where the folder left is shared with the
+  same people: it goes with the move out.
+- **A write that isn't a move changes no share.** A node put back from Recently deleted,
+  renamed or written again keeps the shares it has; one made again after it went for good
+  is a new file, shared as its folder is then.
 - **The file goes up whatever becomes of its shares.** A share that can't be given (one
   that doesn't read, a circle's key not to be had, one that ends before the upload can be
   up) is left out, and said in the log. An upload the server refuses for its shares is sent
@@ -2102,6 +2114,9 @@ it tomorrow. So a computer of the owner's shares what it adds itself:
 - **By what this computer last heard, as the upload begins.** How a folder is shared is
   read when something is first added to it, and gone by for as long as a change of it
   would be told: by the notifications while their one connection holds; else by the feed,
-  10 minutes at most. A file goes up shared as its folder was when its upload began: one
-  on its way while a share is withdrawn stays shared (said in the log), and one added
-  within seconds of a folder first being shared may go up unshared.
+  10 minutes at most. A file goes up shared as its folder was when its upload began, and
+  is held to the folder once it is up: where the folder is shared otherwise by then (a
+  share withdrawn during a long upload; the folder moved in the same sync), the file's
+  shares are made the folder's. What is added to a folder while it moves waits for the
+  move to learn how it is shared. One added within seconds of a folder first being shared
+  may go up unshared.

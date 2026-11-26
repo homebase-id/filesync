@@ -25,18 +25,17 @@ impl Batch {
     pub(super) fn push(&mut self, job: Job, p: Prepared, target: Option<Vec<NodeId>>) {
         let node = job.node();
         self.nodes.insert(node);
-        if let Job::Upload { meta, .. } | Job::Meta { meta, .. } = &job {
+        // The folder it goes into, and the one it is in on the drive now.
+        if let Job::Upload { meta, from, .. } | Job::Meta { meta, from, .. } = &job {
             self.folders.insert(meta.parent);
+            self.folders.extend(*from);
         }
-        match &p.ctx {
-            Ctx::Upload { from, .. } => self.folders.extend(*from),
-            Ctx::Meta { from, after, .. } => {
-                self.folders.extend(*from);
-                if matches!(after, remote::After::Created) {
-                    self.created.insert(node);
-                }
-            }
-            Ctx::Download(_) => {}
+        if let Ctx::Meta {
+            after: remote::After::Created,
+            ..
+        } = &p.ctx
+        {
+            self.created.insert(node);
         }
         if let Some(target) = target {
             self.moved.insert(node);

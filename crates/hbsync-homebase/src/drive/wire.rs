@@ -55,8 +55,10 @@ pub struct FileHeader {
     pub shared_secret_encrypted_key_header: Option<SealedKeyHeader>,
     /// To a member, the live shares the file reaches them through, by circle id: its key header
     /// is the first one's (**[verified]** odin-core `CallerShares.LiveRowsOf`,
-    /// `DriveFileUtility.CreateClientFileHeader`). None on this identity's own drive, where
-    /// only a folder asked about with its shares has them, read strictly ([`shared_folder`]).
+    /// `DriveFileUtility.CreateClientFileHeader`). None on this identity's own drive, but
+    /// where a node is asked about with its shares: a folder's to give to what is added to
+    /// it, read strictly ([`shared_folder`]); a moved node's, read here (a row that doesn't
+    /// read is one the node lacks: given again, or not there to withdraw).
     #[serde(default, deserialize_with = "share_rows")]
     pub shares: Option<Vec<ShareRow>>,
 }
@@ -452,6 +454,9 @@ impl Times {
 pub enum Shape {
     /// The full header.
     Full,
+    /// The header with its content left out (**[verified]** odin-core
+    /// `FileResultShape.NoContent`).
+    NoContent,
     /// Only what identifies the change: a [`FileRef`].
     Minimal,
 }
@@ -480,6 +485,7 @@ pub(crate) fn query(
         "maxRecords": limit.max(1),
         "resultShape": match shape {
             Shape::Full => "full",
+            Shape::NoContent => "noContent",
             Shape::Minimal => "minimal",
         },
         "sorting": match order {
@@ -571,13 +577,32 @@ pub(crate) fn shared_folder(row: &str) -> Result<SharedFolder, serde_json::Error
     })
 }
 
-/// The `query-batch` body for the folder `node` alone, with its live shares (`includeShares`:
-/// **[verified]** odin-core `QueryBatchResultOptionsRequest`, chat-kmp `FilesyncSharing.inherit`).
-pub(crate) fn shares_query(node: NodeId) -> Value {
+/// The file types of the sync nodes.
+pub(crate) const NODE_TYPES: &[i32] = &[FILE_TYPE_FOLDER, FILE_TYPE_FILE];
+
+/// The `query-batch` body for the node `node` alone, if it is of one of `types`, with its
+/// live shares (`includeShares`: **[verified]** odin-core `QueryBatchResultOptionsRequest`,
+/// chat-kmp `FilesyncSharing.inherit`); its content left out, as the server does unasked.
+pub(crate) fn node_query(node: NodeId, types: &[i32]) -> Value {
     json!({
-        "queryParams": { "clientUniqueIdAtLeastOne": [node.0], "fileType": [FILE_TYPE_FOLDER] },
+        "queryParams": { "clientUniqueIdAtLeastOne": [node.0], "fileType": types },
         "resultOptionsRequest": { "maxRecords": 1, "includeShares": true },
     })
+}
+
+/// The `query-batch` body for a page of the active sync nodes in `folders` (their
+/// `groupId`), with their live shares and without their content: what a move reads of what
+/// is in the folder moved ([`HomebaseRemote::moving`](super::HomebaseRemote)). By when they
+/// were made: nothing is held back.
+pub(crate) fn nodes_in_query(folders: &[NodeId], cursor: Option<&str>, limit: usize) -> Value {
+    let params = json!({
+        "groupId": folders.iter().map(|f| f.0).collect::<Vec<_>>(),
+        "fileState": ["active"],
+        "fileType": NODE_TYPES,
+    });
+    let mut body = query(params, cursor, limit, Shape::NoContent, Order::Created);
+    body["resultOptionsRequest"]["includeShares"] = json!(true);
+    body
 }
 
 /// The `query-batch` body for a page of the active files in `folders` (their `groupId`), of
@@ -1046,8 +1071,22 @@ pub(crate) fn share_of_new(
     expires_at: Option<i64>,
     locked: &[u8],
 ) -> Value {
+    share_of(Uuid::nil(), circle, permissions, expires_at, locked)
+}
+
+/// One share of the file `file_id`, as `PUT /drives/{d}/shares` takes it (its body:
+/// `{"shares": [...]}`, 100 at most, all or none: **[verified]** odin-core
+/// `V2DriveSharesController`, chat-kmp `DriveShareProvider`), with the file's key `locked`
+/// under the circle's key ([`CircleKey::lock_key_of`]); a new file's names no file.
+pub(crate) fn share_of(
+    file_id: Uuid,
+    circle: Uuid,
+    permissions: u32,
+    expires_at: Option<i64>,
+    locked: &[u8],
+) -> Value {
     json!({
-        "fileId": Uuid::nil(),
+        "fileId": file_id,
         "circleId": circle,
         "permissions": permissions,
         "expiresAt": expires_at,

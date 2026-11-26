@@ -96,6 +96,13 @@ impl At {
     }
 }
 
+/// Whether two folders are shared alike: with the same circles, each for the same and until
+/// the same, in whatever order (the server lists a file's shares by when each was first
+/// written: **[verified]** odin-core `TableDriveAclIndex.GetRowsAsync`).
+pub(crate) fn alike(a: &[Share], b: &[Share]) -> bool {
+    a.len() == b.len() && a.iter().all(|share| b.contains(share))
+}
+
 /// What is known of one folder.
 #[derive(Debug)]
 struct Known {
@@ -109,8 +116,6 @@ struct Known {
     /// The notifications' connection that was up as it was learnt: while that one holds, a
     /// change of the folder would have been heard. None for a folder they can't name.
     listening: Option<u64>,
-    /// The server refused its shares with an upload ([`Folders::refused`]): none are given.
-    refused: bool,
     /// When it was last asked about ([`State::asked`]).
     asked: u64,
 }
@@ -152,6 +157,10 @@ struct State {
     reading: Option<Reading>,
     /// Counts the folders learnt and asked about ([`Known::asked`]).
     asked: u64,
+    /// The folders whose shares the server refused with an upload, when, and the shares it
+    /// refused ([`Folders::refused`]): kept apart from what is known of them, which is
+    /// read again in between.
+    refusals: HashMap<NodeId, (At, Shares)>,
 }
 
 impl State {
@@ -163,10 +172,14 @@ impl State {
 
     /// Whether what is `known` of a folder is still gone by ([`Folders::known`]).
     fn holds(&self, known: &Known) -> bool {
-        match known.refused {
-            true => known.learnt.within(REFUSED),
-            false => self.heard_all(known) || known.learnt.within(KEPT),
-        }
+        self.heard_all(known) || known.learnt.within(KEPT)
+    }
+
+    /// `folder` changed, as far as was told: nothing is known of it any more, nor held
+    /// against its shares.
+    fn changed(&mut self, folder: NodeId) {
+        self.forget(folder);
+        self.refusals.remove(&folder);
     }
 
     /// Nothing is known of `folder` any more.
@@ -190,7 +203,6 @@ impl State {
             shares,
             learnt: At::now(),
             listening: self.listening.filter(|_| at.is_some()),
-            refused: false,
             asked: self.asked,
         };
         self.folders.insert(folder, known);
@@ -259,8 +271,7 @@ impl Folders {
     /// `folder`'s shares, if a change of them since they were learnt would have been told:
     /// for as long as the notifications' connection they were learnt under holds (a change
     /// of the folder is announced within seconds, [`Folders::heard`]) and this computer
-    /// didn't sleep, else for [`KEPT`]. A folder whose shares the server refused has none
-    /// for [`REFUSED`].
+    /// didn't sleep, else for [`KEPT`].
     pub(crate) fn known(&self, folder: NodeId) -> Option<Shares> {
         let mut state = self.state();
         state.asked += 1;
@@ -327,9 +338,8 @@ impl Folders {
     /// again.
     pub(crate) fn rewritten(&self, folder: NodeId, at: RemoteRef) {
         let mut state = self.state();
-        let heard_all = |known: &Known| {
-            known.file_id == Some(at.file_id.0) && (known.refused || state.heard_all(known))
-        };
+        let heard_all =
+            |known: &Known| known.file_id == Some(at.file_id.0) && state.heard_all(known);
         match state.folders.get(&folder).map(heard_all) {
             Some(true) => {
                 if let Some(known) = state.folders.get_mut(&folder) {
@@ -347,16 +357,22 @@ impl Folders {
     /// that changed meanwhile shares what it shares now, which nothing refused.
     pub(crate) fn refused(&self, folder: NodeId, sent: &Shares) -> bool {
         let mut state = self.state();
-        let Some(known) = state.folders.get_mut(&folder) else {
-            return false;
-        };
-        if known.shares[..] != sent[..] {
+        let as_sent = |known: &Known| known.shares[..] == sent[..];
+        if !state.folders.get(&folder).is_some_and(as_sent) {
             return false;
         }
-        known.shares = Shares::default();
-        known.learnt = At::now();
-        known.refused = true;
+        state.refusals.retain(|_, (at, _)| at.within(REFUSED));
+        state.refusals.insert(folder, (At::now(), Arc::clone(sent)));
         true
+    }
+
+    /// Whether what is added to `folder`, shared as `shares`, goes up without them for now:
+    /// the server refused those with an upload less than [`REFUSED`] ago
+    /// ([`Folders::refused`]), and nothing was told of the folder since. However often it
+    /// is read again meanwhile (with the notifications down, every [`KEPT`]).
+    pub(crate) fn is_refused(&self, folder: NodeId, shares: &[Share]) -> bool {
+        let refused = |(at, refused): &(At, Shares)| at.within(REFUSED) && refused[..] == *shares;
+        self.state().refusals.get(&folder).is_some_and(refused)
     }
 
     /// Nothing is known of `folder` any more: it is read again when next added to.
@@ -368,11 +384,7 @@ impl Folders {
     /// one before it was ([`Folders::refused`]). The folder is read, and shared, again.
     pub(crate) fn not_for_its_shares(&self, folder: NodeId) {
         let mut state = self.state();
-        if state
-            .folders
-            .get(&folder)
-            .is_some_and(|known| known.refused)
-        {
+        if state.refusals.remove(&folder).is_some() {
             state.forget(folder);
         }
     }
@@ -385,7 +397,7 @@ impl Folders {
     pub(crate) fn heard(&self, file: RemoteFileId) {
         let mut state = self.state();
         if let Some(folder) = state.by_file.get(&file.0).copied() {
-            state.forget(folder);
+            state.changed(folder);
         }
         if let Some(reading) = &mut state.reading {
             reading.told(|reading| &mut reading.heard, file.0);
@@ -407,7 +419,7 @@ impl Folders {
             .get(&row.node)
             .is_some_and(|known| !same(known))
         {
-            state.forget(row.node);
+            state.changed(row.node);
         }
         if let Some(reading) = &mut state.reading {
             reading.told(|reading| &mut reading.fed, row.node);
@@ -640,9 +652,11 @@ pub(crate) mod tests {
         }
     }
 
-    /// A folder whose shares the server refused gives none, connected or not, until it
-    /// changes or an hour passed; only where the shares refused are still what is known of
-    /// it. Refused without them too, it wasn't for the shares.
+    /// What is added to a folder whose shares the server refused goes up without them for
+    /// an hour, or until the folder changes; only where the shares refused are still what
+    /// is known of it. What it shares stays known as it is (a move out of it withdraws
+    /// that), and the hour is the refusal's: the folder read again meanwhile, shared as it
+    /// was, is still refused. Refused without them too, it wasn't for the shares.
     #[test]
     fn a_folder_whose_shares_were_refused_gives_none_for_a_while() {
         let folders = Folders::default();
@@ -651,34 +665,49 @@ pub(crate) mod tests {
         assert!(!folders.refused(a, &sent), "not known: read again");
         folders.listening(true);
         folders.made(a, at(100, 10), Arc::clone(&sent));
-        assert!(folders.refused(a, &sent));
-        assert_eq!(folders.known(a).map(|s| s.len()), Some(0));
-        if aged(&folders, REFUSED) {
-            assert!(folders.known(a).is_none(), "tried again");
+        assert!(!folders.is_refused(a, &sent));
+        assert!(folders.refused(a, &sent) && folders.is_refused(a, &sent));
+        assert_eq!(folders.known(a), Some(Arc::clone(&sent)));
+        // Read again (the notifications down, every ten minutes): refused still.
+        folders.forget(a);
+        folders.made(a, at(100, 10), Arc::from([share(7, None)]));
+        assert!(folders.is_refused(a, &sent), "the same shares, read again");
+        let long_ago = SystemTime::now().checked_sub(REFUSED + Duration::from_secs(1));
+        for (at, _) in folders.state().refusals.values_mut() {
+            *at = At(Instant::now(), long_ago.expect("an hour ago"));
         }
-        folders.made(a, at(100, 10), Arc::clone(&sent));
+        assert!(!folders.is_refused(a, &sent), "tried again");
+
         folders.refused(a, &sent);
         folders.heard(file(100));
         assert!(
-            folders.known(a).is_none(),
-            "it changed: read and tried again"
+            folders.known(a).is_none() && !folders.is_refused(a, &sent),
+            "it changed"
         );
 
-        // Changed since the upload began: what it shares now wasn't refused. Read again
-        // as it was, it is what was refused.
+        // Changed since the upload began: what it shares now wasn't refused.
         let now: Shares = Arc::from([share(8, None)]);
         folders.made(a, at(100, 10), Arc::clone(&now));
-        assert!(!folders.refused(a, &sent));
-        assert_eq!(folders.known(a), Some(Arc::clone(&now)));
-        folders.made(a, at(100, 10), Arc::from([share(7, None)]));
-        assert!(folders.refused(a, &sent), "the same shares, read again");
-        folders.made(a, at(100, 10), Arc::clone(&now));
+        assert!(!folders.refused(a, &sent) && !folders.is_refused(a, &now));
 
         folders.not_for_its_shares(a);
         assert!(folders.known(a).is_some(), "not refused: left as it is");
         assert!(folders.refused(a, &now));
         folders.not_for_its_shares(a);
-        assert!(folders.known(a).is_none(), "read, and shared, again");
+        assert!(folders.known(a).is_none() && !folders.is_refused(a, &now));
+    }
+
+    #[test]
+    fn folders_are_shared_alike_in_whatever_order() {
+        let (a, b, ends) = (share(1, None), share(2, None), share(1, Some(5)));
+        assert!(alike(&[], &[]) && alike(&[a, b], &[b, a]));
+        assert!(!alike(&[a], &[]) && !alike(&[a], &[b]) && !alike(&[a, b], &[a]));
+        assert!(!alike(&[a], &[ends]), "until another time");
+        let edits = Share {
+            permissions: crate::app::READ | crate::app::WRITE,
+            ..a
+        };
+        assert!(!alike(&[a], &[edits]), "for more");
     }
 
     #[test]

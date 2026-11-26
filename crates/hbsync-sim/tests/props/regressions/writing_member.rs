@@ -55,10 +55,16 @@ fn folder_pick(sim: &Sim, c: usize, folder: &str) -> usize {
 
 /// The member moves its item at `path` into `folder` (`""`: the top) as the name `name` picks.
 fn rename(sim: &mut Sim, path: &str, folder: &str, name: usize) {
-    let node = sim.item(2, path).expect("on the member's device");
-    let node = sim.pick(2, node, false).expect("its pick");
-    let parent = folder_pick(sim, 2, folder);
-    sim.run(&[act(2, Action::Move { node, parent, name })]);
+    move_on(sim, 2, path, folder, name);
+}
+
+/// Client `c` moves its item at `path` into its `folder` (`""`: the top) as the name `name`
+/// picks.
+fn move_on(sim: &mut Sim, c: usize, path: &str, folder: &str, name: usize) {
+    let node = sim.item(c, path).expect("on that device");
+    let node = sim.pick(c, node, false).expect("its pick");
+    let parent = folder_pick(sim, c, folder);
+    sim.run(&[act(c, Action::Move { node, parent, name })]);
 }
 
 /// An edit and a rename of a file shared for editing reach the drive, and the owner's
@@ -244,6 +250,59 @@ fn what_the_owner_makes_in_a_shared_folder_reaches_the_member() {
     );
 }
 
+/// What the owner's computer moves into a shared folder is shared as that folder is, a
+/// folder with all that is in it; moved out of it, shared no more (sync semantics §13,
+/// "What the owner's computer adds"): the member gets it, and gives it up.
+#[test]
+fn what_the_owner_moves_takes_its_shares_along() {
+    let mut sim = owned(&["b"]);
+    let moved = |sim: &mut Sim, path: &str, into: &str, name: usize| {
+        move_on(sim, 0, path, into, name);
+        settle(sim);
+    };
+    // A folder with a file, made at the top where nothing is shared.
+    let parent = folder_pick(&sim, 0, "");
+    sim.run(&[act(0, Action::CreateFolder { parent, name: 5 })]);
+    add_to(&mut sim, 0, "d", 3);
+    settle(&mut sim);
+    assert_eq!(sim.local_paths(2), ["b"]);
+    // The file at the top, `a`, into the shared folder (as `c.txt`: an `a` is there), and
+    // the folder `d` with what is in it.
+    moved(&mut sim, "a", "b", 4);
+    moved(&mut sim, "d", "b", 5);
+    assert_eq!(sim.local_paths(2), ["b", "b/C.TXT", "b/d", "b/d/c.txt"]);
+    // Shared for editing as `b` is: the member's edit of one goes up.
+    edit(&mut sim, "b/d/c.txt");
+    settle(&mut sim);
+    assert!(sim.moved_out(2).is_empty(), "{:?}", sim.moved_out(2));
+    // Out again: neither is the member's any more.
+    moved(&mut sim, "b/d", "", 5);
+    moved(&mut sim, "b/C.TXT", "", 4);
+    assert_eq!(sim.local_paths(2), ["b"]);
+    assert_eq!(sim.server_paths(), ["C.TXT", "b", "b/a", "d", "d/c.txt"]);
+}
+
+/// What the owner moves from a folder shared for editing into one shared for reading is
+/// shared for reading from then on, as that folder is: the member's edit of it doesn't
+/// reach the drive.
+#[test]
+fn what_the_owner_moves_is_shared_as_the_folder_it_enters_is() {
+    let mut sim = owned(&["b"]);
+    let parent = folder_pick(&sim, 0, "");
+    sim.run(&[act(0, Action::CreateFolder { parent, name: 5 })]);
+    settle(&mut sim);
+    share(&mut sim, "d");
+    settle(&mut sim);
+    move_on(&mut sim, 0, "b/a", "d", 0);
+    settle(&mut sim);
+    assert_eq!(sim.local_paths(2), ["b", "d", "d/a"]);
+    let theirs = sim.item(0, "d/a").expect("d/a");
+    let before = sim.drive_hash(theirs);
+    edit(&mut sim, "d/a");
+    settle(&mut sim);
+    assert_eq!(sim.drive_hash(theirs), before, "for reading: not written");
+}
+
 /// A file moves between two folders shared for editing; into a folder shared for reading,
 /// the move is undone.
 #[test]
@@ -296,6 +355,14 @@ fn a_file_left_out_for_its_name_makes_no_conflict_copy_meanwhile() {
     );
     let name = 0;
     sim.run(&[act(0, Action::Move { node, parent, name })]);
+    // The move takes the file's share along: into a folder that isn't shared, it is shared
+    // no more. Its owner shares the file itself again, for editing, before the member has
+    // synced: the member still has it, where it was.
+    let moves = Event::Step { client: 0 };
+    sim.run(&[Event::Plan { client: 0 }, moves, moves, moves]);
+    assert_eq!(sim.server_paths(), ["a", "b", "b/d", "b/d/a"]);
+    share(&mut sim, "b/d/a");
+    turn(&mut sim, "b/d/a");
     let file = sim.file_pick(0, theirs).expect("a file");
     sim.run(&[act(0, Action::Edit { file })]);
     edit(&mut sim, "b/a");

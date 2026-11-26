@@ -320,6 +320,7 @@ impl Executor<'_> {
             Some(had) => content.set_tags_over(&tags, had),
             None => content.set_tags(&tags),
         }
+        let from = existing.and(mirror.map(|m| m.parent));
         let job = Job::Upload {
             meta: NodeMeta {
                 node,
@@ -329,17 +330,13 @@ impl Executor<'_> {
                 removed: false,
             },
             target,
+            from,
             path,
             hash,
             size,
             seen: row.fingerprint,
         };
-        Ok((
-            job,
-            Ctx::Upload {
-                from: existing.and(mirror.map(|m| m.parent)),
-            },
-        ))
+        Ok((job, Ctx::Upload))
     }
 
     /// Records what a job did: `job` is the one that ran, given back by the pool.
@@ -358,9 +355,11 @@ impl Executor<'_> {
             self.report.news.behind = true;
         }
         match (ctx, job, result) {
-            (Ctx::Meta { hash, after, .. }, Job::Meta { meta, target }, JobResult::Written(w)) => {
-                self.commit_meta(meta, hash, after, target.as_ref(), w)
-            }
+            (
+                Ctx::Meta { hash, after, .. },
+                Job::Meta { meta, target, .. },
+                JobResult::Written(w),
+            ) => self.commit_meta(meta, hash, after, target.as_ref(), w),
             // An earlier try landed, with whatever the file held then: the bytes count as
             // agreed only where the drive's hash is the local one (an edit since goes up).
             (_, job, JobResult::Failed(JobError::Remote(RemoteError::AlreadyExists))) => {
@@ -467,7 +466,7 @@ impl Executor<'_> {
                 self.place_download(*d, file, local_hash)
             }
             (
-                Ctx::Upload { .. },
+                Ctx::Upload,
                 Job::Upload {
                     meta,
                     target,

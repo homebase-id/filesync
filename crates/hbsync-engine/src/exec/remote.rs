@@ -218,5 +218,6 @@ fn meta_job(
     from: Option<NodeId>,
     after: After,
 ) -> (Job, Ctx) {
-    (Job::Meta { meta, target }, Ctx::Meta { hash, from, after })
+    let job = Job::Meta { meta, target, from };
+    (job, Ctx::Meta { hash, after })
 }

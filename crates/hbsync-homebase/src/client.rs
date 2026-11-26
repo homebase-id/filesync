@@ -306,9 +306,7 @@ impl Client {
         path: &str,
         query: &[(&str, &str)],
     ) -> Result<T, HomebaseError> {
-        let qs = crate::query(query);
-        let ss = serde_json::to_string(&Envelope::seal(&self.key, qs.as_bytes())?)?;
-        let url = format!("{}?{}", self.url(path), crate::query(&[("ss", &ss)]));
+        let url = self.sealed_url(path, query)?;
         let call = self.connections.call();
         let response = call
             .get(&url)
@@ -317,19 +315,57 @@ impl Client {
         self.decode(response, path)
     }
 
+    /// `path`'s address with `query` encrypted into `ss` (a `GET`'s, a `DELETE`'s).
+    fn sealed_url(&self, path: &str, query: &[(&str, &str)]) -> Result<String, HomebaseError> {
+        let qs = crate::query(query);
+        let ss = serde_json::to_string(&Envelope::seal(&self.key, qs.as_bytes())?)?;
+        Ok(format!(
+            "{}?{}",
+            self.url(path),
+            crate::query(&[("ss", &ss)])
+        ))
+    }
+
+    /// `body` in an envelope (a `POST`'s, a `PUT`'s).
+    fn sealed_body(&self, body: &serde_json::Value) -> Result<Envelope, HomebaseError> {
+        Envelope::seal(&self.key, &serde_json::to_vec(body)?)
+    }
+
     /// `POST {path}` with `body` in an envelope.
     pub fn post<T: DeserializeOwned>(
         &self,
         path: &str,
         body: &serde_json::Value,
     ) -> Result<T, HomebaseError> {
-        let sealed = Envelope::seal(&self.key, &serde_json::to_vec(body)?)?;
+        let sealed = self.sealed_body(body)?;
         let call = self.connections.call();
         let response = call
             .post(self.url(path))
             .header("Authorization", &self.bearer())
             .send_json(&sealed);
         self.decode(response, path)
+    }
+
+    /// `PUT {path}` with `body` in an envelope: an answer without a body to read.
+    pub(crate) fn put(&self, path: &str, body: &serde_json::Value) -> Result<(), HomebaseError> {
+        let sealed = self.sealed_body(body)?;
+        let call = self.connections.call();
+        let response = call
+            .put(self.url(path))
+            .header("Authorization", &self.bearer())
+            .send_json(&sealed);
+        checked(response, path, self.whose(path)).map(drop)
+    }
+
+    /// `DELETE {path}`: an answer without a body to read.
+    pub(crate) fn delete(&self, path: &str) -> Result<(), HomebaseError> {
+        let url = self.sealed_url(path, &[])?;
+        let call = self.connections.call();
+        let response = call
+            .delete(&url)
+            .header("Authorization", &self.bearer())
+            .call();
+        checked(response, path, self.whose(path)).map(drop)
     }
 
     /// Sends a multipart form (plaintext; the parts carry their own encryption).

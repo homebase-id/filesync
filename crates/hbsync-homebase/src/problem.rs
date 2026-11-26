@@ -60,6 +60,7 @@ const KNOWN_CODES: &[(u32, &str)] = &[
     (4106, "fileNotFound"),
     (4159, "missingVersionTag"),
     (4160, "versionTagMismatch"),
+    (4161, "invalidFile"),
     (4175, "payloadHashMismatch"),
     (4176, "invalidPayloadHash"),
     (4177, "payloadHashRequired"),
