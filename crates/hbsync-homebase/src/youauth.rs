@@ -1,13 +1,17 @@
 //! Registering the app on an identity and authorizing this device: the YouAuth flow, as
 //! odin-core runs it (verified in `YouAuthUnifiedController`, `YouAuthUnifiedService`) and
-//! chat-kmp's desktop client does it.
+//! chat-kmp's desktop client does it. On the V2 API's routes (odin-core `V2YouAuthController`,
+//! PR #2066, v0.1.996: V1's own flow under `/api/v2/youauth`). The owner console's consent
+//! page must post to the route the sign-in started on (odin-js #1020): an older one posts to
+//! V1's, which the server refuses for a sign-in started here (`Path mismatch`, a 400:
+//! **[verified]** live 2026-11-26).
 //!
-//! 1. Open `https://{identity}/api/owner/v1/youauth/authorize` in the browser, with our P-384
+//! 1. Open `https://{identity}/api/v2/youauth/authorize` in the browser, with our P-384
 //!    public key and the app's permission request. The owner logs in; a new app goes through
 //!    the registration page first (which creates the requested drives), then comes back.
 //! 2. The identity redirects to our localhost callback with its own public key and a salt.
 //! 3. Both sides derive the exchange key; we prove it with its SHA-256 at
-//!    `POST /api/owner/v1/youauth/token` and get the client auth token and the shared secret,
+//!    `POST /api/v2/youauth/token` and get the client auth token and the shared secret,
 //!    AES-CBC encrypted under the exchange key, and the app's zero-knowledge key, sealed to our
 //!    public key (asked for with `zk_app_key=1`: odin-core
 //!    `docs/zero-knowledge-drive-api-plan.md`, 3.5).
@@ -23,6 +27,12 @@ use zeroize::Zeroizing;
 
 use crate::HomebaseError;
 use crate::crypto::{Exchange, Key, aes_cbc_decrypt, key_of, random};
+
+/// Where a sign-in starts, in the browser, and where its token is exchanged: the V2 API's
+/// (**[verified]** odin-core `UnifiedApiRouteConstants.YouAuthAuthorize`, `YouAuthToken`;
+/// live 2026-11-26, the consent posted to V2's route as odin-js #1020 does).
+const AUTHORIZE: &str = "/api/v2/youauth/authorize";
+const TOKEN: &str = "/api/v2/youauth/token";
 
 /// What a device keeps after authorizing: who it talks to and how.
 #[derive(Clone, Serialize, Deserialize)]
@@ -140,7 +150,7 @@ pub fn begin(
         ("state", &state),
         ("redirect_uri", redirect_uri),
     ]);
-    let authorize_url = format!("https://{identity}/api/owner/v1/youauth/authorize?{query}");
+    let authorize_url = format!("https://{identity}{AUTHORIZE}?{query}");
     Ok(Pending {
         identity: identity.to_owned(),
         exchange,
@@ -188,7 +198,7 @@ impl Pending {
         let key = self.exchange.derive(peer, &salt)?;
         let digest = STANDARD.encode(sha2::Sha256::digest(key));
 
-        let url = format!("https://{}/api/owner/v1/youauth/token", self.identity);
+        let url = format!("https://{}{TOKEN}", self.identity);
         let body = serde_json::json!({ "secret_digest": digest });
         let answer: TokenResponse = crate::client::http_json(
             crate::client::agent().post(&url).send_json(&body),
@@ -251,6 +261,23 @@ struct TokenResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The browser is sent to the V2 API's route to sign in.
+    #[test]
+    fn a_sign_in_starts_on_the_v2_route() -> Result<(), HomebaseError> {
+        let pending = begin(
+            "frodo.test",
+            "Filesync on a test",
+            "http://localhost:1/back",
+        )?;
+        let at = "https://frodo.test/api/v2/youauth/authorize?";
+        assert!(
+            pending.authorize_url.starts_with(at),
+            "{}",
+            pending.authorize_url
+        );
+        Ok(())
+    }
 
     /// A login's id is stored (the files' tokens are sealed by it): it never changes between
     /// builds, and a new shared secret gives a new one.
