@@ -133,23 +133,32 @@ impl CircleKey {
         file_key: &Key,
         global_transit_id: Uuid,
     ) -> Result<Vec<u8>, HomebaseError> {
-        self.lock_with(file_key, global_transit_id, &random::<12>()?)
+        let nonce = random::<12>()?;
+        self.lock_with(BY_GLOBAL_TRANSIT_ID, file_key, global_transit_id, &nonce)
     }
 
-    fn lock_with(
+    /// The key of a file that is on the drive, locked under the circle's key for a share
+    /// row of it: bound to its file id (format 2; **[verified]** odin-core
+    /// `SelectiveShareKeyVectorTests`, chat-kmp `ShareKeys.lockFileKey`).
+    pub(crate) fn lock_key_of(
         &self,
         file_key: &Key,
-        global_transit_id: Uuid,
+        file_id: Uuid,
+    ) -> Result<Vec<u8>, HomebaseError> {
+        self.lock_with(BY_FILE_ID, file_key, file_id, &random::<12>()?)
+    }
+
+    /// `file_key` locked in `format`, bound to `id` (what the format binds to).
+    fn lock_with(
+        &self,
+        format: u8,
+        file_key: &Key,
+        id: Uuid,
         nonce: &[u8; 12],
     ) -> Result<Vec<u8>, HomebaseError> {
-        let mut locked = vec![BY_GLOBAL_TRANSIT_ID];
+        let mut locked = vec![format];
         locked.extend(nonce);
-        locked.extend(gcm_seal(
-            &self.key,
-            nonce,
-            file_key,
-            &self.aad(global_transit_id),
-        )?);
+        locked.extend(gcm_seal(&self.key, nonce, file_key, &self.aad(id))?);
         Ok(locked)
     }
 }
@@ -225,7 +234,15 @@ pub(crate) mod tests {
         let file_key: Key = bytes(FILE_KEY).try_into().expect("a key");
         let vector = bytes(LOCKED_BY_GTID);
         let nonce: [u8; 12] = vector[1..13].try_into().expect("a nonce");
-        assert_eq!(circle.lock_with(&file_key, id(GTID), &nonce)?, vector);
+        let by_gtid = circle.lock_with(BY_GLOBAL_TRANSIT_ID, &file_key, id(GTID), &nonce)?;
+        assert_eq!(by_gtid, vector);
+        // And by its file id, once it has one.
+        assert_eq!(
+            circle.lock_with(BY_FILE_ID, &file_key, id(FILE), &nonce)?,
+            bytes(LOCKED)
+        );
+        let by_file = circle.lock_key_of(&file_key, id(FILE))?;
+        assert_eq!(circle.file_key(&by_file, id(FILE), None)?, file_key);
 
         let locked = circle.lock_file_key(&file_key, id(GTID))?;
         assert_ne!(locked, vector, "a new nonce each time");

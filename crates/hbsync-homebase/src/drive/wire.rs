@@ -580,6 +580,32 @@ pub(crate) fn shares_query(node: NodeId) -> Value {
     })
 }
 
+/// The `query-batch` body for the sync node `node` alone, whole, with its live shares.
+pub(crate) fn node_query(node: NodeId) -> Value {
+    json!({
+        "queryParams": {
+            "clientUniqueIdAtLeastOne": [node.0],
+            "fileType": [FILE_TYPE_FOLDER, FILE_TYPE_FILE],
+        },
+        "resultOptionsRequest": { "maxRecords": 1, "includeShares": true },
+    })
+}
+
+/// The `query-batch` body for a page of the active sync nodes in `folders` (their
+/// `groupId`), whole, with their live shares: what a move reads of what is in the folder
+/// moved ([`HomebaseRemote::moving`](super::HomebaseRemote)). By when they were made: nothing
+/// is held back.
+pub(crate) fn nodes_in_query(folders: &[NodeId], cursor: Option<&str>, limit: usize) -> Value {
+    let params = json!({
+        "groupId": folders.iter().map(|f| f.0).collect::<Vec<_>>(),
+        "fileState": ["active"],
+        "fileType": [FILE_TYPE_FOLDER, FILE_TYPE_FILE],
+    });
+    let mut body = query(params, cursor, limit, Shape::Full, Order::Created);
+    body["resultOptionsRequest"]["includeShares"] = json!(true);
+    body
+}
+
 /// The `query-batch` body for a page of the active files in `folders` (their `groupId`), of
 /// any type, minimal rows: what [`HomebaseRemote::holding`](super::HomebaseRemote) asks.
 /// odin-core filters on `groupId`, `fileState` and `archivalStatus` (**[verified]**
@@ -1046,8 +1072,22 @@ pub(crate) fn share_of_new(
     expires_at: Option<i64>,
     locked: &[u8],
 ) -> Value {
+    share_of(Uuid::nil(), circle, permissions, expires_at, locked)
+}
+
+/// One share of the file `file_id`, as `PUT /drives/{d}/shares` takes it (its body:
+/// `{"shares": [...]}`, 100 at most, all or none: **[verified]** odin-core
+/// `V2DriveSharesController`, chat-kmp `DriveShareProvider`), with the file's key `locked`
+/// under the circle's key ([`CircleKey::lock_key_of`]); a new file's names no file.
+pub(crate) fn share_of(
+    file_id: Uuid,
+    circle: Uuid,
+    permissions: u32,
+    expires_at: Option<i64>,
+    locked: &[u8],
+) -> Value {
     json!({
-        "fileId": Uuid::nil(),
+        "fileId": file_id,
         "circleId": circle,
         "permissions": permissions,
         "expiresAt": expires_at,

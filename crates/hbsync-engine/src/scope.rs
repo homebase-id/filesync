@@ -212,6 +212,16 @@ impl Remote for ScopedRemote {
     ) -> RemoteResult<hbsync_types::Written> {
         self.inner.update(target, &self.on_drive(meta)?, payload)
     }
+    fn update_from(
+        &self,
+        target: &Target,
+        meta: &NodeMeta,
+        payload: Option<Upload<'_>>,
+        from: NodeId,
+    ) -> RemoteResult<hbsync_types::Written> {
+        // (`from` is the drive's own: the mirror's parent of the node.)
+        (self.inner).update_from(target, &self.on_drive(meta)?, payload, from)
+    }
     fn delete(&self, files: &[Doomed]) -> RemoteResult<hbsync_remote::Deletes> {
         self.inner.delete(files)
     }

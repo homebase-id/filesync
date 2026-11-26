@@ -1057,11 +1057,33 @@ shares a folder writes the rows of what is in it then (**[verified]** chat-kmp
     minutes: said in the log.
   - How the folder is shared not read because the server isn't reached fails the upload as
     the upload itself would fail.
+- **A move takes the shares along** (`HomebaseRemote::moved`, on `Remote::update_from`: the
+  engine names the folder the node is in on the drive). Rows can't ride on an update
+  (above): they are written and withdrawn on their own routes, **[verified]** live
+  2026-11-26 with the app's login.
+  - `PUT /api/v2/drives/{d}/shares` with `{shares: [{fileId, circleId, permissions,
+    expiresAt, lockedFileKey}]}`: 100 at most, all or none. The key is the file's, locked
+    under the circle's key in format 2, bound to its file id. `DELETE
+    /api/v2/drives/{d}/files/{fileId}/shares/{circleId}` withdraws one. Neither answers
+    with a body; both move the file's `updated` and keep its version.
+  - Where the folder left or the folder entered shares anything, the node and all that is
+    in it are read first, each with its key and its shares: one `query-batch` for the node
+    (`includeShares`), one per page of 500 nodes per 100 folders below it. A node written
+    since the engine read it is refused there (`versionTagMismatch` would come after the
+    shares were withdrawn).
+  - The shares of the circles the folder left is shared with, and the one entered isn't,
+    are withdrawn **before** the move: one `DELETE` per share. The ones the folder entered
+    shares, and a node lacks, are given **after** it: one `PUT` per 100 shares of a circle
+    (one circle the server refuses takes no other's along). So whatever fails on the way, a
+    node is shared with fewer than where it is, never with more. Shares that can't be given
+    after the move are said in the log, and left: nothing gives them later.
+  - Where neither folder shares anything, nothing is asked beyond how the two are shared
+    (once each, as for an add).
+  - Measured live (dev server, a folder shared for editing): a file moved in, on the
+    member's computer after 2.6 s (1 `PATCH`, 1 `PUT`, 2 `query-batch`); a folder with a
+    folder and four files moved in, 2.6 s (1 `PATCH`, 1 `PUT` of 6 shares, 3
+    `query-batch`); moved out again, gone there after 1.4 s (1 or 6 `DELETE`, 1 `PATCH`).
 - **Limits.**
-  - A node this computer **moves** into a shared folder, or out of one, keeps the rows it
-    has: moved in, it reaches no member; moved out, it stays shared. Rows can't ride on an
-    update: they are written and withdrawn on their own routes (`PUT /drives/{d}/shares`,
-    `DELETE …/files/{id}/shares/{circleId}`), which this client doesn't use yet.
   - A file goes up shared as its folder was **when its upload began**: the server looks at
     the shares once the bytes are in and writes them whatever became of the folder's
     meanwhile. One added just before a withdrawal stays shared (for a large file, "just

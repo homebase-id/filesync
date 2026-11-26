@@ -166,11 +166,12 @@ adds to a shared folder goes up with that folder's shares (the same circles, per
 and ends), in the upload itself, so it is shared at once (sync semantics §13, "What the
 owner's computer adds"). Such a file has a `globalTransitId` the computer picked, and its
 rows' keys are in format 3, bound to that id: open a row's key by its format byte, as for a
-file a member added (encryption spec, "Files shared with you"). What the computers don't
-do yet:
-- A node a computer moves into a shared folder keeps the rows it had, and one it moves out
-  keeps them too: a shared folder can hold a node that isn't shared, and a folder that
-  isn't shared one that is.
+file a member added (encryption spec, "Files shared with you"). A node a computer moves
+into a shared folder gets that folder's rows too, with all that is in it (keys in format 2,
+by file id), and one it moves out of a shared folder has the rows of that folder's circles
+withdrawn. As when you move one: a share you gave a single file counts as its folder's
+where the folder it leaves is shared with the same circle. What the computers don't do
+yet:
 - They add no rows for a folder's other circles to what a member added.
 
 ## Downloading

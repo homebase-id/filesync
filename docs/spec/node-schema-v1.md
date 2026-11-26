@@ -466,6 +466,10 @@ write nodes this client syncs. The file browser's own guide, built on these rule
   semantics §12); say so before deleting one. Show them at the top, by their own icons.
 
 ## Changes
+- 2026-11-26: a node a computer of the owner's moves into a shared folder gets that
+  folder's share rows (all that is in it too), and loses the rows of the folder it leaves
+  where the one it enters lacks them (file browser guide, "What you share, and the
+  computers"). Nothing new in a node's content.
 - 2026-11-25: a node a computer of the owner's adds to a shared folder goes up shared as
   the folder is: with share rows of its own, their keys in format 3, and a
   `globalTransitId` the computer picked (file browser guide, "What you share, and the

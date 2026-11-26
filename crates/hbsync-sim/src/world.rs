@@ -447,8 +447,10 @@ impl Sim {
                 if free(NodeId::ROOT, &self.server.live[&file].state.name)
                     && let Some(n) = self.server.live.get_mut(&file)
                 {
-                    n.state.parent = NodeId::ROOT;
+                    let from = std::mem::replace(&mut n.state.parent, NodeId::ROOT);
                     n.remote.version = version;
+                    // (As any client of the owner's: the move takes the share along.)
+                    self.server.moved(file, from, NodeId::ROOT);
                 }
             }
         }

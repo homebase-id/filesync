@@ -801,7 +801,7 @@ impl<'a> Executor<'a> {
                         after: remote::After::Removed { .. },
                         ..
                     },
-                    Job::Meta { meta, target },
+                    Job::Meta { meta, target, .. },
                     JobResult::Written(written),
                 ) => {
                     ops.push((p.op, p.attempts, p.gone));

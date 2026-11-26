@@ -2110,10 +2110,15 @@ impl Sim {
                     was = server.state.content.map(|c| c.executable);
                     server.state.content = Some(content);
                 }
-                server.state.parent = coords.to_drive(parent);
+                let (from, into) = (server.state.parent, coords.to_drive(parent));
+                server.state.parent = into;
                 server.state.name = name;
                 server.state.tags = tags;
                 server.remote.version = version;
+                // A move takes the node's shares along: what the folder it is in now shares.
+                if from != into {
+                    self.server.moved(node, from, into);
+                }
                 self.x_sent(c, node, was, local_content);
                 self.record_remote(c, node);
                 Done

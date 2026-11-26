@@ -158,6 +158,8 @@ pub enum Job {
     Upload {
         meta: NodeMeta,
         target: Option<Target>,
+        /// The folder the file is in on the drive, for an update ([`Remote::update_from`]).
+        from: Option<NodeId>,
         path: PathBuf,
         hash: SendHash,
         size: u64,
@@ -168,6 +170,8 @@ pub enum Job {
     Meta {
         meta: NodeMeta,
         target: Option<Target>,
+        /// The folder the node is in on the drive, for an update ([`Remote::update_from`]).
+        from: Option<NodeId>,
     },
 }
 
@@ -225,6 +229,7 @@ impl Job {
             Job::Meta {
                 meta,
                 target: Some(target),
+                ..
             } if meta.removed && ![meta.node, meta.parent].contains(&NodeId::OUTSIDE) => {
                 Some(target)
             }
@@ -448,16 +453,19 @@ impl Queue {
     }
 }
 
-/// Writes `meta` (and `upload`): a create, or with `target` an update at that version.
+/// Writes `meta` (and `upload`): a create, or with `target` an update at that version, of a
+/// node the drive has in the folder `from`, where that is known.
 fn write(
     remote: &dyn Remote,
     meta: &NodeMeta,
     target: Option<&Target>,
+    from: Option<NodeId>,
     upload: Option<Upload<'_>>,
 ) -> Result<Written, RemoteError> {
-    match target {
-        None => remote.create(meta, upload),
-        Some(t) => remote.update(t, meta, upload),
+    match (target, from) {
+        (None, _) => remote.create(meta, upload),
+        (Some(t), Some(from)) => remote.update_from(t, meta, upload, from),
+        (Some(t), None) => remote.update(t, meta, upload),
     }
 }
 
@@ -467,6 +475,7 @@ fn run_job(remote: &dyn Remote, job: &Job, meter: &Meter<'_>) -> JobResult {
         Job::Upload {
             meta,
             target,
+            from,
             path,
             hash,
             size,
@@ -508,7 +517,7 @@ fn run_job(remote: &dyn Remote, job: &Job, meter: &Meter<'_>) -> JobResult {
                 reader: &mut reader,
                 pace: Some(meter),
             });
-            match write(remote, meta, target.as_ref(), upload) {
+            match write(remote, meta, target.as_ref(), *from, upload) {
                 Ok(written) => Ok(JobResult::Written(written)),
                 // However the remote took the read that stopped.
                 Err(_) if reader.changed || moved.load(Ordering::Relaxed) => Err(JobError::Changed),
@@ -517,7 +526,7 @@ fn run_job(remote: &dyn Remote, job: &Job, meter: &Meter<'_>) -> JobResult {
                 Err(e) => Err(e.into()),
             }
         })(),
-        Job::Meta { meta, target } => write(remote, meta, target.as_ref(), None)
+        Job::Meta { meta, target, from } => write(remote, meta, target.as_ref(), *from, None)
             .map(JobResult::Written)
             .map_err(JobError::Remote),
     };

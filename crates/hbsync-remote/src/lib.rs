@@ -845,6 +845,22 @@ pub trait Remote: Send + Sync {
         payload: Option<Upload<'_>>,
     ) -> Result<Written>;
 
+    /// [`Remote::update`] by a caller that knows the folder the node is in on the drive
+    /// (`from`: its parent before this write): a move where `meta.parent` is another. A
+    /// remote whose shares are each file's own makes the moved node's, and those of what
+    /// is in it, what the folder it goes into shares (sync semantics §13, "What the owner's
+    /// computer adds"): the others write the header, as [`Remote::update`] does.
+    fn update_from(
+        &self,
+        target: &Target,
+        meta: &NodeMeta,
+        payload: Option<Upload<'_>>,
+        from: NodeId,
+    ) -> Result<Written> {
+        let _ = from;
+        self.update(target, meta, payload)
+    }
+
     /// Deletes (tombstones) files, each only if still at its version (a [`Doomed`] file: one
     /// recorded in Recently deleted or as a tombstone): each stays in the feed as
     /// a tombstone, which is how a device learns of the delete. What the drive answered for
@@ -922,6 +938,16 @@ impl<T: Remote + ?Sized> Remote for std::sync::Arc<T> {
         payload: Option<Upload<'_>>,
     ) -> Result<Written> {
         (**self).update(target, meta, payload)
+    }
+
+    fn update_from(
+        &self,
+        target: &Target,
+        meta: &NodeMeta,
+        payload: Option<Upload<'_>>,
+        from: NodeId,
+    ) -> Result<Written> {
+        (**self).update_from(target, meta, payload, from)
     }
 
     fn delete(&self, files: &[Doomed]) -> Result<Deletes> {

@@ -332,6 +332,29 @@ impl Client {
         self.decode(response, path)
     }
 
+    /// `PUT {path}` with `body` in an envelope: an answer without a body to read.
+    pub(crate) fn put(&self, path: &str, body: &serde_json::Value) -> Result<(), HomebaseError> {
+        let sealed = Envelope::seal(&self.key, &serde_json::to_vec(body)?)?;
+        let call = self.connections.call();
+        let response = call
+            .put(self.url(path))
+            .header("Authorization", &self.bearer())
+            .send_json(&sealed);
+        checked(response, path, self.whose(path)).map(drop)
+    }
+
+    /// `DELETE {path}`: an answer without a body to read.
+    pub(crate) fn delete(&self, path: &str) -> Result<(), HomebaseError> {
+        let ss = serde_json::to_string(&Envelope::seal(&self.key, b"")?)?;
+        let url = format!("{}?{}", self.url(path), crate::query(&[("ss", &ss)]));
+        let call = self.connections.call();
+        let response = call
+            .delete(&url)
+            .header("Authorization", &self.bearer())
+            .call();
+        checked(response, path, self.whose(path)).map(drop)
+    }
+
     /// Sends a multipart form (plaintext; the parts carry their own encryption).
     pub(crate) fn upload<T: DeserializeOwned>(
         &self,

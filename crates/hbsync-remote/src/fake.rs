@@ -655,6 +655,47 @@ impl FakeServer {
         .flatten()
     }
 
+    /// The file `file_id` and every live file in it, at any depth.
+    fn in_and_below(&self, file_id: RemoteFileId) -> Vec<RemoteFileId> {
+        let node_of = |file: &StoredFile| match &file.header.body {
+            RemoteBody::Live { node, .. } => Some(*node),
+            RemoteBody::Deleted => None,
+        };
+        let mut found = vec![file_id];
+        let mut at = 0;
+        while let Some(folder) = found.get(at).and_then(|id| self.files.get(id)).map(node_of) {
+            at += 1;
+            let Some(folder) = folder else { continue };
+            let in_it = |(id, file): (&RemoteFileId, &StoredFile)| {
+                (file.header.parent == folder && node_of(file).is_some()).then_some(*id)
+            };
+            let mut children: Vec<RemoteFileId> = self.files.iter().filter_map(in_it).collect();
+            children.sort_by_key(|id| self.files[id].row);
+            found.extend(children);
+        }
+        found
+    }
+
+    /// The drive's owner moved `file_id` from the folder `from` into `to`: its share, and
+    /// those of what is in it, become what the folder it is in now shares, as the owner's
+    /// client makes them (the Homebase adapter's `HomebaseRemote::moved`). Shared, each that
+    /// isn't is shared as that folder is; not shared, the share of each that came with the
+    /// folder it left is withdrawn. Nothing where neither folder is shared.
+    fn moved(&mut self, writer: ClientId, file_id: RemoteFileId, from: NodeId, to: NodeId) {
+        let (left, entered) = (self.shared_as(from), self.shared_as(to));
+        for file in self.in_and_below(file_id) {
+            let now = match (entered, left, self.shares.get(&file).copied()) {
+                (Some(entered), _, _) if !self.shared_live(file) => entered,
+                (None, Some(_), Some(had)) if self.shared_live(file) => {
+                    Share { live: false, ..had }
+                }
+                _ => continue,
+            };
+            // (Each a share write of its own: one that is refused leaves the others.)
+            let _ = self.set_share(writer, file, now);
+        }
+    }
+
     /// The member's share of the folder `parent`, where it may add to it: a folder of the
     /// drive it may change ([`FakeServer::editable`]). What it adds is shared as that.
     fn addable(&self, parent: NodeId) -> Result<Share> {
@@ -1870,6 +1911,22 @@ impl Remote for FakeRemote {
             }
         };
         self.answered(&meta.content.name)?;
+        Ok(written)
+    }
+
+    /// The owner's move takes the node's share along ([`FakeServer::moved`]); a member's
+    /// write is its update.
+    fn update_from(
+        &self,
+        target: &Target,
+        meta: &NodeMeta,
+        payload: Option<Upload<'_>>,
+        from: NodeId,
+    ) -> Result<Written> {
+        let written = self.update(target, meta, payload)?;
+        if !self.is_member() && from != meta.parent {
+            (self.server()).moved(self.client, target.at.file_id, from, meta.parent);
+        }
         Ok(written)
     }
 
