@@ -444,6 +444,7 @@ mod tests {
             parent: NodeId::ROOT,
             name: name.into(),
             replace,
+            keep_x: false,
             tags: Tags::default(),
             drive: None,
         };

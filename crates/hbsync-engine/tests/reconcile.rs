@@ -221,6 +221,7 @@ fn edits_and_moves_propagate() {
         parent: ROOT,
         name: "b".into(),
         replace: true,
+        keep_x: false,
         tags: Tags::default(),
         drive: None,
     }));
@@ -413,6 +414,7 @@ fn edit_beats_delete_both_ways() {
         parent: ROOT,
         name: "x".into(),
         replace: false,
+        keep_x: false,
         tags: Tags::default(),
         drive: None,
     }));
@@ -450,6 +452,7 @@ fn live_child_resurrects_a_deleted_folder() {
         parent: d,
         name: "new".into(),
         replace: false,
+        keep_x: false,
         tags: Tags::default(),
         drive: None,
     }));
@@ -558,6 +561,7 @@ fn name_clash_lower_id_keeps_the_name() {
                 parent: ROOT,
                 name: "X (conflict 1).TXT".into(),
                 replace: false,
+                keep_x: false,
                 tags: Tags::default(),
                 drive: None,
             }));
@@ -972,6 +976,7 @@ fn a_file_still_being_written_keeps_its_name() {
         parent: ROOT,
         name: "Report.txt".into(),
         replace: false,
+        keep_x: false,
         tags: Tags::default(),
         drive: None,
     }));
@@ -5417,6 +5422,96 @@ fn executable(mut s: NodeState, x: bool) -> NodeState {
         c.executable = x;
     }
     s
+}
+
+/// A file's executable bit changed here alone, its bytes on the drive alone (§1, #450): no
+/// conflict. The drive's bytes come down over the file, which keeps the bit it has here
+/// (`keep_x`); nothing goes up yet (the base settles at the drive's version, and the node,
+/// planned again, sends the bit). Set here or cleared here alike.
+#[test]
+fn a_bit_changed_here_and_bytes_changed_there_merge() {
+    for set in [true, false] {
+        let f = ids(1)[0];
+        let mut w = World::default();
+        w.synced(f, executable(file(ROOT, "run.sh", "old"), !set))
+            .local(f, Some(executable(file(ROOT, "run.sh", "old"), set)))
+            .remote(f, Some(executable(file(ROOT, "run.sh", "new"), !set)));
+        let plan = w.plan();
+        assert_eq!(plan.conflicts, [], "set {set}");
+        assert!(
+            matches!(
+                &plan.ops[..],
+                [Op::LocalDownload { node, replace: true, keep_x: true, .. }] if *node == f
+            ),
+            "set {set}: {:?}",
+            plan.ops
+        );
+    }
+}
+
+/// The next plan, the drive's bytes here and the bit still this device's alone: it goes up,
+/// as any bit changed here.
+#[test]
+fn the_bit_kept_through_a_download_goes_up() {
+    let f = ids(1)[0];
+    let mut w = World::default();
+    w.synced(f, file(ROOT, "run.sh", "new"))
+        .local(f, Some(executable(file(ROOT, "run.sh", "new"), true)));
+    let plan = w.plan();
+    assert_eq!(sorted_ops(&plan), [("RemoteUpdate", f)]);
+    assert!(matches!(
+        &plan.ops[..],
+        [Op::RemoteUpdate { upload: true, .. }]
+    ));
+}
+
+/// What the merge of bit and bytes doesn't cover stays as it was: bytes changed on both
+/// sides make a conflict copy, whatever the bit, and so do bytes changed here against a bit
+/// changed on the drive (the upload would send a bit this device hasn't taken yet). But a
+/// bit changed here alone never makes one: where the drive changed its bit too, with its
+/// bytes, its version comes down whole (`keep_x` unset: the bits are alike). That is also
+/// what a device that doesn't hold the bit reads, of a change of both on the drive.
+#[test]
+fn only_bytes_changed_here_make_a_conflict_copy() {
+    let [both, here, alike] = ids(3)[..] else {
+        unreachable!()
+    };
+    let mut w = World::default();
+    w.synced(both, file(ROOT, "both.sh", "old"))
+        .local(both, Some(executable(file(ROOT, "both.sh", "mine"), true)))
+        .remote(both, Some(file(ROOT, "both.sh", "theirs")))
+        .synced(here, file(ROOT, "here.sh", "old"))
+        .local(here, Some(file(ROOT, "here.sh", "mine")))
+        .remote(here, Some(executable(file(ROOT, "here.sh", "old"), true)))
+        .synced(alike, file(ROOT, "alike.sh", "old"))
+        .local(alike, Some(executable(file(ROOT, "alike.sh", "old"), true)))
+        .remote(
+            alike,
+            Some(executable(file(ROOT, "alike.sh", "theirs"), true)),
+        );
+    let plan = w.plan();
+    let mut copied: Vec<NodeId> = plan
+        .conflicts
+        .iter()
+        .filter_map(|c| match c {
+            Conflict::EditEdit { node, .. } => Some(*node),
+            _ => None,
+        })
+        .collect();
+    copied.sort();
+    assert_eq!(copied, [both, here]);
+    let download = plan.ops.iter().find(|op| op.node() == alike);
+    assert!(
+        matches!(
+            download,
+            Some(Op::LocalDownload {
+                replace: true,
+                keep_x: false,
+                ..
+            })
+        ),
+        "{download:?}"
+    );
 }
 
 /// The executable bit of a node that may be changed is as in a folder that syncs both ways:

@@ -196,6 +196,7 @@ impl Reconciler<'_> {
                                 parent: t.parent,
                                 name: t.name.clone(),
                                 replace: false,
+                                keep_x: false,
                                 tags: t.tags.clone(),
                                 drive: drive(),
                             });
@@ -207,12 +208,17 @@ impl Reconciler<'_> {
                             && self.origin.get(&node) == Some(&Origin::Remote)
                             && !self.local_matches_remote(node, l, t);
                         if download {
+                            // The bit changed here alone stays (§1): the merge holds it
+                            // where the drive's file doesn't.
+                            let x = |s: &NodeState| s.content.map(|c| c.executable);
+                            let keep_x = remote.is_some_and(|r| x(r) != x(t));
                             // Downloading to the new place moves and updates in one step.
                             content.push(Op::LocalDownload {
                                 node,
                                 parent: t.parent,
                                 name: t.name.clone(),
                                 replace: true,
+                                keep_x,
                                 tags: t.tags.clone(),
                                 drive: drive(),
                             });

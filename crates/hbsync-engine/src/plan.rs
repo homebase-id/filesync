@@ -281,6 +281,10 @@ pub enum Op {
         parent: NodeId,
         name: String,
         replace: bool,
+        /// The file keeps the executable bit it has here: one changed here alone, where the
+        /// drive's bytes changed alone (§1). The base settles at the drive's version, and the
+        /// node is planned again, which sends the bit up.
+        keep_x: bool,
         tags: Tags,
         drive: Option<Box<DriveVersion>>,
     },

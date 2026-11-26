@@ -210,8 +210,10 @@ pub(crate) struct Client {
     /// their bit: the only launchers a disk that doesn't hold their bit may hold executable
     /// (sync semantics §1).
     pub(crate) trusted: HashSet<NodeId>,
-    /// Files whose bit, or name, a user changed here ([`crate::Action::Chmod`], a move): only
-    /// an upload of one of them may change the drive's bit.
+    /// Files whose bit, or name, a user changed here ([`crate::Action::Chmod`], a move), or
+    /// whose bit this client agreed with a file since deleted for good and made again without
+    /// it (§1, #450: it is this client's to send): only an upload of one of them may change
+    /// the drive's bit.
     pub(crate) user_x: HashSet<NodeId>,
     /// A main folder's: the drive's nodes its computer's other folders hold (a Desktop's), left
     /// out of it as the role folders are (§12), as its last plan read them.

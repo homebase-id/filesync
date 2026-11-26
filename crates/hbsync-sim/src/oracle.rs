@@ -566,8 +566,9 @@ impl Sim {
             // copy is made where the item is here (§5). Where that folder waits, or is gone there
             // and in one that waits, the copy isn't made, and the node waits with it (the
             // engine's `CopyWaits`): where the drive has it, it isn't followed meanwhile.
-            // (Bytes alone: a change of the executable bit forks in the engine too, which
-            // no property of what waits makes.)
+            // (Bytes alone: bytes changed here against a bit changed there fork in the engine
+            // too, which no property of what waits makes; a bit changed here alone forks
+            // nothing, §1.)
             let forks = |k: NodeId| {
                 let file = client
                     .local

@@ -1829,6 +1829,7 @@ impl Sim {
                 parent,
                 name,
                 replace,
+                keep_x,
                 tags,
                 ..
             } => {
@@ -1900,13 +1901,19 @@ impl Sim {
                 if client.aside.contains_key(&node) {
                     return Skip;
                 }
+                // The bit the file has here, where the plan keeps it (§1: changed here alone).
+                let here = (self.clients[c].local.get(node))
+                    .and_then(|l| l.content)
+                    .map(|c| c.executable)
+                    .filter(|_| keep_x);
                 // From another folder: the old version goes aside first (the executor's).
                 self.replace_aside(c, node, parent, &name);
                 let client = &mut self.clients[c];
                 let tags = tags.held_by(client.os);
-                // The bit set either way: what the client holds of the drive's (§1).
+                // The bit set either way: what the client holds of the drive's (§1), or of
+                // the one kept.
                 let content = content.map(|c| FileContent {
-                    executable: executable_on_disk(client.os, &name, c.executable),
+                    executable: executable_on_disk(client.os, &name, here.unwrap_or(c.executable)),
                     ..c
                 });
                 client.trusted.remove(&node);
@@ -2686,6 +2693,10 @@ impl Sim {
                 executable: c.executable && bit,
                 ..c
             });
+            // A bit it holds of the old file is its own to send now (§1), as one its user set.
+            if b.content.is_some_and(|c| c.executable) && !bit {
+                client.user_x.insert(node);
+            }
             client.base.insert(node, NodeState { tags, content, ..b });
         }
     }

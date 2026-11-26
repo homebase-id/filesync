@@ -31,12 +31,25 @@ set. A move that changes whether the bit is held gives the file what it holds no
 renamed into a launcher loses its bit, a launcher renamed into another name takes the drive's.
 Launchers that an earlier version put in place executable stay so.
 
+**The bit merges apart from the bytes, where it changed here alone.** A file whose bit
+changed here, its bytes the ones synced, is no conflict with what the drive did to it (§4), as
+a tag here and bytes there are none: the drive's bytes come down, and the file keeps the bit
+it has here (the download's `keep_x`). Where the drive's bit is another, the base settles at
+the drive's version and the node is planned again, which sends the bit up: two steps, the
+bytes first. Where the drive changed its bit too (to the same: it has two values), its version
+comes down whole; that is also what a device that doesn't hold the bit reads of a change of
+both on the drive (it took that for a conflict, and kept its unchanged bytes as a copy).
+The other way round stays a conflict, as bytes changed on both sides are (§5): bytes changed
+here against a bit changed on the drive, since the upload would send a bit this device hasn't
+taken yet (#518).
+
 A file deleted for good and made again is another file of the same node, and may come without
-the bit from a device that never saw it. As for tags (§11): the bit is
+the bit from a device that never saw it. As for tags (§11, "A node made again"): the bit is
 agreed between a device and the drive only while the node's current file has it, so a device
-that holds it reads it as set here and sends it up, where it would else have read the new
-file's lack of it as "cleared on the drive" and cleared its own (#450). A device that doesn't
-hold the bit sends the drive's on, as above.
+that holds it reads it as changed here alone: it takes the new file's bytes, keeps its bit
+and sends it up, where it would else have read the new file's lack of it as "cleared on the
+drive" and cleared its own (#450). A device that doesn't hold the bit sends the drive's on, as
+above.
 
 **Three trees.** For every sync root the client keeps three views keyed by node id:
 - **Base**: the last state both sides agreed on. Written only after an operation succeeds.
@@ -148,7 +161,7 @@ Per node, after classifying both sides:
 | change | none | propagate the local change |
 | none | change | propagate the remote change |
 | deleted | deleted | drop from base |
-| edited | edited | same hash → no-op. Different → **conflict copy** (section 5) |
+| edited | edited | same hash → no-op. Different → **conflict copy** (section 5); not where only the executable bit changed here: the drive's bytes come down, the bit stays (§1) |
 | moved | moved | same destination → no-op. Different → **remote wins**; the local move is reverted |
 | edited | moved | apply both: the content goes up, the move comes down (and vice versa) |
 | deleted | edited / moved | **edit wins**: the node is restored locally from the remote |
@@ -159,7 +172,8 @@ A `moved` that only reverts a delete case is applied to the restored node.
 
 ## 5. Conflict copies
 
-When both sides edited a file to different content:
+When both sides edited a file to different content (bytes changed here: an executable bit
+changed here alone is merged, §1):
 - The remote version keeps the node id, name and location.
 - The local version is renamed in place to `<stem> (conflict <device> <YYYY-MM-DD>)<ext>` and
   becomes a new node that is uploaded normally.
@@ -1351,8 +1365,14 @@ own merge and the settle all read that base. What it costs:
   the Mac's colour goes with it (both added the tag: the drive's colour wins).
 - One read of the base by the node's key for each file new to the picture (a first sync: one
   per file, each finding nothing; 0.5 µs each, 1.2 µs with 100,000 bases, a release build), a
-  write only where a base holds a tag the file lacks; and one read of the picture for each
-  base written with tags.
+  write only where a base holds a tag, or the executable bit, that the file lacks; and one read
+  of the picture for each base written with tags or the bit.
+
+A file's executable bit is agreed the same way (§1, #450): the base keeps it only where the
+picture's file has it, in the same two places. The device's own bit then reads as changed here
+alone, which the plan merges with the new file's bytes (§1). Its limit is the tags' first one:
+a bit another device cleared on the new file, while this device's base was still agreed with
+the earlier one, comes back.
 
 Listed, not handled (each needs the node made again and something rarer on top): a file made
 again and removed before this device pulled, while its mirror still holds the earlier file

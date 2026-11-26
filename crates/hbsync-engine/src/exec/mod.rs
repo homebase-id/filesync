@@ -188,6 +188,8 @@ struct Placement {
     created_ms: Option<i64>,
     /// What it writes on the file.
     tags: Tags,
+    /// The file kept the executable bit it had here ([`Op::LocalDownload`]).
+    keep_x: bool,
 }
 
 /// What the commit of a transfer needs to know.

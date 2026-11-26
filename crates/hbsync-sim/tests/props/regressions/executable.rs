@@ -175,3 +175,135 @@ fn regression_a_restore_keeps_the_bit_in_recently_deleted() {
     sim.check().expect("check");
     assert!(sim.is_removed(f), "the version with the bit stays");
 }
+
+/// A file deleted for good and made again by a device that never saw its executable bit
+/// (#450). Client 0 (a Mac) makes the file and marks it executable; client 1 (Linux) takes the
+/// bit; client 3 (a Mac) had the file from before the mark. The file is deleted and Recently
+/// deleted emptied while 1 and 3 are away; 3 edits its copy, which makes the node again, as
+/// another file, without the bit. Client 1 still holds the bit: read against its base of the
+/// old file, the new file's lack of it was "cleared on the drive", and took the bit off its
+/// copy, and then off every device's. The bit is agreed only while the node's file has it:
+/// client 1 reads it as set here, and sends it up.
+#[test]
+fn regression_the_executable_bit_stands_where_the_file_is_made_again_without_it() {
+    use Action::*;
+    use Event::*;
+    let act = |client, action| Act { client, action };
+    let synced = |sim: &mut Sim, client: usize| {
+        sim.run(&[Plan { client }]);
+        for _ in 0..6 {
+            sim.run(&[Step { client }]);
+        }
+    };
+    let mut sim = Sim::new(4);
+    sim.run(&[act(0, CreateFile { parent: 0, name: 0 })]);
+    for client in [0, 1, 3] {
+        synced(&mut sim, client);
+    }
+    let file = sim.item(0, "a").expect("the file");
+    sim.run(&[act(0, Chmod { file: 0 })]);
+    synced(&mut sim, 0);
+    synced(&mut sim, 1);
+    assert_eq!(
+        sim.local_executable(1, file),
+        Some(true),
+        "taken by client 1"
+    );
+    assert_eq!(
+        sim.local_executable(3, file),
+        Some(false),
+        "not seen by client 3"
+    );
+
+    // Deleted, and for good, while 1 and 3 are away.
+    let node = sim.pick(0, file, false).expect("its pick");
+    sim.run(&[act(0, Delete { node })]);
+    synced(&mut sim, 0);
+    sim.run(&[act(0, ListDeleted), act(0, EmptyListed)]);
+    // Made again by client 3's edit, without the bit.
+    let edited = sim.file_pick(3, file).expect("client 3's file");
+    sim.run(&[act(3, Edit { file: edited })]);
+    synced(&mut sim, 3);
+    assert_eq!(
+        sim.drive_executable(file),
+        Some(false),
+        "made again without it"
+    );
+
+    synced(&mut sim, 1);
+    assert!(sim.quiesce(30), "no convergence");
+    sim.check().unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(
+        sim.local_executable(1, file),
+        Some(true),
+        "kept where it was held"
+    );
+    assert_eq!(sim.drive_executable(file), Some(true), "and sent up");
+    assert_eq!(sim.local_executable(3, file), Some(true));
+}
+
+/// A file's bit set on one device while another edits it (§1): no conflict. Client 1 (Linux)
+/// marks the file executable; client 0's edit reaches the drive first. Client 1 takes the new
+/// bytes, keeps its bit and sends it up: one file, edited and executable, on every device
+/// that holds the bit. (The planner took bytes and bit as one content: the two changes were
+/// a conflict, and client 1 kept its old bytes as a conflict copy.)
+#[test]
+fn regression_a_bit_set_here_and_an_edit_there_are_both_kept() {
+    use Action::*;
+    use Event::*;
+    let act = |client, action| Act { client, action };
+    let mut sim = Sim::new(3);
+    sim.run(&[act(0, CreateFile { parent: 0, name: 0 })]);
+    assert!(sim.quiesce(30), "synced");
+    let file = sim.item(0, "a").expect("the file");
+    let (f0, f1) = (
+        sim.file_pick(0, file).expect("picked"),
+        sim.file_pick(1, file).expect("picked"),
+    );
+    sim.run(&[
+        act(1, Chmod { file: f1 }),
+        act(0, Edit { file: f0 }),
+        Plan { client: 0 },
+        Step { client: 0 },
+        Step { client: 0 },
+        Plan { client: 1 },
+    ]);
+    assert_eq!(sim.planned(1), ["LocalDownload"]);
+    assert!(sim.quiesce(30), "no convergence");
+    sim.check().unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(sim.server_paths(), ["a"], "no conflict copy");
+    assert_eq!(sim.local_hash(1, file), sim.drive_hash(file), "the edit");
+    for client in [0, 1] {
+        assert_eq!(sim.local_executable(client, file), Some(true));
+    }
+    assert_eq!(sim.drive_executable(file), Some(true));
+}
+
+/// A device that doesn't hold the bit (client 2, Windows) reads the drive's as its own (§1):
+/// where the drive changed both a file's bit and its bytes since it synced, that read as "the
+/// bit changed here, the bytes there", a conflict, and it kept its old bytes as a conflict
+/// copy, though nothing changed on it. A bit changed here alone is never one.
+#[test]
+fn regression_a_change_of_bit_and_bytes_makes_no_copy_where_the_bit_isnt_held() {
+    use Action::*;
+    use Event::*;
+    let act = |client, action| Act { client, action };
+    let mut sim = Sim::new(3);
+    sim.run(&[act(0, CreateFile { parent: 0, name: 0 })]);
+    assert!(sim.quiesce(30), "synced");
+    let file = sim.item(0, "a").expect("the file");
+    let f0 = sim.file_pick(0, file).expect("picked");
+    sim.run(&[
+        act(0, Chmod { file: f0 }),
+        act(0, Edit { file: f0 }),
+        Plan { client: 0 },
+        Step { client: 0 },
+        Step { client: 0 },
+        Plan { client: 2 },
+    ]);
+    assert_eq!(sim.planned(2), ["LocalDownload"]);
+    assert!(sim.quiesce(30), "no convergence");
+    sim.check().unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(sim.server_paths(), ["a"], "no conflict copy");
+    assert_eq!(sim.drive_executable(file), Some(true));
+}

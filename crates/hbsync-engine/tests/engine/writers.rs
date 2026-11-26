@@ -165,6 +165,77 @@ fn a_tag_stays_where_its_folder_is_made_again_without_it() -> R {
     Ok(())
 }
 
+/// An executable file is deleted for good on the drive and made again there with other bytes,
+/// as another file of the same node, by a device that never saw its bit (§1, #450). What the
+/// new file lacks is no clearing: the new bytes come down, the file keeps its bit, and the
+/// bit goes up; a second device that held it does the same, and finds it on the drive. No
+/// conflict copy. (Read against the base agreed with the old file, the new file's lack of the
+/// bit was the drive's clearing, and took it off every device.)
+#[cfg(unix)]
+#[test]
+fn the_executable_bit_stays_where_its_file_is_made_again_without_it() -> R {
+    use hbsync_remote::{Planned, RemoteBody, Upload};
+    use hbsync_types::NodeKind;
+    use hbsync_types::schema::NodeContent;
+    use std::os::unix::fs::PermissionsExt;
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    let mut b = Client::new(&server, "b")?;
+    a.write("run.sh", "echo old")?;
+    fs::set_permissions(a.root.join("run.sh"), fs::Permissions::from_mode(0o755))?;
+    a.sync()?;
+    b.sync()?;
+    let executable = |c: &Client| -> common::Res<bool> {
+        Ok(fs::metadata(c.root.join("run.sh"))?.permissions().mode() & 0o111 != 0)
+    };
+    let on_drive = || match common::header_named(&server, "run.sh").body {
+        RemoteBody::Live { content, .. } => content.x,
+        RemoteBody::Deleted => false,
+    };
+    assert!(executable(&b)? && on_drive());
+
+    // Made again, without the bit.
+    {
+        let was = common::header_named(&server, "run.sh");
+        let bytes = b"echo new".to_vec();
+        let hash = hbsync_fileio::hash_bytes(&bytes, hbsync_fileio::HashAlgorithm::Blake3);
+        let meta = NodeMeta {
+            node: was.node().ok_or("a node")?,
+            parent: was.parent,
+            kind: NodeKind::File,
+            content: NodeContent::file("run.sh", 1, bytes.len() as u64, false),
+            removed: false,
+        };
+        let mut reader: &[u8] = &bytes;
+        let upload = Upload {
+            hash: Planned::Known(hash),
+            size: bytes.len() as u64,
+            reader: &mut reader,
+            pace: None,
+        };
+        let mut s = server.lock().map_err(|_| "poisoned")?;
+        s.hard_delete(was.file_id, was.version)?;
+        s.create(&meta, Some(upload))?;
+    }
+    assert!(!on_drive());
+    for client in [&mut a, &mut b] {
+        let report = client.sync()?;
+        assert!(report.failed.is_empty(), "{report:?}");
+        assert!(report.conflicts.is_empty(), "{report:?}");
+        assert_eq!(client.read_text("run.sh")?, "echo new");
+        assert!(executable(client)?, "kept where it was held");
+        assert!(on_drive(), "and sent up");
+        // No conflict copy beside it.
+        let files = fs::read_dir(&client.root)?
+            .filter_map(Result::ok)
+            .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+            .count();
+        assert_eq!(files, 1);
+        assert!(client.engine.sync_once("2026-10-08")?.is_idle());
+    }
+    Ok(())
+}
+
 /// A conflict copy keeps the node's base for the run's remote writes (§5): this device's removal
 /// of a tag, made with its edit, reaches the drive's version that won the edits (the remote
 /// write merges its tags against the base). The conflict's download comes in the same run.

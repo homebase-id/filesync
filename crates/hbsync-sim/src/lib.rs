@@ -635,6 +635,16 @@ impl Sim {
         self.clients[c].local.get(node)?.content.map(|c| c.hash)
     }
 
+    /// For scripted tests: whether client `c`'s item of `node` is executable, and whether the
+    /// drive's file of it is (live or in Recently deleted).
+    pub fn local_executable(&self, c: usize, node: NodeId) -> Option<bool> {
+        Some(self.clients[c].local.get(node)?.content?.executable)
+    }
+
+    pub fn drive_executable(&self, node: NodeId) -> Option<bool> {
+        Some(self.server.node(node)?.0.state.content?.executable)
+    }
+
     /// For scripted tests: the bytes the drive has of `node`, live or in Recently deleted, as
     /// their hash.
     pub fn drive_hash(&self, node: NodeId) -> Option<hbsync_types::ContentHash> {

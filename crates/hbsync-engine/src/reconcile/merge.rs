@@ -237,6 +237,21 @@ impl Reconciler<'_> {
             && edited(self.local_change(node))
             && edited(self.remote_change(node))
             && !same_edit(&l, r)
+            && !self.bit_alone_here(node, &l)
+    }
+
+    /// Whether file `node`, changed on both sides, changed here in its executable bit alone,
+    /// its bytes the ones synced (§1): no conflict with the drive's bytes, as a tag here and
+    /// bytes there are none. The drive's bytes come down and the bit stays as it is here:
+    /// the drive's too where that changed (to the same: it has two values), else this
+    /// device's alone, which goes up from there. (A device that doesn't hold the bit reads
+    /// the drive's as its own: the drive's change of it is no edit here.)
+    pub(super) fn bit_alone_here(&self, node: NodeId, l: &NodeState) -> bool {
+        let base = self.input.base.get(node).and_then(|b| b.content);
+        let (Some(bc), Some(lc)) = (base, l.content) else {
+            return false;
+        };
+        lc.executable != bc.executable && !self.bytes_changed_here(node, &bc, &lc)
     }
 
     /// Whether folder `node`, which waits ([`super::waits`]), may go to `target`: it stays where
@@ -406,7 +421,10 @@ impl Reconciler<'_> {
         let mut one_way = self.one_way(node);
         if self.masking.read_only && !one_way && !masked && !self.adds.contains(&node) {
             let changes = match (&l, r) {
-                (Some(l), Some(r)) => !edited_apart(l, r, lc, rc) || self.adds_to(l.parent),
+                (Some(l), Some(r)) => {
+                    !(edited_apart(l, r, lc, rc) && !self.bit_alone_here(node, l))
+                        || self.adds_to(l.parent)
+                }
                 (None, Some(_)) => matches!(lc, Change::Deleted) && self.removes(node),
                 _ => false,
             };
@@ -549,7 +567,14 @@ impl Reconciler<'_> {
         let mut origin = Origin::Remote;
         if l.kind == NodeKind::File {
             let same_edit = same_edit(l, r);
-            if l_edited && r_edited && !same_edit {
+            if l_edited && r_edited && !same_edit && self.bit_alone_here(node, l) {
+                // The drive's bytes with the bit as it is here. Where that isn't the drive's,
+                // the download keeps it, and the next plan sends it up (the base settles at
+                // the drive's version).
+                if let (Some(t), Some(lc)) = (&mut target.content, l.content) {
+                    t.executable = lc.executable;
+                }
+            } else if l_edited && r_edited && !same_edit {
                 debug_assert!(
                     !self.masking.read_only || self.adds_to(l.parent),
                     "{node:?}: a copy where nothing may be added"
