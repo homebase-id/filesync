@@ -169,9 +169,10 @@ rows' keys are in format 3, bound to that id: open a row's key by its format byt
 file a member added (encryption spec, "Files shared with you"). A node a computer moves
 into a shared folder gets that folder's rows too, with all that is in it (keys in format 2,
 by file id), and one it moves out of a shared folder has the rows of that folder's circles
-withdrawn. As when you move one: a share you gave a single file counts as its folder's
-where the folder it leaves is shared with the same circle. What the computers don't do
-yet:
+withdrawn. A circle both folders are shared with keeps its row, rewritten to the entered
+folder's permissions and end where they differ. As when you move one: a share you gave a
+single file counts as its folder's where the folder it leaves is shared with the same
+circle. What the computers don't do yet:
 - They add no rows for a folder's other circles to what a member added.
 
 ## Downloading

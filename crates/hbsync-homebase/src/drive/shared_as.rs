@@ -109,8 +109,9 @@ struct Known {
     /// The notifications' connection that was up as it was learnt: while that one holds, a
     /// change of the folder would have been heard. None for a folder they can't name.
     listening: Option<u64>,
-    /// The server refused its shares with an upload ([`Folders::refused`]): none are given.
-    refused: bool,
+    /// When the server refused its shares with an upload ([`Folders::refused`]): none are
+    /// given to what is added to it for [`REFUSED`] from then.
+    refused: Option<At>,
     /// When it was last asked about ([`State::asked`]).
     asked: u64,
 }
@@ -163,10 +164,7 @@ impl State {
 
     /// Whether what is `known` of a folder is still gone by ([`Folders::known`]).
     fn holds(&self, known: &Known) -> bool {
-        match known.refused {
-            true => known.learnt.within(REFUSED),
-            false => self.heard_all(known) || known.learnt.within(KEPT),
-        }
+        self.heard_all(known) || known.learnt.within(KEPT)
     }
 
     /// Nothing is known of `folder` any more.
@@ -190,7 +188,7 @@ impl State {
             shares,
             learnt: At::now(),
             listening: self.listening.filter(|_| at.is_some()),
-            refused: false,
+            refused: None,
             asked: self.asked,
         };
         self.folders.insert(folder, known);
@@ -259,8 +257,7 @@ impl Folders {
     /// `folder`'s shares, if a change of them since they were learnt would have been told:
     /// for as long as the notifications' connection they were learnt under holds (a change
     /// of the folder is announced within seconds, [`Folders::heard`]) and this computer
-    /// didn't sleep, else for [`KEPT`]. A folder whose shares the server refused has none
-    /// for [`REFUSED`].
+    /// didn't sleep, else for [`KEPT`].
     pub(crate) fn known(&self, folder: NodeId) -> Option<Shares> {
         let mut state = self.state();
         state.asked += 1;
@@ -327,9 +324,8 @@ impl Folders {
     /// again.
     pub(crate) fn rewritten(&self, folder: NodeId, at: RemoteRef) {
         let mut state = self.state();
-        let heard_all = |known: &Known| {
-            known.file_id == Some(at.file_id.0) && (known.refused || state.heard_all(known))
-        };
+        let heard_all =
+            |known: &Known| known.file_id == Some(at.file_id.0) && state.heard_all(known);
         match state.folders.get(&folder).map(heard_all) {
             Some(true) => {
                 if let Some(known) = state.folders.get_mut(&folder) {
@@ -353,10 +349,17 @@ impl Folders {
         if known.shares[..] != sent[..] {
             return false;
         }
-        known.shares = Shares::default();
-        known.learnt = At::now();
-        known.refused = true;
+        known.refused = Some(At::now());
         true
+    }
+
+    /// Whether what is added to `folder` goes up without the folder's shares for now: the
+    /// server refused them with an upload, less than [`REFUSED`] ago, and the folder hasn't
+    /// changed since ([`Folders::refused`]).
+    pub(crate) fn is_refused(&self, folder: NodeId) -> bool {
+        let state = self.state();
+        let refused = |known: &Known| known.refused.is_some_and(|at| at.within(REFUSED));
+        (state.folders.get(&folder)).is_some_and(|known| state.holds(known) && refused(known))
     }
 
     /// Nothing is known of `folder` any more: it is read again when next added to.
@@ -368,11 +371,8 @@ impl Folders {
     /// one before it was ([`Folders::refused`]). The folder is read, and shared, again.
     pub(crate) fn not_for_its_shares(&self, folder: NodeId) {
         let mut state = self.state();
-        if state
-            .folders
-            .get(&folder)
-            .is_some_and(|known| known.refused)
-        {
+        let refused = |known: &Known| known.refused.is_some();
+        if state.folders.get(&folder).is_some_and(refused) {
             state.forget(folder);
         }
     }
@@ -640,9 +640,10 @@ pub(crate) mod tests {
         }
     }
 
-    /// A folder whose shares the server refused gives none, connected or not, until it
-    /// changes or an hour passed; only where the shares refused are still what is known of
-    /// it. Refused without them too, it wasn't for the shares.
+    /// What is added to a folder whose shares the server refused goes up without them for
+    /// an hour, or until the folder changes; only where the shares refused are still what
+    /// is known of it. What it shares stays known as it is (a move out of it withdraws
+    /// that). Refused without them too, it wasn't for the shares.
     #[test]
     fn a_folder_whose_shares_were_refused_gives_none_for_a_while() {
         let folders = Folders::default();
@@ -651,29 +652,31 @@ pub(crate) mod tests {
         assert!(!folders.refused(a, &sent), "not known: read again");
         folders.listening(true);
         folders.made(a, at(100, 10), Arc::clone(&sent));
-        assert!(folders.refused(a, &sent));
-        assert_eq!(folders.known(a).map(|s| s.len()), Some(0));
-        if aged(&folders, REFUSED) {
-            assert!(folders.known(a).is_none(), "tried again");
+        assert!(!folders.is_refused(a));
+        assert!(folders.refused(a, &sent) && folders.is_refused(a));
+        assert_eq!(folders.known(a), Some(Arc::clone(&sent)));
+        let long_ago = SystemTime::now().checked_sub(REFUSED + Duration::from_secs(1));
+        for known in folders.state().folders.values_mut() {
+            known.refused = long_ago.map(|wall| At(Instant::now(), wall));
         }
-        folders.made(a, at(100, 10), Arc::clone(&sent));
+        assert!(!folders.is_refused(a), "tried again");
+
         folders.refused(a, &sent);
         folders.heard(file(100));
         assert!(
-            folders.known(a).is_none(),
-            "it changed: read and tried again"
+            folders.known(a).is_none() && !folders.is_refused(a),
+            "it changed"
         );
 
         // Changed since the upload began: what it shares now wasn't refused. Read again
         // as it was, it is what was refused.
         let now: Shares = Arc::from([share(8, None)]);
         folders.made(a, at(100, 10), Arc::clone(&now));
-        assert!(!folders.refused(a, &sent));
-        assert_eq!(folders.known(a), Some(Arc::clone(&now)));
+        assert!(!folders.refused(a, &sent) && !folders.is_refused(a));
         folders.made(a, at(100, 10), Arc::from([share(7, None)]));
         assert!(folders.refused(a, &sent), "the same shares, read again");
-        folders.made(a, at(100, 10), Arc::clone(&now));
 
+        folders.made(a, at(100, 10), Arc::clone(&now));
         folders.not_for_its_shares(a);
         assert!(folders.known(a).is_some(), "not refused: left as it is");
         assert!(folders.refused(a, &now));

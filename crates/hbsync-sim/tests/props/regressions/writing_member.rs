@@ -282,6 +282,27 @@ fn what_the_owner_moves_takes_its_shares_along() {
     assert_eq!(sim.server_paths(), ["C.TXT", "b", "b/a", "d", "d/c.txt"]);
 }
 
+/// What the owner moves from a folder shared for editing into one shared for reading is
+/// shared for reading from then on, as that folder is: the member's edit of it doesn't
+/// reach the drive.
+#[test]
+fn what_the_owner_moves_is_shared_as_the_folder_it_enters_is() {
+    let mut sim = owned(&["b"]);
+    let parent = folder_pick(&sim, 0, "");
+    sim.run(&[act(0, Action::CreateFolder { parent, name: 5 })]);
+    settle(&mut sim);
+    share(&mut sim, "d");
+    settle(&mut sim);
+    move_on(&mut sim, 0, "b/a", "d", 0);
+    settle(&mut sim);
+    assert_eq!(sim.local_paths(2), ["b", "d", "d/a"]);
+    let theirs = sim.item(0, "d/a").expect("d/a");
+    let before = sim.drive_hash(theirs);
+    edit(&mut sim, "d/a");
+    settle(&mut sim);
+    assert_eq!(sim.drive_hash(theirs), before, "for reading: not written");
+}
+
 /// A file moves between two folders shared for editing; into a folder shared for reading,
 /// the move is undone.
 #[test]

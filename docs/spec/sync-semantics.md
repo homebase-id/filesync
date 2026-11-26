@@ -2097,9 +2097,12 @@ it tomorrow. So a computer of the owner's shares what it adds itself:
   between, the node is shared with fewer than where it is, never with more
   (`Remote::update_from`, `HomebaseRemote::moved`; contract
   `a_move_takes_the_shares_along`; simulator `Server::moved`,
-  `what_the_owner_moves_takes_its_shares_along`). A share given to the node itself, by its
-  owner in the app, counts as the folder's where the folder left is shared with the same
-  people: it goes with the move out.
+  `what_the_owner_moves_takes_its_shares_along`). Shared with the same people in both
+  folders, it is shared as the folder it enters is: for reading or editing, until that
+  folder's share ends (`what_the_owner_moves_is_shared_as_the_folder_it_enters_is`).
+  Between two folders shared alike, nothing changes. A share given to the node itself, by
+  its owner in the app, counts as the folder's where the folder left is shared with the
+  same people: it goes with the move out.
 - **A write that isn't a move changes no share.** A node put back from Recently deleted,
   renamed or written again keeps the shares it has; one made again after it went for good
   is a new file, shared as its folder is then.
@@ -2111,6 +2114,9 @@ it tomorrow. So a computer of the owner's shares what it adds itself:
 - **By what this computer last heard, as the upload begins.** How a folder is shared is
   read when something is first added to it, and gone by for as long as a change of it
   would be told: by the notifications while their one connection holds; else by the feed,
-  10 minutes at most. A file goes up shared as its folder was when its upload began: one
-  on its way while a share is withdrawn stays shared (said in the log), and one added
-  within seconds of a folder first being shared may go up unshared.
+  10 minutes at most. A file goes up shared as its folder was when its upload began, and
+  is held to the folder once it is up: where the folder is shared otherwise by then (a
+  share withdrawn during a long upload; the folder moved in the same sync), the file's
+  shares are made the folder's. What is added to a folder while it moves waits for the
+  move to learn how it is shared. One added within seconds of a folder first being shared
+  may go up unshared.

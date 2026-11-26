@@ -317,28 +317,29 @@ impl Server {
     /// The owner moved `node` from the folder `from` into `to`: its share, and those of all
     /// that is in it, become what the folder it is in now shares, as every client of the
     /// owner's makes them (the Homebase adapter's `HomebaseRemote::moved`; the fake's
-    /// `FakeServer::moved`). Shared, each that isn't is shared as that folder is; not
-    /// shared, the ones that came with the folder left are shared no more. Nothing where
-    /// neither folder is shared.
+    /// `FakeServer::moved`). Shared, each is shared as that folder is, for reading or
+    /// editing; not shared, the ones that came with the folder left are shared no more.
+    /// Nothing where the two folders are shared alike.
     pub(crate) fn moved(&mut self, node: NodeId, from: NodeId, to: NodeId) {
+        // How a folder is shared: for editing or not, where it is at all.
         let shared = |folder: NodeId| {
             let file = self.live.get(&folder).map(|n| n.remote.file_id);
-            file.filter(|file| self.shared.contains(file))
+            let file = file.filter(|file| self.shared.contains(file))?;
+            Some(self.editable.contains(&file))
         };
         let (left, entered) = (shared(from), shared(to));
-        if left.is_none() && entered.is_none() {
+        if left == entered {
             return;
         }
         let files: Vec<RemoteFileId> = (self.with_all_in(node).into_iter())
             .filter_map(|n| self.node(n).map(|(n, _)| n.remote.file_id))
             .collect();
         for file in files {
+            self.editable.remove(&file);
             match entered {
-                Some(_) if self.shared.contains(&file) => {}
                 Some(_) => self.share_as_its_folder(file, to),
                 None => {
                     self.shared.remove(&file);
-                    self.editable.remove(&file);
                 }
             }
         }

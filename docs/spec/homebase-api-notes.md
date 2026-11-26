@@ -1029,8 +1029,9 @@ shares a folder writes the rows of what is in it then (**[verified]** chat-kmp
     notifications heard all since it was learnt: a share's change they missed moves
     `updated` as that write does, and would pass for it in the feed;
   - a login's own writes aren't announced to it (`excludeOwnWrites`): a share written with
-    this computer's own token isn't heard here (seen live; nothing of this client writes
-    one, but with a new node).
+    this computer's own token isn't heard here (seen live). This client writes them with
+    a new node, and for what it moves (below): it forgets what it knew of the folders it
+    moved.
   Of the uploads that go into one folder at once, one reads and the others wait for it.
 - **The file goes up whatever becomes of its shares.**
   - A share that doesn't read (its circle, its permissions or its end) isn't given, nor one
@@ -1062,43 +1063,66 @@ shares a folder writes the rows of what is in it then (**[verified]** chat-kmp
   (above): they are written and withdrawn on their own routes, **[verified]** live
   2026-11-26 with the app's login.
   - `PUT /api/v2/drives/{d}/shares` with `{shares: [{fileId, circleId, permissions,
-    expiresAt, lockedFileKey}]}`: 100 at most, all or none. The key is the file's, locked
-    under the circle's key in format 2, bound to its file id. `DELETE
-    /api/v2/drives/{d}/files/{fileId}/shares/{circleId}` withdraws one. Neither answers
-    with a body; both move the file's `updated` and keep its version.
-  - Where the folder left or the folder entered shares anything, the node and all that is
-    in it are read first, each with its key and its shares: one `query-batch` for the node
-    (`includeShares`), one per page of 500 nodes per 100 folders below it. A node written
-    since the engine read it is refused there (`versionTagMismatch` would come after the
-    shares were withdrawn).
+    expiresAt, lockedFileKey}]}`: 100 at most, all or none (one file of them gone, none
+    is written), and a row is written over the one the file has (**[verified]** odin-core
+    `DriveShareService.WriteSharesAsync`). The key is the file's, locked under the
+    circle's key in format 2, bound to its file id. `DELETE
+    /api/v2/drives/{d}/files/{fileId}/shares/{circleId}` withdraws one: 200 where it is
+    withdrawn already, 400 where the file has no row for the circle, 403 where the circle
+    is gone (**[verified]** `WithdrawShareAsync`, `GetCircleCallerMayManageAsync`).
+    Neither answers with a body; both move the file's `updated` and keep its version.
+  - Where the two folders are shared alike (with no one, mostly; with the same circles,
+    rights and ends), the move is the update alone: nothing below it is read. A write that
+    leaves the node where it is asks nothing at all.
+  - Else the node and all that is in it are read first, each with its shares, and its key
+    where a share is to be given: one `query-batch` for the node (`includeShares`), one
+    per page of 500 nodes per 100 folders below it, without their content. Each node once
+    (two folders can be in each other on the drive). A node written since the engine read
+    it is refused there (`versionTagMismatch` would come after the shares were withdrawn).
   - The shares of the circles the folder left is shared with, and the one entered isn't,
-    are withdrawn **before** the move: one `DELETE` per share. The ones the folder entered
-    shares, and a node lacks, are given **after** it: one `PUT` per 100 shares of a circle
-    (one circle the server refuses takes no other's along). So whatever fails on the way, a
-    node is shared with fewer than where it is, never with more. Shares that can't be given
-    after the move are said in the log, and left: nothing gives them later.
-  - Where neither folder shares anything, nothing is asked beyond how the two are shared
-    (once each, as for an add). A write that leaves the node where it is asks nothing.
-  - Not covered: a node put back from Recently deleted into another folder than it was
-    in, and a folder restored by an edit of what was in it, keep the shares they have
-    (those writes aren't the engine's moves). And a large folder moved out of a shared
-    one is slow: one request per share to withdraw, as the server has no route that takes
-    several (10,000 files, 10,000 requests, the move waiting for them).
+    are withdrawn **before** the move: one `DELETE` per share. A refusal is said in the
+    log and passed by (a circle that is gone reaches no one; this login's own refusal is
+    the move's too). The ones the folder entered shares, and a node lacks or has with
+    other rights or another end, are given **after** it: one `PUT` per 100 shares of a
+    circle (one circle the server refuses takes no other's along), and where the server
+    refuses such a request, its shares one by one. So whatever fails on the way, a node is
+    shared with fewer than where it is, never with more. Shares that can't be given after
+    the move are said in the log, and left: nothing gives them later.
   - Measured live (dev server, a folder shared for editing): a file moved in, on the
-    member's computer after 2.6 s (1 `PATCH`, 1 `PUT`, 2 `query-batch`); a folder with a
-    folder and four files moved in, 2.6 s (1 `PATCH`, 1 `PUT` of 6 shares, 3
-    `query-batch`); moved out again, gone there after 1.4 s (1 or 6 `DELETE`, 1 `PATCH`).
+    member's computer after 2.6 s (1 `PATCH`, 1 `PUT`, 1 `query-batch`); a folder with two
+    folders and four files moved in, 2.8 s (1 `PATCH`, 1 `PUT` of 7 shares, 4
+    `query-batch`); three folders and six files moved out, gone there after 1.4 s (9
+    `DELETE`, 1 `PATCH`, 5 `query-batch`); a file or a folder moved between two folders
+    shared alike, 2.4 s (1 `PATCH`). One of eleven files moved in reached the member only
+    with the next change (both requests answered 200: not found why).
+- **A new node is held to its folder once it is up** (`HomebaseRemote::settle_new`). The
+  server looks at a new file's shares once the bytes are in and writes them whatever
+  became of the folder's meanwhile: a share withdrawn during a long upload, or the folder
+  moved by this computer in the same sync (seen live before this: six files added to a
+  folder as it moved out of a shared one went up shared, and stayed so). So, the node up,
+  its folder is asked about once more: nothing is read where what is known of it still
+  holds (the usual), and what is added to a folder while it moves waits for the move.
+  Where the folder is shared otherwise by then, the node's shares are made the folder's:
+  the ones it has no more withdrawn, the ones it lacks given, as after a move. What fails
+  there is said in the log (the node is up).
 - **Limits.**
-  - A file goes up shared as its folder was **when its upload began**: the server looks at
-    the shares once the bytes are in and writes them whatever became of the folder's
-    meanwhile. One added just before a withdrawal stays shared (for a large file, "just
-    before" is its whole upload: said in the log), and nothing here takes a share back
-    yet; one added just after a folder is first shared isn't shared (the app that shared
-    wrote the rows of what was there then).
-  - Before that, a share's change is known here once its notice came: seconds. With the
-    notifications down, once the feed is next read, 10 minutes at most. A notice the
-    server never sent isn't made up for while they stay connected (as for any other change
-    it didn't announce).
+  - A node added within seconds of a folder first being shared may go up unshared (the
+    app that shared wrote the rows of what was there then).
+  - A share's change is known here once its notice came: seconds. With the notifications
+    down, once the feed is next read, 10 minutes at most. A notice the server never sent
+    isn't made up for while they stay connected (as for any other change it didn't
+    announce).
+  - Moves that aren't the engine's keep the shares a node has: one put back from Recently
+    deleted into another folder than it was in, a folder restored by an edit of what was
+    in it. So does a node moved out of a folder that is gone for good, or whose shares
+    don't read: what that folder shared isn't known.
+  - Shares withdrawn before a move that then isn't made (the server not reached, and the
+    node moved back before the next try) aren't given back: the node is in its shared
+    folder unshared until it is moved in again or shared in the app.
+  - A large folder moved out of a shared one is slow: one request per share to withdraw,
+    as the server has no route that takes several (10,000 files, 10,000 requests, the move
+    waiting for them; and with it what is first added to a folder not known yet, as how a
+    folder is shared isn't read while such a move is on its way).
   - The folder's other circles get no row for what a **member** adds ("Writing to what
     others share").
   - What was learnt of the folders is this run's: after a start, the first add to each
