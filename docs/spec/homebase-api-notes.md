@@ -1072,8 +1072,9 @@ shares a folder writes the rows of what is in it then (**[verified]** chat-kmp
     is gone (**[verified]** `WithdrawShareAsync`, `GetCircleCallerMayManageAsync`).
     Neither answers with a body; both move the file's `updated` and keep its version.
   - Where the two folders are shared alike (with no one, mostly; with the same circles,
-    rights and ends), the move is the update alone: nothing below it is read. A write that
-    leaves the node where it is asks nothing at all.
+    rights and ends, in whatever order the server lists them), the move is the update
+    alone: nothing below it is read. A write that leaves the node where it is asks nothing
+    at all.
   - Else the node and all that is in it are read first, each with its shares, and its key
     where a share is to be given: one `query-batch` for the node (`includeShares`), one
     per page of 500 nodes per 100 folders below it, without their content. Each node once
@@ -1082,19 +1083,32 @@ shares a folder writes the rows of what is in it then (**[verified]** chat-kmp
   - The shares of the circles the folder left is shared with, and the one entered isn't,
     are withdrawn **before** the move: one `DELETE` per share. A refusal is said in the
     log and passed by (a circle that is gone reaches no one; this login's own refusal is
-    the move's too). The ones the folder entered shares, and a node lacks or has with
-    other rights or another end, are given **after** it: one `PUT` per 100 shares of a
-    circle (one circle the server refuses takes no other's along), and where the server
-    refuses such a request, its shares one by one. So whatever fails on the way, a node is
-    shared with fewer than where it is, never with more. Shares that can't be given after
-    the move are said in the log, and left: nothing gives them later.
+    the move's too), and a 403 ends the circle's withdrawals: it is the circle's or the
+    login's, the same for every node. The ones the folder entered shares, and a node lacks
+    or has with other rights or another end, are given **after** it: one `PUT` per 100
+    shares of a circle (one circle the server refuses takes no other's along); where the
+    server refuses such a request for a file that is gone since it was read
+    (`invalidFile`, 4161), its shares one by one, and any other refusal ends the circle's
+    (it is the circle's or the share's: one request, not one per node). So whatever fails
+    on the way, a node is shared with fewer than where it is, never with more. Shares that
+    can't be given after the move are said in the log, and left: nothing gives them later.
+  - **One folder's move that changes shares at a time, and nothing else beside it.** The
+    engine runs a sync's moves and uploads side by side, a folder's move with the files
+    moved out of it and added to it (seen live before this: of 30 files moved out of a
+    folder as that moved into a shared one, 7 were left shared where they went; the other
+    way, 7 unshared in the shared folder). So such a move holds off every other move, and
+    whoever reads how a folder is shared, until it is done, and forgets the folders it
+    moves as it lists them: what comes after reads them again. Files, and folders moved
+    between two folders shared alike, only wait for it, any number at once.
   - Measured live (dev server, a folder shared for editing): a file moved in, on the
     member's computer after 2.6 s (1 `PATCH`, 1 `PUT`, 1 `query-batch`); a folder with two
     folders and four files moved in, 2.8 s (1 `PATCH`, 1 `PUT` of 7 shares, 4
     `query-batch`); three folders and six files moved out, gone there after 1.4 s (9
     `DELETE`, 1 `PATCH`, 5 `query-batch`); a file or a folder moved between two folders
-    shared alike, 2.4 s (1 `PATCH`). One of eleven files moved in reached the member only
-    with the next change (both requests answered 200: not found why).
+    shared alike, 2.4 s (1 `PATCH`); 40 files moved in at once, 4.6 s (40 `PATCH`, 40
+    `PUT`, 43 `query-batch`), and out, 1.6 s (40 `DELETE`, 40 `PATCH`, 41 `query-batch`).
+    One of eleven files moved in reached the member only with the next change (both
+    requests answered 200: not found why).
 - **A new node is held to its folder once it is up** (`HomebaseRemote::settle_new`). The
   server looks at a new file's shares once the bytes are in and writes them whatever
   became of the folder's meanwhile: a share withdrawn during a long upload, or the folder
@@ -1103,8 +1117,10 @@ shares a folder writes the rows of what is in it then (**[verified]** chat-kmp
   its folder is asked about once more: nothing is read where what is known of it still
   holds (the usual), and what is added to a folder while it moves waits for the move.
   Where the folder is shared otherwise by then, the node's shares are made the folder's:
-  the ones it has no more withdrawn, the ones it lacks given, as after a move. What fails
-  there is said in the log (the node is up).
+  the ones it has no more withdrawn, the ones it lacks given, as after a move, and no
+  folder's move changes shares meanwhile. What fails there is said in the log (the node
+  is up); a new folder that was changed so, or whose folder wasn't read, is asked about
+  when next added to.
 - **Limits.**
   - A node added within seconds of a folder first being shared may go up unshared (the
     app that shared wrote the rows of what was there then).
@@ -1121,8 +1137,8 @@ shares a folder writes the rows of what is in it then (**[verified]** chat-kmp
     folder unshared until it is moved in again or shared in the app.
   - A large folder moved out of a shared one is slow: one request per share to withdraw,
     as the server has no route that takes several (10,000 files, 10,000 requests, the move
-    waiting for them; and with it what is first added to a folder not known yet, as how a
-    folder is shared isn't read while such a move is on its way).
+    waiting for them; and with it every other move, and what is first added to a folder
+    not known yet, as how a folder is shared isn't read while such a move is on its way).
   - The folder's other circles get no row for what a **member** adds ("Writing to what
     others share").
   - What was learnt of the folders is this run's: after a start, the first add to each
