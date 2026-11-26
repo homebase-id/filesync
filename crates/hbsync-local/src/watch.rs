@@ -1131,15 +1131,18 @@ mod tests {
         while let Ok(res) = rx.recv_timeout(Duration::from_secs(5)) {
             let event = res.expect("an event");
             rescan |= event.need_rescan();
+            if rescan {
+                break;
+            }
             told.extend(event.paths);
         }
-        let made = (0..FILES).filter(|i| told.contains(&dir.path().join(name(*i))));
-        let made = made.count();
+        let made = (0..FILES)
+            .filter(|i| told.contains(&dir.path().join(name(*i))))
+            .count();
         assert!(
             made == FILES || rescan,
             "{made} of {FILES} files told of, and no rescan asked for"
         );
-        drop(watcher);
     }
 
     fn event(kind: EventKind, paths: &[&str]) -> Event {

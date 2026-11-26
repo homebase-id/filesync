@@ -22,8 +22,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use windows_sys::Win32::Foundation::{
     CloseHandle, ERROR_ACCESS_DENIED, ERROR_NOTIFY_ENUM_DIR, ERROR_OPERATION_ABORTED,
-    ERROR_SUCCESS, HANDLE,
-    INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
+    ERROR_SUCCESS, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, ReadDirectoryChangesW, FILE_ACTION_ADDED, FILE_ACTION_MODIFIED,

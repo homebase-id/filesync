@@ -16,7 +16,6 @@ release can't leave the patch unused). Changes in `src/windows.rs`, marked `hbsy
 - The semaphore is shared by the watcher and its thread (an `Arc<OwnedHandle>`) and closed by
   the last one: upstream's thread closed it when it stopped, while `Drop` could still release
   it (a bug with or without the timeout).
-
 - A completion without bytes, or with `ERROR_NOTIFY_ENUM_DIR`, sends a rescan event
   (`Flag::Rescan`) instead of reading the buffer: Windows answers so when more changed than
   its 16 KiB buffer holds, having dropped all of it, and 8.2.0 read the empty buffer and said
