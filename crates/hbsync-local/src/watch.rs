@@ -1104,6 +1104,44 @@ mod tests {
             .expect("every call answered");
     }
 
+    /// A burst the OS watcher's buffer can't hold: Windows drops what it couldn't keep and
+    /// answers with nothing. The watcher must say so (a rescan), not pass it by: of the
+    /// files made, each is told of, or a rescan is asked for (#424; the watcher's handler is
+    /// slowed here, as a busy daemon's is, so that the changes outrun its reads).
+    #[cfg(windows)]
+    #[test]
+    fn a_burst_the_watcher_cant_hold_asks_for_a_rescan() {
+        const FILES: usize = 3000;
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut watcher = notify::recommended_watcher(move |res: notify::Result<Event>| {
+            std::thread::sleep(Duration::from_millis(1));
+            let _ = tx.send(res);
+        })
+        .expect("a watcher");
+        watcher
+            .watch(dir.path(), RecursiveMode::Recursive)
+            .expect("watched");
+        // (Long names: a record holds its name, and the buffer few of them.)
+        let name = |i: usize| format!("{i:04}-{}", "a-long-name-".repeat(12));
+        for i in 0..FILES {
+            fs::write(dir.path().join(name(i)), b"x").expect("written");
+        }
+        let (mut told, mut rescan) = (std::collections::HashSet::new(), false);
+        while let Ok(res) = rx.recv_timeout(Duration::from_secs(5)) {
+            let event = res.expect("an event");
+            rescan |= event.need_rescan();
+            told.extend(event.paths);
+        }
+        let made = (0..FILES).filter(|i| told.contains(&dir.path().join(name(*i))));
+        let made = made.count();
+        assert!(
+            made == FILES || rescan,
+            "{made} of {FILES} files told of, and no rescan asked for"
+        );
+        drop(watcher);
+    }
+
     fn event(kind: EventKind, paths: &[&str]) -> Event {
         Event {
             kind,
