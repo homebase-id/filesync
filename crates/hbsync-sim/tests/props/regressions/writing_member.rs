@@ -55,10 +55,16 @@ fn folder_pick(sim: &Sim, c: usize, folder: &str) -> usize {
 
 /// The member moves its item at `path` into `folder` (`""`: the top) as the name `name` picks.
 fn rename(sim: &mut Sim, path: &str, folder: &str, name: usize) {
-    let node = sim.item(2, path).expect("on the member's device");
-    let node = sim.pick(2, node, false).expect("its pick");
-    let parent = folder_pick(sim, 2, folder);
-    sim.run(&[act(2, Action::Move { node, parent, name })]);
+    move_on(sim, 2, path, folder, name);
+}
+
+/// Client `c` moves its item at `path` into its `folder` (`""`: the top) as the name `name`
+/// picks.
+fn move_on(sim: &mut Sim, c: usize, path: &str, folder: &str, name: usize) {
+    let node = sim.item(c, path).expect("on that device");
+    let node = sim.pick(c, node, false).expect("its pick");
+    let parent = folder_pick(sim, c, folder);
+    sim.run(&[act(c, Action::Move { node, parent, name })]);
 }
 
 /// An edit and a rename of a file shared for editing reach the drive, and the owner's
@@ -251,10 +257,7 @@ fn what_the_owner_makes_in_a_shared_folder_reaches_the_member() {
 fn what_the_owner_moves_takes_its_shares_along() {
     let mut sim = owned(&["b"]);
     let moved = |sim: &mut Sim, path: &str, into: &str, name: usize| {
-        let node = sim.item(0, path).expect("on the owner's device");
-        let node = sim.pick(0, node, false).expect("its pick");
-        let parent = folder_pick(sim, 0, into);
-        sim.run(&[act(0, Action::Move { node, parent, name })]);
+        move_on(sim, 0, path, into, name);
         settle(sim);
     };
     // A folder with a file, made at the top where nothing is shared.

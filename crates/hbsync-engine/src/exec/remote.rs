@@ -219,5 +219,5 @@ fn meta_job(
     after: After,
 ) -> (Job, Ctx) {
     let job = Job::Meta { meta, target, from };
-    (job, Ctx::Meta { hash, from, after })
+    (job, Ctx::Meta { hash, after })
 }

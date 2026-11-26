@@ -657,17 +657,15 @@ impl FakeServer {
 
     /// The file `file_id` and every live file in it, at any depth.
     fn in_and_below(&self, file_id: RemoteFileId) -> Vec<RemoteFileId> {
-        let node_of = |file: &StoredFile| match &file.header.body {
-            RemoteBody::Live { node, .. } => Some(*node),
-            RemoteBody::Deleted => None,
-        };
         let mut found = vec![file_id];
         let mut at = 0;
-        while let Some(folder) = found.get(at).and_then(|id| self.files.get(id)).map(node_of) {
+        while let Some(file) = found.get(at).and_then(|id| self.files.get(id)) {
             at += 1;
-            let Some(folder) = folder else { continue };
+            let (NodeKind::Folder, Some(folder)) = (file.header.kind, file.header.node()) else {
+                continue;
+            };
             let in_it = |(id, file): (&RemoteFileId, &StoredFile)| {
-                (file.header.parent == folder && node_of(file).is_some()).then_some(*id)
+                (file.header.parent == folder && file.header.node().is_some()).then_some(*id)
             };
             let mut children: Vec<RemoteFileId> = self.files.iter().filter_map(in_it).collect();
             children.sort_by_key(|id| self.files[id].row);
@@ -683,12 +681,13 @@ impl FakeServer {
     /// folder it left is withdrawn. Nothing where neither folder is shared.
     fn moved(&mut self, writer: ClientId, file_id: RemoteFileId, from: NodeId, to: NodeId) {
         let (left, entered) = (self.shared_as(from), self.shared_as(to));
+        if left.is_none() && entered.is_none() {
+            return;
+        }
         for file in self.in_and_below(file_id) {
-            let now = match (entered, left, self.shares.get(&file).copied()) {
-                (Some(entered), _, _) if !self.shared_live(file) => entered,
-                (None, Some(_), Some(had)) if self.shared_live(file) => {
-                    Share { live: false, ..had }
-                }
+            let now = match (entered, self.shares.get(&file).copied()) {
+                (Some(entered), _) if !self.shared_live(file) => entered,
+                (None, Some(had)) if self.shared_live(file) => Share { live: false, ..had },
                 _ => continue,
             };
             // (Each a share write of its own: one that is refused leaves the others.)

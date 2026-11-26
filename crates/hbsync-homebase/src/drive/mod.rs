@@ -1047,7 +1047,7 @@ impl HomebaseRemote {
     /// `folder`'s row with its shares, asked of the server: the file it is, and its live
     /// shares that read. No file for a folder that isn't there or whose row doesn't read.
     fn read_shares(&self, folder: NodeId) -> Result<(Option<RemoteRef>, Shares)> {
-        let page = self.query_batch(&wire::shares_query(folder))?;
+        let page = self.query_batch(&wire::node_query(folder, &[FILE_TYPE_FOLDER]))?;
         let Some(row) = page.search_results.first() else {
             return Ok((None, Shares::default()));
         };
@@ -1194,7 +1194,7 @@ impl HomebaseRemote {
         if leaving.is_empty() && entered.is_empty() {
             return self.write(Some(target), meta, payload);
         }
-        let moving = self.moving(meta.node, target.at)?;
+        let moving = self.moving(meta.node, target.at, !entered.is_empty())?;
         self.withdraw(&moving, &leaving)?;
         let written = self.write(Some(target), meta, payload)?;
         self.share(&moving, &entered);
@@ -1210,13 +1210,14 @@ impl HomebaseRemote {
     /// reads them ([`Moving`]): each with its shares and its key. A listing that is cut
     /// short is an error: a share withdrawn from part of a folder would leave the rest
     /// shared where it goes.
-    fn moving(&self, top: NodeId, at: RemoteRef) -> Result<Vec<Moving>> {
+    fn moving(&self, top: NodeId, at: RemoteRef, keys: bool) -> Result<Vec<Moving>> {
         let mut moving = Vec::new();
-        self.read_moving(&self.query_batch(&wire::node_query(top))?, &mut moving)?;
+        let node = self.query_batch(&wire::node_query(top, wire::NODE_TYPES))?;
+        self.read_moving(&node, keys, &mut moving)?;
         // Written since the caller last read it: its write would be refused, after the
         // shares it leaves were withdrawn. Refused here, before anything is.
         match moving.first() {
-            Some(node) if node.file == at.file_id.0 && node.version == at.version.0 => {}
+            Some(node) if node.at == at => {}
             Some(_) => return Err(RemoteError::VersionMismatch),
             None => return Err(RemoteError::NotFound),
         }
@@ -1230,10 +1231,10 @@ impl HomebaseRemote {
             read = moving.len();
             for some in folders.chunks(CHILDREN_QUERY_FOLDERS) {
                 let fetch = |cursor: Option<&str>| {
-                    self.query_batch(&wire::nodes_in_query(some, cursor, MOVING_PAGE))
+                    self.query_batch(&wire::nodes_in_query(some, cursor, NODES_PAGE))
                 };
                 let each = |page: &wire::QueryBatchResponse| {
-                    self.read_moving(page, &mut moving).map(|()| true)
+                    self.read_moving(page, keys, &mut moving).map(|()| true)
                 };
                 if read_pages(fetch, each)? == Ended::CutShort {
                     return Err(RemoteError::Transient(
@@ -1245,23 +1246,32 @@ impl HomebaseRemote {
         Ok(moving)
     }
 
-    /// A page's nodes, as a move reads them: added to `moving`.
-    fn read_moving(&self, page: &wire::QueryBatchResponse, moving: &mut Vec<Moving>) -> Result<()> {
+    /// A page's nodes, as a move reads them: added to `moving`, with their keys where
+    /// `keys` (a share is to be given: it takes the node's key).
+    fn read_moving(
+        &self,
+        page: &wire::QueryBatchResponse,
+        keys: bool,
+        moving: &mut Vec<Moving>,
+    ) -> Result<()> {
         for row in &page.search_results {
             let header: wire::FileHeader = serde_json::from_str(row.get())
                 .map_err(|e| RemoteError::Fatal(format!("a node to move doesn't read: {e}")))?;
             let Some(node) = header.file_metadata.app_data.unique_id.map(NodeId) else {
                 continue;
             };
-            let key = (self.held(&header))
-                .and_then(|held| header.key(held.keys(self)).map_err(remote_error))
-                .map(|key| key.key);
+            let key = || -> Result<Key> {
+                let held = self.held(&header)?;
+                Ok(header.key(held.keys(self)).map_err(remote_error)?.key)
+            };
             moving.push(Moving {
                 node,
-                file: header.file_id,
-                version: header.file_metadata.version_tag,
+                at: RemoteRef {
+                    file_id: RemoteFileId(header.file_id),
+                    version: VersionTag(header.file_metadata.version_tag),
+                },
                 folder: header.file_metadata.app_data.file_type == FILE_TYPE_FOLDER,
-                key: key.ok(),
+                key: keys.then(key).and_then(Result::ok),
                 circles: (header.shares.iter().flatten())
                     .filter(|row| row.permissions & app::READ != 0)
                     .filter_map(|row| row.circle_id)
@@ -1273,9 +1283,9 @@ impl HomebaseRemote {
 
     /// Withdraws the shares of the nodes `moving` with the circles `leaving`: one request
     /// each (`DELETE /drives/{d}/files/{fileId}/shares/{circleId}`: **[verified]** live
-    /// 2026-11-25 with the app's login, and odin-core `V2DriveSharesController`). One the
-    /// server refuses (withdrawn already by another device) is none to withdraw; the server
-    /// not reached fails it, the move not made yet.
+    /// 2026-11-25 with the app's login, and odin-core `V2DriveSharesController`; there is no
+    /// route that takes several). One the server refuses (withdrawn already by another
+    /// device) is none to withdraw; the server not reached fails it, the move not made yet.
     fn withdraw(&self, moving: &[Moving], leaving: &[Uuid]) -> Result<()> {
         for node in moving {
             for circle in leaving
@@ -1284,7 +1294,7 @@ impl HomebaseRemote {
             {
                 let route = format!(
                     "{}/shares/{circle}",
-                    file_route(self.drive.alias, RemoteFileId(node.file))
+                    file_route(self.drive.alias, node.at.file_id)
                 );
                 match self.client.delete(&route).map_err(remote_error) {
                     Ok(()) | Err(RemoteError::Fatal(_) | RemoteError::NotFound) => {}
@@ -1295,48 +1305,14 @@ impl HomebaseRemote {
         Ok(())
     }
 
-    /// Gives the nodes `moving` the shares `entered` each lacks, its key locked under the
-    /// circle's key by its file id: a request per [`MOST_SHARES`] shares of one circle
-    /// (`PUT /drives/{d}/shares`, all or none: so one circle the server refuses takes no
-    /// other's along). After the move: what can't be given is said, not failed.
+    /// Gives the nodes `moving` the shares `entered` each lacks ([`HomebaseRemote::share_with`]).
+    /// After the move: what can't be given is said, not failed.
     fn share(&self, moving: &[Moving], entered: &[Share]) {
-        let route = format!("/api/v2/drives/{}/shares", self.drive.alias.simple());
         for share in entered {
-            let lacking = moving
-                .iter()
-                .filter(|node| !node.circles.contains(&share.circle));
-            let rows = || -> Result<Vec<serde_json::Value>> {
-                let Some(circle_key) = self.own_circle(share.circle)? else {
-                    return Ok(Vec::new());
-                };
-                let mut rows = Vec::new();
-                for node in lacking {
-                    let Some(key) = &node.key else {
-                        tracing::warn!("a moved node's key doesn't open: it isn't shared");
-                        continue;
-                    };
-                    let locked = (circle_key.lock_key_of(key, node.file)).map_err(remote_error)?;
-                    let (permissions, ends) = (share.permissions, share.expires_at);
-                    rows.push(wire::share_of(
-                        node.file,
-                        share.circle,
-                        permissions,
-                        ends,
-                        &locked,
-                    ));
-                }
-                Ok(rows)
-            };
-            let given = rows().and_then(|rows| {
-                for some in rows.chunks(MOST_SHARES) {
-                    (self.client.put(&route, &json!({ "shares": some }))).map_err(remote_error)?;
-                }
-                Ok(rows.len())
-            });
-            match given {
+            match self.share_with(moving, share) {
                 Ok(0) => {}
                 Ok(shared) => {
-                    tracing::info!("shared {shared} moved nodes as the folder they are in now")
+                    tracing::info!("shared {shared} moved nodes as the folder they are in now");
                 }
                 Err(e) => tracing::warn!(
                     "what was moved into a shared folder isn't all shared as that folder is \
@@ -1345,6 +1321,42 @@ impl HomebaseRemote {
                 ),
             }
         }
+    }
+
+    /// Gives each of `moving` that lacks it the share `share`, its key locked under the
+    /// circle's key by its file id: a request per [`MOST_SHARES`] nodes (`PUT
+    /// /drives/{d}/shares`, all or none: one circle's alone, so one the server refuses
+    /// takes no other's along). How many it gave: none where the circle's key isn't to be
+    /// had.
+    fn share_with(&self, moving: &[Moving], share: &Share) -> Result<usize> {
+        let Some(circle_key) = self.own_circle(share.circle)? else {
+            return Ok(0);
+        };
+        let mut rows = Vec::new();
+        for node in moving
+            .iter()
+            .filter(|node| !node.circles.contains(&share.circle))
+        {
+            let Some(key) = &node.key else {
+                tracing::warn!("a moved node's key doesn't open: it isn't shared");
+                continue;
+            };
+            let file = node.at.file_id.0;
+            let locked = circle_key.lock_key_of(key, file).map_err(remote_error)?;
+            let row = wire::share_of(
+                file,
+                share.circle,
+                share.permissions,
+                share.expires_at,
+                &locked,
+            );
+            rows.push(row);
+        }
+        for some in rows.chunks(MOST_SHARES) {
+            let shares = json!({ "shares": some });
+            (self.client.put(&shares_route(self.drive.alias), &shares)).map_err(remote_error)?;
+        }
+        Ok(rows.len())
     }
 
     /// The header of `at`, which must still be that version and not deleted.
@@ -1770,6 +1782,11 @@ fn sealed_or_wait(answer: SealedKey, sharer: &str) -> Result<Vec<u8>> {
 }
 
 /// The route of the files of the drive `alias` names.
+/// The route of a drive's shares (`PUT`: [`wire::share_of`]).
+fn shares_route(alias: Uuid) -> String {
+    format!("/api/v2/drives/{}/shares", alias.simple())
+}
+
 fn files_route(alias: Uuid) -> String {
     format!("/api/v2/drives/{}/files", alias.simple())
 }
@@ -1885,16 +1902,17 @@ fn changes_page(
     })
 }
 
-/// Nodes read per page of what is in a folder to move ([`HomebaseRemote::moving`]).
-const MOVING_PAGE: usize = 500;
+/// Nodes asked for per page of what is in folders ([`HomebaseRemote::holding`],
+/// [`HomebaseRemote::moving`]).
+const NODES_PAGE: usize = 500;
 
 /// A node that moves, or is in a folder that does, as [`HomebaseRemote::moving`] reads it.
 struct Moving {
     node: NodeId,
-    file: Uuid,
-    version: Uuid,
+    at: RemoteRef,
     folder: bool,
-    /// Its key; none where it doesn't open (it can't be shared then).
+    /// Its key, where it was asked for; none where it doesn't open (it can't be shared
+    /// then).
     key: Option<Key>,
     /// The circles it is shared with now.
     circles: Vec<Uuid>,
@@ -1997,7 +2015,8 @@ fn holding(
 ) -> Result<HashSet<NodeId>> {
     let mut holding = HashSet::new();
     for some in folders.chunks(CHILDREN_QUERY_FOLDERS) {
-        let fetch = |cursor: Option<&str>| query_batch(&wire::children_query(some, cursor, 500));
+        let fetch =
+            |cursor: Option<&str>| query_batch(&wire::children_query(some, cursor, NODES_PAGE));
         // Ended short, it is as before: what the pages read.
         read_pages(fetch, |page| {
             for row in page.file_refs.iter().flatten() {

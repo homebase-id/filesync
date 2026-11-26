@@ -133,8 +133,12 @@ impl CircleKey {
         file_key: &Key,
         global_transit_id: Uuid,
     ) -> Result<Vec<u8>, HomebaseError> {
-        let nonce = random::<12>()?;
-        self.lock_with(BY_GLOBAL_TRANSIT_ID, file_key, global_transit_id, &nonce)
+        self.lock_with(
+            BY_GLOBAL_TRANSIT_ID,
+            file_key,
+            global_transit_id,
+            &random::<12>()?,
+        )
     }
 
     /// The key of a file that is on the drive, locked under the circle's key for a share

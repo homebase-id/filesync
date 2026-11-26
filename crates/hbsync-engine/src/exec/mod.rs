@@ -193,14 +193,10 @@ struct Placement {
 /// What the commit of a transfer needs to know.
 enum Ctx {
     Download(Box<Placement>),
-    /// `from`: the folder on the drive an updated file is in now.
-    Upload {
-        from: Option<NodeId>,
-    },
-    /// A metadata write; `from`: the folder on the drive the node leaves, if any.
+    Upload,
+    /// A metadata write.
     Meta {
         hash: Option<hbsync_types::ContentHash>,
-        from: Option<NodeId>,
         after: remote::After,
     },
 }

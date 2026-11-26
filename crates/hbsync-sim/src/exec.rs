@@ -2115,8 +2115,9 @@ impl Sim {
                 server.state.name = name;
                 server.state.tags = tags;
                 server.remote.version = version;
-                // A move takes the node's shares along: what the folder it is in now shares.
-                if from != into {
+                // The owner's move takes the node's shares along: what the folder it is in
+                // now shares (a member's write is its update: `Remote::update_from`).
+                if from != into && !self.clients[c].member {
                     self.server.moved(node, from, into);
                 }
                 self.x_sent(c, node, was, local_content);

@@ -1489,46 +1489,36 @@ fn the_sharer_adds_to_a_shared_folder(b: &Bench) -> Outcome {
 /// ([`Remote::update_from`]): the member reads it no more, or from then on.
 fn a_move_takes_the_shares_along(b: &Bench) -> Outcome {
     let member = b.reader();
-    let moved = |at: RemoteRef, meta: &NodeMeta, into: NodeId| -> Result<RemoteRef, RemoteError> {
-        let there = NodeMeta {
-            parent: into,
-            ..meta.clone()
-        };
-        let written = (b.remote).update_from(&b.target(at), &there, None, meta.parent)?;
-        Ok(b.keep(written.target))
+    // `meta` moved into `into`, from the folder it is in.
+    let moved = |at: RemoteRef, meta: &mut NodeMeta, into: NodeId| {
+        let from = std::mem::replace(&mut meta.parent, into);
+        let written = (b.remote).update_from(&b.target(at), meta, None, from)?;
+        Ok::<_, RemoteError>(b.keep(written.target))
     };
     // A folder at the top, where nothing is shared.
     let outside = folder(&unshared_name("outside"), NodeId::ROOT);
     b.create_as_added(&outside, None)?;
-    let f = file("moves", b.scratch, b"1");
+    let mut f = file("moves", b.scratch, b"1");
     let at = b.create_as_added(&f, Some(b"1"))?;
     ensure!(member.header(at.file_id).is_ok(), "shared as added");
-    let at = moved(at, &f, outside.node)?;
+    let at = moved(at, &mut f, outside.node)?;
     ensure_err!(member.header(at.file_id), RemoteError::Fatal(_));
-    let there = NodeMeta {
-        parent: outside.node,
-        ..f.clone()
-    };
-    let at = moved(at, &there, b.scratch)?;
+    let at = moved(at, &mut f, b.scratch)?;
     ensure!(
         b.read(at.file_id, None)? == b"1",
         "shared again, moved back"
     );
 
     // A folder made outside, with a file in it: moved in, both are shared; out, neither.
-    let dir = folder("a folder that moves", outside.node);
+    let mut dir = folder("a folder that moves", outside.node);
     let dir_at = b.create_as_added(&dir, None)?;
     let inner = file("inner", dir.node, b"2");
     let inner_at = b.create_as_added(&inner, Some(b"2"))?;
     ensure_err!(member.header(inner_at.file_id), RemoteError::Fatal(_));
-    let dir_at = moved(dir_at, &dir, b.scratch)?;
+    let dir_at = moved(dir_at, &mut dir, b.scratch)?;
     ensure!(member.header(dir_at.file_id).is_ok(), "the folder moved in");
     ensure!(b.read(inner_at.file_id, None)? == b"2", "what is in it");
-    let here = NodeMeta {
-        parent: b.scratch,
-        ..dir.clone()
-    };
-    let dir_at = moved(dir_at, &here, outside.node)?;
+    let dir_at = moved(dir_at, &mut dir, outside.node)?;
     ensure_err!(member.header(dir_at.file_id), RemoteError::Fatal(_));
     ensure_err!(member.header(inner_at.file_id), RemoteError::Fatal(_));
     Ok(())

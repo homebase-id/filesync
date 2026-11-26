@@ -1078,7 +1078,12 @@ shares a folder writes the rows of what is in it then (**[verified]** chat-kmp
     node is shared with fewer than where it is, never with more. Shares that can't be given
     after the move are said in the log, and left: nothing gives them later.
   - Where neither folder shares anything, nothing is asked beyond how the two are shared
-    (once each, as for an add).
+    (once each, as for an add). A write that leaves the node where it is asks nothing.
+  - Not covered: a node put back from Recently deleted into another folder than it was
+    in, and a folder restored by an edit of what was in it, keep the shares they have
+    (those writes aren't the engine's moves). And a large folder moved out of a shared
+    one is slow: one request per share to withdraw, as the server has no route that takes
+    several (10,000 files, 10,000 requests, the move waiting for them).
   - Measured live (dev server, a folder shared for editing): a file moved in, on the
     member's computer after 2.6 s (1 `PATCH`, 1 `PUT`, 2 `query-batch`); a folder with a
     folder and four files moved in, 2.6 s (1 `PATCH`, 1 `PUT` of 6 shares, 3

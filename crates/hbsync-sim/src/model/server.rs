@@ -334,11 +334,8 @@ impl Server {
             .collect();
         for file in files {
             match entered {
-                Some(folder) => {
-                    if self.shared.insert(file) && self.editable.contains(&folder) {
-                        self.editable.insert(file);
-                    }
-                }
+                Some(_) if self.shared.contains(&file) => {}
+                Some(_) => self.share_as_its_folder(file, to),
                 None => {
                     self.shared.remove(&file);
                     self.editable.remove(&file);

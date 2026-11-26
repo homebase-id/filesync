@@ -336,7 +336,7 @@ impl Executor<'_> {
             size,
             seen: row.fingerprint,
         };
-        Ok((job, Ctx::Upload { from }))
+        Ok((job, Ctx::Upload))
     }
 
     /// Records what a job did: `job` is the one that ran, given back by the pool.
@@ -466,7 +466,7 @@ impl Executor<'_> {
                 self.place_download(*d, file, local_hash)
             }
             (
-                Ctx::Upload { .. },
+                Ctx::Upload,
                 Job::Upload {
                     meta,
                     target,
