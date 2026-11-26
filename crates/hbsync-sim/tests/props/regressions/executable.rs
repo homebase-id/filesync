@@ -346,3 +346,58 @@ fn regression_a_bit_held_of_a_file_made_again_and_deleted_brings_nothing_back() 
     assert_eq!(sim.server_paths(), [""; 0], "nothing made again");
     assert_eq!(sim.local_paths(1), [""; 0]);
 }
+
+/// Client 0 deletes the folder `b` and stops once it is removed from the drive: what is in
+/// it is taken along, live. Client 1 (Linux) has edited `c.txt` in it and marked `a` in it
+/// executable. The edit keeps the folder: it comes back, with what is in it. A bit changed
+/// here alone is no change to keep against a removal (§1), so `a` is as what is unchanged in
+/// `b`: it stays with the folder, and its bit goes up. (It read as a change that the
+/// removal met, was left out of what the folder keeps, and was removed from the drive while
+/// its folder came back.)
+#[test]
+fn regression_a_bit_changed_here_stays_in_a_folder_an_edit_brings_back() {
+    use Action::*;
+    use Event::*;
+    let mut sim = Sim::new(2);
+    let root = sim.pick(0, hbsync_types::NodeId::ROOT, true).expect("root");
+    sim.run(&[act(
+        0,
+        CreateFolder {
+            parent: root,
+            name: 1,
+        },
+    )]);
+    let b = sim.item(0, "b").expect("the folder");
+    let parent = sim.pick(0, b, true).expect("picked");
+    sim.run(&[
+        act(0, CreateFile { parent, name: 0 }),
+        act(0, CreateFile { parent, name: 3 }),
+    ]);
+    settle(&mut sim);
+    let (a, c) = (
+        sim.item(1, "b/a").expect("a"),
+        sim.item(1, "b/c.txt").expect("c"),
+    );
+    let (fa, fc) = (
+        sim.file_pick(1, a).expect("picked"),
+        sim.file_pick(1, c).expect("picked"),
+    );
+    let node = sim.pick(0, b, false).expect("picked");
+    sim.run(&[
+        act(1, Chmod { file: fa }),
+        act(1, Edit { file: fc }),
+        act(0, Delete { node }),
+        Plan { client: 0 },
+        Step { client: 0 },
+    ]);
+    assert!(sim.is_removed(b), "the folder is removed");
+    assert!(!sim.is_removed(a), "what is in it is taken along, live");
+    sim.run(&[Plan { client: 1 }]);
+    for _ in 0..8 {
+        sim.run(&[Step { client: 1 }]);
+    }
+    settle(&mut sim);
+    assert_eq!(sim.server_paths(), ["b", "b/a", "b/c.txt"]);
+    assert_eq!(sim.drive_executable(a), Some(true), "the bit went up");
+    assert_eq!(sim.local_executable(1, a), Some(true));
+}

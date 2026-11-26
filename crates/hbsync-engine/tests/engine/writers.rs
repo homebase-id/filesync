@@ -220,6 +220,49 @@ fn the_executable_bit_stays_where_its_file_is_made_again_without_it() -> R {
     Ok(())
 }
 
+/// The same, the file made again with the bytes it had (a device that never saw the bit put
+/// its own copy back): nothing comes down, and the bit goes up in one step, over the new
+/// file. (The upload asks whether the file it writes over holds something this device never
+/// had: its bit isn't one the base still holds, so it does not.)
+#[cfg(unix)]
+#[test]
+fn the_executable_bit_stays_where_its_file_is_made_again_with_the_same_bytes() -> R {
+    use hbsync_remote::RemoteBody;
+    use std::os::unix::fs::PermissionsExt;
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    a.write("run.sh", "echo old")?;
+    fs::set_permissions(a.root.join("run.sh"), fs::Permissions::from_mode(0o755))?;
+    a.sync()?;
+    let on_drive = || match common::header_named(&server, "run.sh").body {
+        RemoteBody::Live { content, .. } => content.x,
+        RemoteBody::Deleted => false,
+    };
+    assert!(on_drive());
+    let node = {
+        let was = common::header_named(&server, "run.sh");
+        let node = was.node().ok_or("a node")?;
+        let mut s = server.lock().map_err(|_| "poisoned")?;
+        s.hard_delete(was.file_id, was.version)?;
+        let blake3 = hbsync_fileio::HashAlgorithm::Blake3;
+        s.seed_file_of(node, was.parent, ("run.sh", false), b"echo old", blake3)?;
+        node
+    };
+    assert!(!on_drive());
+    let report = a.sync()?;
+    assert!(report.failed.is_empty(), "{report:?}");
+    assert!(report.conflicts.is_empty(), "{report:?}");
+    assert_eq!(a.read_text("run.sh")?, "echo old");
+    let mode = fs::metadata(a.root.join("run.sh"))?.permissions().mode();
+    assert!(mode & 0o111 != 0, "kept where it was held");
+    assert!(on_drive(), "and sent up");
+    let now = common::header_named(&server, "run.sh");
+    assert_eq!(now.node(), Some(node), "the same node: nothing detached");
+    assert_eq!(server.lock().map_err(|_| "poisoned")?.live().count(), 1);
+    assert!(a.engine.sync_once("2026-10-08")?.is_idle());
+    Ok(())
+}
+
 /// A conflict copy keeps the node's base for the run's remote writes (§5): this device's removal
 /// of a tag, made with its edit, reaches the drive's version that won the edits (the remote
 /// write merges its tags against the base). The conflict's download comes in the same run.

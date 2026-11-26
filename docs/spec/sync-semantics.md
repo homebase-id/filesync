@@ -1846,8 +1846,8 @@ rules hold too:
     drive's version keeps the file, and this device's becomes a conflict copy beside it,
     added there, as on an identity's own drive (§6). Elsewhere (a file shared for editing
     in a folder shared for reading, or at the top) the drive's wins and this device's
-    moves out, as of any item of the folder (an executable bit changed here alone is no
-    edit to keep, as in any read-only folder);
+    moves out, as of any item of the folder. An executable bit changed here alone is no
+    edit on this side: the drive's bytes come down, the bit stays and goes up (§1);
   - a move here to another folder goes up between two folders that may be added to
     (below; also into a folder made here in one, which is added first), and is undone,
     whole, anywhere else (the item goes back to the drive's place

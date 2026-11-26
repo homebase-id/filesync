@@ -234,7 +234,8 @@ impl Reconciler<'_> {
 
     /// Whether file `node`, edited on both sides (`lc`, `rc`), was edited apart: not to the
     /// same, and not here in its executable bit alone against other bytes on the drive
-    /// (§1). The conflict [`Reconciler::merge_both`] keeps both of.
+    /// ([`Reconciler::bit_here_bytes_there`]). The conflict [`Reconciler::merge_both`] keeps
+    /// both of.
     fn edited_apart(
         &self,
         node: NodeId,
@@ -247,7 +248,15 @@ impl Reconciler<'_> {
             && content_changed(lc)
             && content_changed(rc)
             && !same_edit(l, r)
-            && !(self.bit_alone_here(node, l) && !same_hash(l, r))
+            && !self.bit_here_bytes_there(node, l, r)
+    }
+
+    /// Whether file `node` changed here in its executable bit alone, and the drive holds
+    /// other bytes than this device (§1): no conflict, the drive's bytes come down and the
+    /// bit stays. (Not where the bytes are the same, by whatever hashes: nothing would come
+    /// down, and nothing settle while the bits differ.)
+    fn bit_here_bytes_there(&self, node: NodeId, l: &NodeState, r: &NodeState) -> bool {
+        self.bit_alone_here(node, l) && !self.same_bytes(node, l, r)
     }
 
     /// The change here of `node` as the drive's delete of it meets it: a file's executable
@@ -256,11 +265,14 @@ impl Reconciler<'_> {
     /// what is unchanged in it. (A device that held the bit of a file made again without it
     /// reads it as changed here: it brings back nothing that was deleted since.)
     pub(super) fn local_change_to_keep(&self, node: NodeId) -> Change {
-        match (self.local_change(node), self.local_state(node)) {
-            (Change::Changed { moved: false, .. }, Some(l)) if self.bit_alone_here(node, &l) => {
+        // (An item that isn't here has no bit that differs from the base's.)
+        match self.local_change(node) {
+            Change::Changed { moved: false, .. }
+                if (self.input.local.get(node)).is_some_and(|l| self.bit_alone_here(node, l)) =>
+            {
                 Change::Unchanged
             }
-            (change, _) => change,
+            change => change,
         }
     }
 
@@ -618,11 +630,11 @@ impl Reconciler<'_> {
                 if self.masking.read_only {
                     self.adds.insert(copy);
                 }
-            } else if l_edited && r_edited && !same_edit {
-                // Not apart: the bit alone changed here, and the drive holds other bytes
-                // (§1). Its bytes, with the bit as it is here: the drive's too where that
-                // changed (to the same: it has two values), else the download keeps it, and
-                // the next plan sends it up (the base settles at the drive's version).
+            } else if l_edited && r_edited && self.bit_here_bytes_there(node, l, r) {
+                // The drive's bytes, with the bit as it is here (§1): the drive's too where
+                // that changed (to the same: it has two values), else the download keeps
+                // it, and the next plan sends it up (the base settles at the drive's
+                // version).
                 if let (Some(t), Some(lc)) = (&mut target.content, l.content) {
                     t.executable = lc.executable;
                 }
@@ -637,16 +649,11 @@ impl Reconciler<'_> {
     }
 }
 
-/// Whether both sides hold the same bytes, executable alike: an edit on both sides that
-/// leaves nothing to do.
+/// Whether both sides hold the same bytes, executable alike: an edit on both sides that isn't a
+/// conflict.
 fn same_edit(l: &NodeState, r: &NodeState) -> bool {
-    same_hash(l, r) && l.content.map(|c| c.executable) == r.content.map(|c| c.executable)
-}
-
-/// Whether both sides hold the same bytes, whatever their executable bits.
-fn same_hash(l: &NodeState, r: &NodeState) -> bool {
     match (&l.content, &r.content) {
-        (Some(lc), Some(rc)) => lc.hash == rc.hash,
+        (Some(lc), Some(rc)) => lc.hash == rc.hash && lc.executable == rc.executable,
         _ => false,
     }
 }
