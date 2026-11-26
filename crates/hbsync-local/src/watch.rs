@@ -1107,12 +1107,13 @@ mod tests {
     /// A burst the OS watcher's buffer can't hold: Windows drops what it couldn't keep and
     /// answers with nothing. The watcher must say so (a rescan), not pass it by (#424). Its
     /// handler is held at its first event while the files are made, as a busy daemon's is
-    /// for a moment, so the changes outrun its reads for sure: some 600 KiB of records
-    /// against two buffers of 16 KiB.
+    /// for a moment, so the changes outrun its reads for sure: some 200 KiB of records
+    /// against two buffers of 16 KiB. And it watches on: a file made after the rescan is
+    /// told of.
     #[cfg(windows)]
     #[test]
     fn a_burst_the_watcher_cant_hold_asks_for_a_rescan() {
-        const FILES: usize = 3000;
+        const FILES: usize = 500;
         let dir = tempfile::tempdir().expect("temp dir");
         let (tx, rx) = std::sync::mpsc::channel();
         let (first_tx, first_rx) = std::sync::mpsc::channel();
@@ -1148,6 +1149,13 @@ mod tests {
             rescan,
             "no rescan asked for, though {FILES} files outran the buffer"
         );
+        let after = dir.path().join("after");
+        fs::write(&after, b"x").expect("written");
+        let mut told = false;
+        while !told && let Ok(res) = rx.recv_timeout(Duration::from_secs(5)) {
+            told = res.expect("an event").paths.contains(&after);
+        }
+        assert!(told, "not watched after the rescan");
     }
 
     fn event(kind: EventKind, paths: &[&str]) -> Event {

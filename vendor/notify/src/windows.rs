@@ -382,11 +382,7 @@ unsafe extern "system" fn handle_event(
     // rescan instead of reading it (as upstream's main does; 8.2.0 read the empty buffer and
     // said nothing, so the changes were lost without a word). Not for ERROR_ACCESS_DENIED,
     // which goes on as before.
-    let dropped = match error_code {
-        ERROR_SUCCESS => bytes_written == 0,
-        code => code == ERROR_NOTIFY_ENUM_DIR,
-    };
-    if dropped {
+    if error_code == ERROR_NOTIFY_ENUM_DIR || (error_code == ERROR_SUCCESS && bytes_written == 0) {
         if let Ok(mut guard) = request.event_handler.lock() {
             let f: &mut dyn EventHandler = &mut *guard;
             f.handle_event(Ok(Event::new(EventKind::Other).set_flag(Flag::Rescan)));
