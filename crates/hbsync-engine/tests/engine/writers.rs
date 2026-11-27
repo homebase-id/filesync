@@ -351,6 +351,22 @@ fn the_executable_bit_alone_reads_no_bytes() -> R {
     assert_eq!(b.remote.faults().reads, 1, "the edit's bytes");
     assert_eq!(b.read_text("run.sh")?, "echo more");
     assert!(common::executable(&b.root.join("run.sh"))?);
+
+    // The bit with the file's time changed (a `touch`): a download, which gives it the time.
+    let then = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+    let file = fs::File::options()
+        .write(true)
+        .open(a.root.join("run.sh"))?;
+    file.set_modified(then)?;
+    drop(file);
+    fs::set_permissions(a.root.join("run.sh"), fs::Permissions::from_mode(0o644))?;
+    a.sync()?;
+    b.remote.faults().reads = 0;
+    b.sync()?;
+    assert_eq!(b.remote.faults().reads, 1, "fetched, for its time");
+    assert_eq!(fs::metadata(b.root.join("run.sh"))?.modified()?, then);
+    assert!(!common::executable(&b.root.join("run.sh"))?);
+    assert!(b.engine.sync_once("2026-10-08")?.is_idle());
     Ok(())
 }
 

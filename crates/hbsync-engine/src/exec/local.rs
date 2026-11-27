@@ -452,26 +452,44 @@ impl Executor<'_> {
     /// version's executable bit (`x`, as this device holds it under `name`: §1) where it is: a
     /// download with nothing to fetch ([`Executor::prepare_download`]). The file stays the
     /// one it is; its row takes the change time the bit moved, and the base settles at the
-    /// version. A file that changed otherwise meanwhile is read again.
+    /// version. `None` where the file doesn't take the bit so (the write fails: another
+    /// user's file; or it doesn't hold: a volume without modes, a file no one may read): the
+    /// download puts a file of its own there, as before. A file that changed otherwise
+    /// meanwhile, or isn't the one its row has, is read again.
     pub(super) fn bit_in_place(
         &mut self,
         row: &LocalRow,
         name: &str,
         x: bool,
         acted: &DriveVersion,
-    ) -> Step {
+    ) -> Step<Option<Outcome>> {
         let at = self.disk.abs(&row.path);
         let x = executable_on_disk(self.folder.os, name, x);
-        if let Err(e) = ops::set_executable(&at, x) {
-            return Ok(io_outcome(e));
+        if ops::set_executable(&at, x).is_err() {
+            return Ok(None);
         }
-        let Some(refreshed) = self.renamed(row, &row.path) else {
-            return Ok(rescan(&mut self.report, &row.path));
+        let meta = match hbsync_platform::stat(&at) {
+            Ok(m) => m,
+            Err(e) => return Ok(Some(io_outcome(e))),
         };
+        // The bit's write moves the change time only, as a tag's (`local_tags`).
+        let fp = row.fingerprint;
+        if meta.file_id != fp.file_id || !fp.same_after_rename(&meta) {
+            return Ok(Some(rescan(&mut self.report, &row.path)));
+        }
+        if meta.executable != Some(x) {
+            return Ok(None);
+        }
+        let refreshed = LocalRow {
+            fingerprint: meta.fingerprint(),
+            executable: meta.executable,
+            ..row.clone()
+        };
+        let how = Settle::acted(row.node, Some(acted), TagWrite::Nothing);
+        let done = self.finish(&[how], |s| s.folder().put_local(&refreshed))?;
         // None of the bytes counted for the download were fetched (`Executor::record`).
         self.no_bytes = true;
-        let how = Settle::acted(row.node, Some(acted), TagWrite::Nothing);
-        self.finish(&[how], |s| s.folder().put_local(&refreshed))
+        Ok(Some(done))
     }
 
     /// See [`renamed_row`].
