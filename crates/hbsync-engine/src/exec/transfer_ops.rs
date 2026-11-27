@@ -6,6 +6,14 @@ use crate::gone;
 use crate::settle::rules::Acts;
 use hbsync_types::ContentHash;
 
+/// Whether the drive's file `mirror` holds bytes of `hash` and `size`: an upload of them
+/// over it sends its header alone ([`Executor::prepare_upload`]), and counts no bytes.
+pub(super) fn holds(mirror: &MirrorRow, hash: ContentHash, size: u64) -> bool {
+    mirror
+        .file
+        .is_some_and(|f| f.hash == hash && f.size == size)
+}
+
 impl Executor<'_> {
     // ---- transfers: prepare (guards) and commit (placement, DB) around the worker pool ----
 
@@ -233,10 +241,6 @@ impl Executor<'_> {
         kind: NodeKind,
         tags: &Tags,
     ) -> Step<(Job, Ctx)> {
-        // Nothing more goes up once the drive is full; the run's other work goes on.
-        if self.heard.full && kind == NodeKind::File {
-            return Err(Outcome::waiting("the drive is out of storage"));
-        }
         let os = self.folder.os;
         let (row, mirror, removed, base, file) = self.db.read(|s| {
             let (row, base, mirror) = (
@@ -347,17 +351,17 @@ impl Executor<'_> {
             removed: false,
         };
         // The drive's file holds these bytes already (the executable bit changed here): the
-        // header alone goes, as a rename's, and the payload stays (#519: all of it was sent
-        // again for the bit).
-        let held = mirror
-            .as_ref()
-            .and_then(|m| m.file)
-            .map(|f| (f.hash, f.size));
-        if let (Some(_), Some(known)) = (existing, hash.known())
-            && held == Some((known, size))
+        // header alone goes, as a rename's, and the payload stays.
+        if existing.is_some()
+            && let Some(known) = hash.known()
+            && mirror.as_ref().is_some_and(|m| holds(m, known, size))
         {
             let after = remote::After::Updated;
             return Ok(remote::meta_job(meta, target, Some(known), from, after));
+        }
+        // No bytes go up once the drive is full; the run's other work goes on.
+        if self.heard.full && kind == NodeKind::File {
+            return Err(Outcome::waiting("the drive is out of storage"));
         }
         let job = Job::Upload {
             meta,

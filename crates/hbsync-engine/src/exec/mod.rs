@@ -680,7 +680,19 @@ impl<'a> Executor<'a> {
                     Op::LocalDownload { .. } => {
                         s.get_mirror(node)?.and_then(|m| m.file).map(|f| f.size)
                     }
-                    _ => s.local_by_node(node)?.map(|row| row.fingerprint.size),
+                    _ => {
+                        let row = s.local_by_node(node)?;
+                        // Bytes the drive's file holds aren't sent (`prepare_upload`).
+                        let held = match (op, row.as_ref().and_then(|row| row.hash)) {
+                            (Op::RemoteUpdate { .. }, Some(hash)) => {
+                                let size = row.as_ref().map_or(0, |row| row.fingerprint.size);
+                                (s.get_mirror(node)?)
+                                    .is_some_and(|m| transfer_ops::holds(&m, hash, size))
+                            }
+                            _ => false,
+                        };
+                        row.filter(|_| !held).map(|row| row.fingerprint.size)
+                    }
                 };
                 sizes.extend(size.map(|size| (node, size)));
             }
