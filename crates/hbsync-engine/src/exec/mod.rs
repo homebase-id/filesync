@@ -93,6 +93,9 @@ pub(crate) struct Executor<'a> {
     progress: Arc<Counters>,
     /// The transfers already in `progress`'s total.
     counted: HashSet<NodeId>,
+    /// The uploads whose header alone goes, the drive's file holding their bytes
+    /// ([`Executor::sends_header_alone`]): no file sent, to tell as one.
+    headers_alone: HashSet<NodeId>,
     /// The folders something goes into, looked at this run: whether each is on disk the one
     /// its row has ([`Executor::target_path`]).
     parents: HashMap<NodeId, bool>,
@@ -112,7 +115,7 @@ pub(crate) struct Executor<'a> {
 /// (the files in versions it can't read, read once a run; full since an earlier run).
 #[derive(Default)]
 struct Heard {
-    /// The drive is full: uploads wait (from the start, when it was lately).
+    /// The drive is full: uploads of bytes wait (from the start, when it was lately).
     full: bool,
     /// The files the drive has in a version this device can't read
     /// ([`ReadTx::unreadable_files`]), read at the run's first write to an existing file.
@@ -232,6 +235,7 @@ impl<'a> Executor<'a> {
             stop: None,
             progress: Arc::default(),
             counted: HashSet::new(),
+            headers_alone: HashSet::new(),
             parents: HashMap::new(),
             refusals: Refusals::default(),
             on_their_way: OnTheirWay::default(),
@@ -276,7 +280,7 @@ impl<'a> Executor<'a> {
         self
     }
 
-    /// Holds every upload: the drive was full lately (an earlier run's
+    /// Holds every upload of bytes: the drive was full lately (an earlier run's
     /// [`DriveNews::full`](crate::news::DriveNews::full)).
     pub(crate) fn with_full(mut self, full: bool) -> Self {
         self.heard.full = full;
@@ -645,6 +649,10 @@ impl<'a> Executor<'a> {
         };
         self.progress.files_done.fetch_add(1, Ordering::Relaxed);
         let node = op.node();
+        // Its header alone went: no file was sent, as for tags.
+        if self.headers_alone.remove(&node) {
+            return Ok(());
+        }
         let (path, bytes) = match gone {
             Some(path) => (Some(path), 0),
             None => self.db.read(|s| {
@@ -669,6 +677,17 @@ impl<'a> Executor<'a> {
         Ok(())
     }
 
+    /// The upload of `node` sends its header alone, the drive's file holding its bytes
+    /// ([`Executor::prepare_upload`]): its `size`, counted as bytes to send
+    /// ([`Executor::count_bytes`]), is none of the total, and it is no file uploaded to tell
+    /// ([`Executor::record`]).
+    fn sends_header_alone(&mut self, node: NodeId, size: u64) {
+        if self.counted.remove(&node) {
+            self.progress.bytes_total.fetch_sub(size, Ordering::Relaxed);
+        }
+        self.headers_alone.insert(node);
+    }
+
     /// Adds the bytes of every transfer in the plan to `progress`'s total before any starts, so
     /// the total doesn't grow batch by batch. One the guards skip later stays in it.
     fn count_bytes(&mut self, ops: &[Op]) -> Result<(), StateError> {
@@ -680,19 +699,7 @@ impl<'a> Executor<'a> {
                     Op::LocalDownload { .. } => {
                         s.get_mirror(node)?.and_then(|m| m.file).map(|f| f.size)
                     }
-                    _ => {
-                        let row = s.local_by_node(node)?;
-                        // Bytes the drive's file holds aren't sent (`prepare_upload`).
-                        let held = match (op, row.as_ref().and_then(|row| row.hash)) {
-                            (Op::RemoteUpdate { .. }, Some(hash)) => {
-                                let size = row.as_ref().map_or(0, |row| row.fingerprint.size);
-                                (s.get_mirror(node)?)
-                                    .is_some_and(|m| transfer_ops::holds(&m, hash, size))
-                            }
-                            _ => false,
-                        };
-                        row.filter(|_| !held).map(|row| row.fingerprint.size)
-                    }
+                    _ => s.local_by_node(node)?.map(|row| row.fingerprint.size),
                 };
                 sizes.extend(size.map(|size| (node, size)));
             }

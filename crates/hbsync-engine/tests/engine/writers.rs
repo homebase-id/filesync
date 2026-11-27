@@ -254,9 +254,9 @@ fn the_executable_bit_stays_where_its_file_is_made_again_with_the_same_bytes() -
 }
 
 /// A change of the executable bit alone sends no bytes (#519): the drive holds the file's, so
-/// its header alone is written, as a rename's, and no bytes count as to send. Set and taken
-/// off again, the file stays the same one with the same bytes, and the other device has the
-/// bit. An edit after it sends its bytes.
+/// its header alone is written, as a rename's; no bytes count as to send, and no file is told
+/// as uploaded. Set and taken off again, the file stays the same one with the same bytes, and
+/// the other device has the bit. An edit after it sends its bytes, and is told.
 #[cfg(unix)]
 #[test]
 fn the_executable_bit_alone_sends_no_bytes() -> R {
@@ -277,6 +277,8 @@ fn the_executable_bit_alone_sends_no_bytes() -> R {
         assert_eq!(a.remote.faults().uploads, 0, "no bytes sent for the bit");
         let progress = a.engine.progress().get();
         assert_eq!((progress.bytes_done, progress.bytes_total), (0, 0));
+        assert_eq!((progress.files_done, progress.files_total), (1, 1));
+        assert!(report.synced.is_empty(), "no file uploaded: {report:?}");
         let now = common::header_named(&server, "run.sh");
         assert_eq!(common::x_on_drive(&server, "run.sh"), x);
         assert_eq!(now.file_id, was.file_id, "the same file");
@@ -289,8 +291,9 @@ fn the_executable_bit_alone_sends_no_bytes() -> R {
         assert!(b.engine.sync_once("2026-10-08")?.is_idle());
     }
     a.write("run.sh", "echo more")?;
-    a.sync()?;
+    let report = a.sync()?;
     assert_eq!(a.remote.faults().uploads, 1, "the edit's bytes");
+    assert_eq!(report.synced.len(), 1, "{report:?}");
     b.sync()?;
     assert_eq!(b.read_text("run.sh")?, "echo more");
     Ok(())

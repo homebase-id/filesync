@@ -162,11 +162,9 @@ pub(crate) fn x_on_drive(server: &Arc<Mutex<FakeServer>>, name: &str) -> bool {
     }
 }
 
-/// Whether the file at `path` is executable here.
-#[cfg(unix)]
+/// Whether the file at `path` is executable here (not where the OS has no such bit).
 pub(crate) fn executable(path: &std::path::Path) -> Res<bool> {
-    use std::os::unix::fs::PermissionsExt;
-    Ok(std::fs::metadata(path)?.permissions().mode() & 0o111 != 0)
+    Ok(hbsync_platform::stat(path)?.executable == Some(true))
 }
 
 /// The header of the file named `name` on the server, live or removed.
