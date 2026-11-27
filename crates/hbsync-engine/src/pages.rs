@@ -3,7 +3,7 @@
 //! planned as pages of their own. The engine's rules, shared with the simulator's small-pages
 //! mode.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashSet};
 
 use hbsync_types::{NodeId, NodeKind};
 
@@ -25,7 +25,7 @@ pub trait Pending {
 /// What `input`'s page leaves to another page (sync semantics §6.5): its view's nodes outside
 /// the page still to plan, left as they are ([`Input::dirty_elsewhere`]); its topmost folders
 /// that may go with something below them still to plan ([`Input::going`]: of folders above
-/// each other across sides, one); and the folders above its nodes that may go and another
+/// each other across sides, each); and the folders above its nodes that may go and another
 /// page plans ([`Input::going_above`]). A query a 500 nodes outside the page, and one a
 /// topmost such folder.
 pub fn dirty_elsewhere<P: Pending>(
@@ -60,23 +60,15 @@ pub fn dirty_elsewhere<P: Pending>(
             && may_go(input, n, &hidden)
     };
     let above = |n: NodeId| above_any_side(input, n);
-    // Each of the page's folders that may go, with the folders above it on any side.
-    let in_page: HashMap<NodeId, Vec<NodeId>> = (input.dirty.iter().copied())
-        .filter(|&n| goes(n))
-        .map(|n| (n, above(n)))
-        .collect();
+    let in_page: HashSet<NodeId> = input.dirty.iter().copied().filter(|&n| goes(n)).collect();
     let mut going = HashSet::new();
-    for (&folder, up) in &in_page {
-        // The topmost: one below another of them is covered by that one, whose subtree
-        // holds its own. Of folders above each other, across sides (`d/a` here, `d` in what
-        // is in `a` on the drive), none is the topmost: the one of the lowest id stands for
-        // them, their subtrees being one (#520: each was taken for covered, none asked).
-        let covers = |a: &NodeId| {
-            in_page
-                .get(a)
-                .is_some_and(|its| !its.contains(&folder) || *a < folder)
-        };
-        let covered = up.iter().any(covers);
+    for &folder in &in_page {
+        // The topmost: one below another of them is covered by that one. Not by one it is
+        // above itself, on another side (`d/a` here, `d` in what is in `a` on the drive): of
+        // folders above each other none is the topmost, and each is asked (#520: each was
+        // taken for covered, none asked). A walk up more for a folder below another.
+        let covers = |a: &NodeId| in_page.contains(a) && !above(*a).contains(&folder);
+        let covered = above(folder).iter().any(covers);
         if !covered && pending.below(folder, &input.dirty)? {
             going.insert(folder);
         }
@@ -448,25 +440,23 @@ mod tests {
     }
 
     /// Of a page's folders that may go, the topmost waits for what another page plans below
-    /// it, and covers those in it. Of folders above each other (`d/a` here; on the drive `a`
-    /// removed, `d` left in it) one waits for them, the one of the lowest id (#520: none did);
-    /// a folder they are in covers them, and they cover a folder in them.
+    /// it, and covers those in it. Folders above each other (`d/a` here; on the drive `a`
+    /// removed, `d` left in it) each wait (#520: none did); a folder they are in covers them,
+    /// and they cover a folder in them.
     #[test]
-    fn of_folders_above_each_other_one_waits_for_what_another_page_plans() {
+    fn folders_above_each_other_wait_for_what_another_page_plans() {
         let (top, d, a, in_a) = (id(1), id(2), id(3), id(4));
         let root = NodeId::ROOT;
         // Gone from the drive, both: `d` covers `a`.
         assert_eq!(going(&[(d, root), (a, d)], &[]), [d]);
         // `d` in `a` on the drive: above each other.
         let d_in_a = [(d, a)];
-        assert_eq!(going(&[(d, root), (a, d)], &d_in_a), [d]);
-        // Whichever has the lowest id: here `a/d`, with `a` in `d` on the drive.
-        assert_eq!(going(&[(a, root), (d, a)], &[(a, d)]), [d]);
+        assert_eq!(going(&[(d, root), (a, d)], &d_in_a), [d, a]);
         // In a folder gone from the drive: that one covers both.
         let in_top = [(top, root), (d, top), (a, d)];
         assert_eq!(going(&in_top, &d_in_a), [top]);
         // A folder in them, gone from the drive: covered.
         let with_one_in = [(d, root), (a, d), (in_a, a)];
-        assert_eq!(going(&with_one_in, &d_in_a), [d]);
+        assert_eq!(going(&with_one_in, &d_in_a), [d, a]);
     }
 }

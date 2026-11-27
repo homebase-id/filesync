@@ -403,13 +403,11 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
    and is above a node of this page (then only it waits: its page covers the page's folders
    below it). Of the page's folders that may go, the topmost is asked what is below it, and
    covers those in it; of folders above each other (`d/a` here, `d` in what is in `a` on the
-   drive) none is the topmost, and one is asked for them, their subtrees being one (#520). A
-   held delete out of the dirty set
-   below it doesn't count: as in one page, it is
-   planned again only when a view reaches it. Planned apart, what is below read alive as
-   context and kept a deleted folder alive; or the folder's delete took along what changed
-   there (an edit lost); or its items went one by one before it, each an
-   item of its own in Recently deleted. A node that waits so is left as it is on every side,
+   drive) none is the topmost, and each is asked (#520). A held delete out of the dirty set
+   below it doesn't count: as in one page, it is planned again only when a view reaches it.
+   Planned apart, what is below read alive as context and kept a deleted folder alive; or
+   the folder's delete took along what changed there (an edit lost); or its items went one
+   by one before it, each an item of its own in Recently deleted. A node that waits so is left as it is on every side,
    nothing done to it (not even made where it isn't yet), and never brought back here as an
    orphan, nor its folder: its own page decides.
 
