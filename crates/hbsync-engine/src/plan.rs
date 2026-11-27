@@ -196,12 +196,13 @@ pub struct Input {
     /// in this plan, so it is left as it is (§6.5): context as it is, a repair moved it with
     /// what it was there (a tag added here lost).
     pub dirty_elsewhere: HashSet<NodeId>,
-    /// The page's topmost dirty folders, synced before, that may go, with something still to
-    /// plan below them, on any side, in another page: they wait for it, with everything of
-    /// the page below them, left as they are, and are planned with their whole dirty subtree
-    /// as a page of their own next (§6.5). Planned apart, what is below read alive as context
-    /// and kept a deleted folder alive (review 14 R1), or the folder's delete took along what
-    /// changed there (an edit lost).
+    /// The page's topmost dirty folders, synced before, that may go (of folders above each
+    /// other across sides, each), with something still to plan below them, on any side, in
+    /// another page: they wait for it, with everything of the page below them, left as they
+    /// are, and are planned with their whole dirty subtree as a page of their own next
+    /// (§6.5). Planned apart, what is below read alive as context and kept a deleted folder
+    /// alive (review 14 R1), or the folder's delete took along what changed there (an edit
+    /// lost).
     pub going: HashSet<NodeId>,
     /// The folders above the page's nodes, on any side, synced before, that may go and that
     /// another page plans: what of the page is below them waits for them the same way, so a
