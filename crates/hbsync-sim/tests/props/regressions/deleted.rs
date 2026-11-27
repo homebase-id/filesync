@@ -2850,3 +2850,73 @@ fn a_folder_let_go_here_keeps_its_base_while_what_waits_has_its_below_it() {
     assert_eq!(sim.local_paths(0), ["d", "d/c.txt"]);
     assert!(sim.local_paths(1).is_empty(), "{:?}", sim.local_paths(1));
 }
+
+/// Seed fed34a63 (`a_member_in_pages_that_crash_has_what_is_shared_with_it`, pages of 1; #520),
+/// the two computers alone: client 0 has `d/a` synced and `d/a/a`, a file it made and sent,
+/// the answer lost in a crash (no base of it here). On the drive another writer moves `d`
+/// into that file, and a delete of `d/a` stops after the folder: there `a` is removed with
+/// the file left in it, and `d` is in the file. So `d` is above `a` here and `a` above `d`
+/// there, through the file. A page of `d` and `a`, the file's page still to come, took
+/// neither for the topmost of its folders that may go (each was below the other), so neither
+/// waited for the file's page (`pages::dirty_elsewhere`), and the delete here of `a` took the
+/// file along, unchecked against any base: gone here with an edit of it, had there been one.
+/// Folders above each other each wait now, and are planned with the file.
+#[test]
+fn regression_folders_above_each_other_across_sides_wait_for_the_page_below_them() {
+    use Action::{CreateFile, CreateFolder, DeleteStopped, IntoFile};
+    let act = |client, action| Event::Act { client, action };
+    let (plan, step, crash) = (
+        |client| Event::Plan { client },
+        |client| Event::Step { client },
+        |client| Event::Crash { client },
+    );
+    let events = [
+        crash(0),
+        act(0, CreateFile { parent: 0, name: 9 }),
+        crash(0),
+        act(
+            0,
+            CreateFile {
+                parent: 0,
+                name: 11,
+            },
+        ),
+        act(
+            0,
+            CreateFolder {
+                parent: 0,
+                name: 13,
+            },
+        ),
+        crash(0),
+        crash(0),
+        plan(0),
+        crash(1),
+        crash(0),
+        act(0, CreateFolder { parent: 2, name: 0 }),
+        crash(0),
+        plan(1),
+        plan(0),
+        act(1, CreateFile { parent: 0, name: 6 }),
+        crash(0),
+        plan(1),
+        plan(1),
+        act(0, CreateFile { parent: 4, name: 0 }),
+        crash(0),
+        plan(0),
+        act(1, CreateFile { parent: 0, name: 8 }),
+        step(0),
+        plan(0),
+        step(0),
+        plan(0),
+        crash(0),
+        plan(1),
+        plan(1),
+        step(1),
+        act(0, IntoFile { pick: 8, file: 14 }),
+        act(0, DeleteStopped { pick: 5, done: 3 }),
+    ];
+    if let Err(e) = run_with(2, None, |sim| sim.with_small_pages(1), &events) {
+        panic!("{e}");
+    }
+}

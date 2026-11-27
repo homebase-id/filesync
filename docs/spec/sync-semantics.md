@@ -401,7 +401,10 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
    everything of the page below it (and the folders each of those is in now), when something
    below it on any side is dirty in another page, or when it is itself planned in another page
    and is above a node of this page (then only it waits: its page covers the page's folders
-   below it). A held delete out of the dirty set below it doesn't count: as in one page, it is
+   below it). Of the page's folders that may go, the topmost is asked what is below it, and
+   covers those in it; of folders above each other (`d/a` here, `d` in what is in `a` on the
+   drive) none is the topmost, and each is asked (#520). A held delete out of the dirty set
+   below it doesn't count: as in one page, it is
    planned again only when a view reaches it. Planned apart, what is below read alive as
    context and kept a deleted folder alive; or the folder's delete took along what changed
    there (an edit lost); or its items went one by one before it, each an

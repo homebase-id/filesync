@@ -3,7 +3,7 @@
 //! planned as pages of their own. The engine's rules, shared with the simulator's small-pages
 //! mode.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use hbsync_types::{NodeId, NodeKind};
 
@@ -59,12 +59,22 @@ pub fn dirty_elsewhere<P: Pending>(
             && may_go(input, n, &hidden)
     };
     let above = |n: NodeId| above_any_side(input, n);
-    let in_page: HashSet<NodeId> = input.dirty.iter().copied().filter(|&n| goes(n)).collect();
+    // Each of the page's folders that may go, with the folders above it on any side.
+    let in_page: HashMap<NodeId, Vec<NodeId>> = (input.dirty.iter().copied())
+        .filter(|&n| goes(n))
+        .map(|n| (n, above(n)))
+        .collect();
+    // The topmost: one below another of them is covered by that one. Not by one it is above
+    // itself, on another side (`d/a` here, `d` in what is in `a` on the drive): of folders
+    // above each other none is the topmost, and each is asked (#520: none was, none waited,
+    // and the delete here of one took along a file made here that another page plans).
+    let covered = |folder: NodeId, up: &[NodeId]| {
+        up.iter()
+            .any(|a| in_page.get(a).is_some_and(|its| !its.contains(&folder)))
+    };
     let mut going = HashSet::new();
-    for &folder in &in_page {
-        if !above(folder).iter().any(|a| in_page.contains(a))
-            && pending.below(folder, &input.dirty)?
-        {
+    for (&folder, up) in &in_page {
+        if !covered(folder, up) && pending.below(folder, &input.dirty)? {
             going.insert(folder);
         }
     }
@@ -365,7 +375,8 @@ pub fn subtree_any_side(trees: [&Tree; 3], folder: NodeId) -> BTreeSet<NodeId> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hbsync_types::Uuid;
+    use crate::scope::Scope;
+    use hbsync_types::{NodeState, Uuid};
 
     fn id(n: u128) -> NodeId {
         NodeId(Uuid::from_u128(n))
@@ -394,5 +405,69 @@ mod tests {
         let mut sent = losers_sent(losers, &left);
         sent.sort();
         assert_eq!(sent, [both, one_left]);
+    }
+
+    /// A test's dirty set, with the sides it is of, asked as the store is.
+    struct Dirty([Tree; 3], HashSet<NodeId>);
+
+    impl Pending for Dirty {
+        type Error = std::convert::Infallible;
+        fn among(&mut self, nodes: &[NodeId]) -> Result<HashSet<NodeId>, Self::Error> {
+            Ok((nodes.iter().copied())
+                .filter(|n| self.1.contains(n))
+                .collect())
+        }
+        fn below(&mut self, folder: NodeId, page: &BTreeSet<NodeId>) -> Result<bool, Self::Error> {
+            let [base, local, remote] = &self.0;
+            Ok(subtree_any_side([base, local, remote], folder)
+                .iter()
+                .any(|n| self.1.contains(n) && !page.contains(n)))
+        }
+    }
+
+    /// The folders of the page `d`, `d/a` (synced so, as here) that wait for another page,
+    /// which plans the file made here in `d/a`, with `drive` what the drive has of them.
+    fn going(drive: &[(NodeId, NodeState)]) -> HashSet<NodeId> {
+        let (d, a, file) = (id(1), id(2), id(3));
+        let mut input = Input::default();
+        for tree in [&mut input.base, &mut input.local] {
+            tree.insert(d, NodeState::folder(NodeId::ROOT, "d"));
+            tree.insert(a, NodeState::folder(d, "a"));
+        }
+        let made = NodeState {
+            kind: NodeKind::File,
+            ..NodeState::folder(a, "f")
+        };
+        input.local.insert(file, made);
+        for (node, state) in drive {
+            input.remote.insert(*node, state.clone());
+        }
+        input.dirty = [d, a].into();
+        let sides = [&input.base, &input.local, &input.remote].map(Tree::clone);
+        let mut pending = Dirty(sides, [d, a, file].into());
+        let (filter, scope) = (hbsync_local::Filter::default(), Scope::main());
+        let masking = Masking {
+            filter: &filter,
+            scope: &scope,
+            read_only: false,
+        };
+        let Ok(()) = dirty_elsewhere(&mut input, masking, &mut pending);
+        input.going
+    }
+
+    /// Of a page's folders that may go, the topmost waits for what another page plans below
+    /// it: it covers those in it. Of folders above each other (`d/a` here; on the drive `a`
+    /// removed, `d` left in it) none is the topmost, and each waits: none did, and the delete
+    /// here of `a` took the file along (#520).
+    #[test]
+    fn folders_above_each_other_wait_for_what_another_page_plans() {
+        let (d, a) = (id(1), id(2));
+        // Both gone from the drive: `d` covers `a`.
+        assert_eq!(going(&[]), [d].into());
+        assert_eq!(
+            going(&[(d, NodeState::folder(a, "d"))]),
+            [d, a].into(),
+            "each above the other"
+        );
     }
 }
