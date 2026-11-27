@@ -299,6 +299,31 @@ fn the_executable_bit_alone_sends_no_bytes() -> R {
     Ok(())
 }
 
+/// The bit's write is tried again (its answer was lost): the file's size, taken out of the
+/// bytes to send when the write was prepared, is taken out once (twice, the total wrapped).
+#[cfg(unix)]
+#[test]
+fn the_executable_bit_s_write_tried_again_counts_no_bytes() -> R {
+    use std::os::unix::fs::PermissionsExt;
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    a.write("run.sh", "echo")?;
+    a.write("other.txt", "twelve bytes")?;
+    a.sync()?;
+    fs::set_permissions(a.root.join("run.sh"), fs::Permissions::from_mode(0o755))?;
+    a.write("other.txt", "an edit of twenty b.")?;
+    a.remote.faults().lose_answer_named = Some("run.sh".into());
+    a.engine.scan_local()?;
+    a.engine.sync_once("2026-10-08")?;
+    let progress = a.engine.progress().get();
+    assert_eq!(progress.bytes_total, 20, "the edit's bytes: {progress:?}");
+    a.remote.faults().lose_answer_named = None;
+    a.sync()?;
+    assert!(common::x_on_drive(&server, "run.sh"));
+    assert!(a.engine.sync_once("2026-10-08")?.is_idle());
+    Ok(())
+}
+
 /// A conflict copy keeps the node's base for the run's remote writes (§5): this device's removal
 /// of a tag, made with its edit, reaches the drive's version that won the edits (the remote
 /// write merges its tags against the base). The conflict's download comes in the same run.

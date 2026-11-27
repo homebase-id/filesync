@@ -93,8 +93,9 @@ pub(crate) struct Executor<'a> {
     progress: Arc<Counters>,
     /// The transfers already in `progress`'s total.
     counted: HashSet<NodeId>,
-    /// The uploads whose header alone goes, the drive's file holding their bytes
-    /// ([`Executor::sends_header_alone`]): no file sent, to tell as one.
+    /// The nodes whose upload sends its header alone, as it was prepared last, the drive's
+    /// file holding their bytes ([`Executor::sends_header_alone`]): no bytes to send, and no
+    /// file uploaded to tell.
     headers_alone: HashSet<NodeId>,
     /// The folders something goes into, looked at this run: whether each is on disk the one
     /// its row has ([`Executor::target_path`]).
@@ -115,7 +116,7 @@ pub(crate) struct Executor<'a> {
 /// (the files in versions it can't read, read once a run; full since an earlier run).
 #[derive(Default)]
 struct Heard {
-    /// The drive is full: uploads of bytes wait (from the start, when it was lately).
+    /// The drive is full: uploads wait (from the start, when it was lately).
     full: bool,
     /// The files the drive has in a version this device can't read
     /// ([`ReadTx::unreadable_files`]), read at the run's first write to an existing file.
@@ -280,7 +281,7 @@ impl<'a> Executor<'a> {
         self
     }
 
-    /// Holds every upload of bytes: the drive was full lately (an earlier run's
+    /// Holds every upload: the drive was full lately (an earlier run's
     /// [`DriveNews::full`](crate::news::DriveNews::full)).
     pub(crate) fn with_full(mut self, full: bool) -> Self {
         self.heard.full = full;
@@ -650,7 +651,7 @@ impl<'a> Executor<'a> {
         self.progress.files_done.fetch_add(1, Ordering::Relaxed);
         let node = op.node();
         // Its header alone went: no file was sent, as for tags.
-        if self.headers_alone.remove(&node) {
+        if op.uploads() && self.headers_alone.contains(&node) {
             return Ok(());
         }
         let (path, bytes) = match gone {
@@ -680,12 +681,19 @@ impl<'a> Executor<'a> {
     /// The upload of `node` sends its header alone, the drive's file holding its bytes
     /// ([`Executor::prepare_upload`]): its `size`, counted as bytes to send
     /// ([`Executor::count_bytes`]), is none of the total, and it is no file uploaded to tell
-    /// ([`Executor::record`]).
+    /// ([`Executor::record`]). Once, however often it is prepared (a retry).
     fn sends_header_alone(&mut self, node: NodeId, size: u64) {
-        if self.counted.remove(&node) {
+        if self.headers_alone.insert(node) && self.counted.contains(&node) {
             self.progress.bytes_total.fetch_sub(size, Ordering::Relaxed);
         }
-        self.headers_alone.insert(node);
+    }
+
+    /// The upload of `node` sends its bytes: counted again where an earlier try of it sent
+    /// its header alone ([`Executor::sends_header_alone`]) and the drive has moved on since.
+    fn sends_bytes(&mut self, node: NodeId, size: u64) {
+        if self.headers_alone.remove(&node) && self.counted.contains(&node) {
+            self.progress.bytes_total.fetch_add(size, Ordering::Relaxed);
+        }
     }
 
     /// Adds the bytes of every transfer in the plan to `progress`'s total before any starts, so

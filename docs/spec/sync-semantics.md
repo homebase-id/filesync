@@ -36,7 +36,7 @@ holds the bytes, and keeps them (#519; they went up again, all of them: 200 MB, 
 live, 4.3 s against 0.13 s). So for any update of a file whose version on the drive holds
 the bytes the file has here: the same hash, by the same algorithm, and size. (Not yet a file
 restored over its version in Recently deleted, which sends them again.) It counts no bytes in
-a run's progress, isn't told as a file uploaded, and doesn't wait for room on a full drive.
+a run's progress and isn't told as a file uploaded; on a full drive it waits as other uploads.
 
 **The bit merges apart from the bytes, where it changed here alone.** A file whose bit
 changed here, its bytes the ones synced, is no conflict with what the drive did to it (§4), as

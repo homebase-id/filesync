@@ -132,35 +132,6 @@ fn a_full_drive_stops_the_queued_uploads() -> R {
     Ok(())
 }
 
-/// A full drive holds bytes, not a header: an executable bit changed alone goes up (the drive
-/// has the file's bytes, #519), while a new file and an edit wait.
-#[cfg(unix)]
-#[test]
-fn a_full_drive_lets_an_executable_bit_through() -> R {
-    use std::os::unix::fs::PermissionsExt;
-    let server = server();
-    let mut a = Client::new(&server, "a")?;
-    a.write("run.sh", vec![b'r'; 600])?;
-    a.write("doc.txt", vec![b'd'; 300])?;
-    a.sync()?;
-    server.lock().map_err(|_| "poisoned")?.set_quota(Some(1000));
-    a.write("new.txt", vec![b'n'; 600])?;
-    assert!(a.sync()?.full, "new.txt found the drive full");
-    // Held from the start now: the bit goes, the edit and the new file wait.
-    std::fs::set_permissions(
-        a.root.join("run.sh"),
-        std::fs::Permissions::from_mode(0o755),
-    )?;
-    a.write("doc.txt", vec![b'e'; 300])?;
-    a.remote.faults().uploads = 0;
-    let report = a.sync()?;
-    assert!(report.full && report.failed.is_empty(), "{report:?}");
-    assert!(common::x_on_drive(&server, "run.sh"), "the bit went up");
-    assert_eq!(a.remote.faults().uploads, 0, "no bytes were tried");
-    assert_eq!(report.pending, 2, "the edit and the new file: {report:?}");
-    Ok(())
-}
-
 /// A full drive holds what goes up, without a note per file; the rest of the sync goes on, and
 /// once there is room the held file goes up.
 #[test]

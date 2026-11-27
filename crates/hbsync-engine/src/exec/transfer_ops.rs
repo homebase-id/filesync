@@ -233,10 +233,8 @@ impl Executor<'_> {
         kind: NodeKind,
         tags: &Tags,
     ) -> Step<(Job, Ctx)> {
-        // No bytes go up once the drive is full; the run's other work goes on. (A new file
-        // here; one the drive has, once it is known to send bytes: below.)
-        let full = self.heard.full && kind == NodeKind::File;
-        if full && existing.is_none() {
+        // Nothing more goes up once the drive is full; the run's other work goes on.
+        if self.heard.full && kind == NodeKind::File {
             return Err(Outcome::waiting("the drive is out of storage"));
         }
         let os = self.folder.os;
@@ -359,10 +357,7 @@ impl Executor<'_> {
             let after = remote::After::Updated;
             return Ok(remote::meta_job(meta, target, Some(known), from, after));
         }
-        self.headers_alone.remove(&node);
-        if full {
-            return Err(Outcome::waiting("the drive is out of storage"));
-        }
+        self.sends_bytes(node, row.fingerprint.size);
         let job = Job::Upload {
             meta,
             target,

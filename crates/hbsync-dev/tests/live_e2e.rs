@@ -224,8 +224,8 @@ fn scenarios(run: &str, a: &mut Client, b: &mut Client) -> Res<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let executable = |c: &Client| {
-            fs::metadata(c.root.join(at("big.bin"))).map(|m| m.permissions().mode() & 0o111 != 0)
+        let executable = |c: &Client| -> Res<bool> {
+            Ok(hbsync_platform::stat(&c.root.join(at("big.bin")))?.executable == Some(true))
         };
         fs::set_permissions(
             a.root.join(at("big.bin")),
