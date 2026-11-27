@@ -641,6 +641,58 @@ fn executable_bit_change_is_a_change() -> R {
     Ok(())
 }
 
+/// So is one made on a file that moved with its folder since the last scan (#529). The move
+/// is the folder's, not the file's, so nothing else marks the file; and its row takes the bit
+/// and its new change time, so no later scan looked again: the bit never synced.
+#[cfg(unix)]
+#[test]
+fn an_executable_bit_changed_with_its_folders_move_is_a_change() -> R {
+    use std::os::unix::fs::PermissionsExt;
+    let mut f = Fixture::new()?;
+    f.write("dir/run.sh", b"#!/bin/sh")?;
+    f.write("dir/other", b"o")?;
+    f.scan()?;
+    let (folder, run) = (f.node("dir")?, f.node("dir/run.sh")?);
+    fs::rename(f.root().join("dir"), f.root().join("moved"))?;
+    let at = f.root().join("moved/run.sh");
+    fs::set_permissions(at, fs::Permissions::from_mode(0o755))?;
+    let (report, mut dirty) = f.scan()?;
+    assert_eq!(
+        report.hashed, 0,
+        "its bytes are the ones hashed: {report:?}"
+    );
+    let mut want = vec![folder, run];
+    dirty.sort();
+    want.sort();
+    assert_eq!(dirty, want, "the folder for its move, the file for its bit");
+    assert_eq!(f.node("moved/run.sh")?, run);
+    let (_, dirty) = f.scan()?;
+    assert!(dirty.is_empty(), "{dirty:?}");
+    Ok(())
+}
+
+/// The same where the moved file is known by its bytes, not its file id: in a folder that
+/// moved, a copy with the bit set took the file's place (a new file id, the same name in the
+/// same folder: no move of its own).
+#[cfg(unix)]
+#[test]
+fn an_executable_bit_changed_on_a_copy_in_a_moved_folder_is_a_change() -> R {
+    use std::os::unix::fs::PermissionsExt;
+    let mut f = Fixture::new()?;
+    f.write("dir/run.sh", b"#!/bin/sh a script of its own")?;
+    f.scan()?;
+    let run = f.node("dir/run.sh")?;
+    fs::rename(f.root().join("dir"), f.root().join("moved"))?;
+    f.write("moved/copy", b"#!/bin/sh a script of its own")?;
+    let copy = f.root().join("moved/copy");
+    fs::set_permissions(&copy, fs::Permissions::from_mode(0o755))?;
+    fs::rename(copy, f.root().join("moved/run.sh"))?;
+    let (_, dirty) = f.scan()?;
+    assert_eq!(f.node("moved/run.sh")?, run, "the same node, by its bytes");
+    assert!(dirty.contains(&run), "for its bit: {dirty:?}");
+    Ok(())
+}
+
 mod targeted {
     use super::*;
     use hbsync_local::rescan_dirs;

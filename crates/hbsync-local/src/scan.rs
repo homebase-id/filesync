@@ -692,7 +692,7 @@ fn moved_onto(
 fn differs(row: &LocalRow, meta: &LocalMeta, opts: &ScanOptions) -> bool {
     kind_of(meta) != row.kind
         || row.fingerprint != meta.fingerprint()
-        || (row.kind == NodeKind::File && meta.executable.is_some() && meta.executable != row.executable)
+        || x_changed(row, meta)
         // A file that couldn't be hashed last time gets another try (not one to be hashed on
         // send), and so do tags.
         || (row.kind == NodeKind::File && row.hash.is_none() && !sends_hash(row, opts))
@@ -854,7 +854,10 @@ fn resolve(
     };
 
     // A row for what the walk found at `path`, with its tags (carried over from `old` when
-    // they can't have changed or can't be read now), and whether its tags changed.
+    // they can't have changed or can't be read now), and whether its tags or its executable
+    // bit changed: what a row's item may have changed besides its bytes, wherever it is found
+    // (in place, or moved: a file that moved with its folder is no change of its own, and its
+    // row's new change time hides the bit from every later scan, #529).
     let row_from = |path: &RelPath,
                     meta: &LocalMeta,
                     hash: Option<ContentHash>,
@@ -867,7 +870,7 @@ fn resolve(
             }
             _ => tags::read(&path.to_native(root)).or_else(|| old.and_then(|o| o.tags.clone())),
         };
-        let changed = old.is_some_and(|o| tags_changed(&o.tags, &tags));
+        let changed = old.is_some_and(|o| tags_changed(&o.tags, &tags) || x_changed(o, meta));
         (row_from(path, node, meta, hash, tags), changed)
     };
 
@@ -916,7 +919,7 @@ fn resolve(
             removed.push(row);
             continue;
         }
-        let (mut new, tags_changed) = row_from(&row.path, &meta, row.hash, row.node, Some(&row));
+        let (mut new, meta_changed) = row_from(&row.path, &meta, row.hash, row.node, Some(&row));
         let mut content_changed = false;
         // Still new: still sent as it is then (changed, it is sent again), unless it is being
         // written (then it waits, as a file not hashed yet).
@@ -937,10 +940,7 @@ fn resolve(
             };
             content_changed = new.hash.is_none() || new.hash != row.hash;
         }
-        let x_changed = row.kind == NodeKind::File
-            && meta.executable.is_some()
-            && meta.executable != row.executable;
-        if content_changed || x_changed || tags_changed {
+        if content_changed || meta_changed {
             report.modified += 1;
             plan.dirty.push(row.node);
         }
@@ -980,10 +980,7 @@ fn resolve(
             continue;
         };
         let old = &removed[i];
-        let (mut new, tags_changed) = row_from(&path, &meta, old.hash, old.node, Some(old));
-        if tags_changed {
-            plan.dirty.push(old.node);
-        }
+        let (mut new, meta_changed) = row_from(&path, &meta, old.hash, old.node, Some(old));
         if old.kind == NodeKind::File {
             let same = old.fingerprint.same_after_rename(&meta);
             // Where inode numbers get recycled, a matching id plus size and mtime is still not
@@ -1009,7 +1006,11 @@ fn resolve(
                 }
             }
         }
+        // The row's item it is: what changed of its tags or its bit is its own.
         matched[i] = true;
+        if meta_changed {
+            plan.dirty.push(old.node);
+        }
         if old.kind == NodeKind::Folder {
             moved_folders.insert(old.path.clone(), path.clone());
         }
@@ -1097,8 +1098,8 @@ fn resolve(
             matched[i] = true;
             let old = &removed[i];
             moved.push((old.clone(), path.clone()));
-            let (new, tags_changed) = row_from(&path, &meta, hash, old.node, Some(old));
-            if tags_changed {
+            let (new, meta_changed) = row_from(&path, &meta, hash, old.node, Some(old));
+            if meta_changed {
                 plan.dirty.push(old.node);
             }
             plan.put_rows.push(new);
@@ -1165,6 +1166,12 @@ fn parent_node(
         return Ok(Some(*node));
     }
     db.read(|s| s.local_node_at(&parent))
+}
+
+/// Whether the file of `row` has another executable bit on disk (`meta`) than its row: a
+/// change to sync, at its place or moved (where the OS has such a bit).
+fn x_changed(row: &LocalRow, meta: &LocalMeta) -> bool {
+    row.kind == NodeKind::File && meta.executable.is_some() && meta.executable != row.executable
 }
 
 /// Whether tags read as `new` differ from `old`. No tags where none were known (no tags on this
