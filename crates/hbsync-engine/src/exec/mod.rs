@@ -95,7 +95,8 @@ pub(crate) struct Executor<'a> {
     counted: HashSet<NodeId>,
     /// The transfer being recorded moved none of its bytes, the other side holding them: an
     /// upload that sent its header alone ([`Executor::prepare_upload`]), a download that set
-    /// the executable bit in place ([`Executor::bit_in_place`]). Set for that one record.
+    /// the executable bit in place ([`Executor::bit_in_place`]). For the operation handled
+    /// next, which takes it ([`Executor::handle`]).
     no_bytes: bool,
     /// The folders something goes into, looked at this run: whether each is on disk the one
     /// its row has ([`Executor::target_path`]).
@@ -417,12 +418,7 @@ impl<'a> Executor<'a> {
                         },
                         target,
                     ),
-                    // (A download with nothing to fetch says so for its record:
-                    // `bit_in_place`.)
-                    Err(outcome) => {
-                        self.handle(op, attempts, outcome, gone)?;
-                        self.no_bytes = false;
-                    }
+                    Err(outcome) => self.handle(op, attempts, outcome, gone)?,
                 }
                 continue;
             }
@@ -545,6 +541,8 @@ impl<'a> Executor<'a> {
         outcome: Outcome,
         gone: Option<String>,
     ) -> Result<(), StateError> {
+        // What it says of its record, if it has one: taken here, so it tells no other's.
+        let no_bytes = std::mem::take(&mut self.no_bytes);
         let (outcome, mut record) = self.refusals_after(&op, outcome)?;
         self.placement_ended(&op, &outcome)?;
         self.schedule.ended(&op, &outcome);
@@ -552,12 +550,12 @@ impl<'a> Executor<'a> {
         self.on_their_way.ended(&op, &outcome);
         match outcome {
             Outcome::Done => {
-                self.record(&op, gone)?;
+                self.record(&op, gone, no_bytes)?;
                 self.report.done += 1;
                 self.settle_done(&op)?;
             }
             Outcome::Settled => {
-                self.record(&op, gone)?;
+                self.record(&op, gone, no_bytes)?;
                 self.report.done += 1;
             }
             Outcome::Backoff(why) => self.retried(op, attempts, true, why)?,
@@ -649,7 +647,7 @@ impl<'a> Executor<'a> {
 
     /// Adds what `op` did to the report, for people: transfers, moves and deletes. `gone`:
     /// the path of an item it removed, taken before it ran (its rows may be gone now).
-    fn record(&mut self, op: &Op, gone: Option<String>) -> Result<(), StateError> {
+    fn record(&mut self, op: &Op, gone: Option<String>, no_bytes: bool) -> Result<(), StateError> {
         let Some(kind) = activity::kind_of(op) else {
             return Ok(());
         };
@@ -661,7 +659,7 @@ impl<'a> Executor<'a> {
                 Ok(match s.local_by_node(node)? {
                     // None of the bytes counted for it moved (`count_bytes`): they are done,
                     // and none are told.
-                    Some(row) if self.no_bytes => {
+                    Some(row) if no_bytes => {
                         let counted = row.fingerprint.size;
                         self.progress
                             .bytes_done
@@ -866,7 +864,6 @@ impl<'a> Executor<'a> {
             self.no_bytes = op.uploads() && matches!(ctx, Ctx::Meta { .. });
             let outcome = self.commit(ctx, job, result).unwrap_or_else(|o| o);
             self.handle(op, attempts, outcome, gone)?;
-            self.no_bytes = false;
         }
         Ok(())
     }

@@ -183,7 +183,6 @@ impl Executor<'_> {
         // there is to take, and it is set on the file as it is, nothing fetched (#526). Not
         // where the download does more (tags to write, a bit to keep), nor without a base.
         if let Some(row) = &current
-            && replace
             && !keep_x
             && base_at.is_some()
             && row.path == target
