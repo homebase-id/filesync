@@ -93,10 +93,9 @@ pub(crate) struct Executor<'a> {
     progress: Arc<Counters>,
     /// The transfers already in `progress`'s total.
     counted: HashSet<NodeId>,
-    /// The nodes whose upload sends its header alone, as it was prepared last, the drive's
-    /// file holding their bytes ([`Executor::sends_header_alone`]): no bytes to send, and no
-    /// file uploaded to tell.
-    headers_alone: HashSet<NodeId>,
+    /// The upload being recorded sent its header alone, the drive's file holding its bytes
+    /// ([`Executor::prepare_upload`]): set for that one record ([`Executor::commit_ran`]).
+    header_alone: bool,
     /// The folders something goes into, looked at this run: whether each is on disk the one
     /// its row has ([`Executor::target_path`]).
     parents: HashMap<NodeId, bool>,
@@ -236,7 +235,7 @@ impl<'a> Executor<'a> {
             stop: None,
             progress: Arc::default(),
             counted: HashSet::new(),
-            headers_alone: HashSet::new(),
+            header_alone: false,
             parents: HashMap::new(),
             refusals: Refusals::default(),
             on_their_way: OnTheirWay::default(),
@@ -650,14 +649,19 @@ impl<'a> Executor<'a> {
         };
         self.progress.files_done.fetch_add(1, Ordering::Relaxed);
         let node = op.node();
-        // Its header alone went: no file was sent, as for tags.
-        if op.uploads() && self.headers_alone.contains(&node) {
-            return Ok(());
-        }
         let (path, bytes) = match gone {
             Some(path) => (Some(path), 0),
             None => self.db.read(|s| {
                 Ok(match s.local_by_node(node)? {
+                    // An upload that sent its header alone sent none of the bytes counted
+                    // for it (`count_bytes`): they are done, and none are told.
+                    Some(row) if self.header_alone => {
+                        let counted = row.fingerprint.size;
+                        self.progress
+                            .bytes_done
+                            .fetch_add(counted, Ordering::Relaxed);
+                        (Some(row.path.as_str().to_owned()), 0)
+                    }
                     Some(row) if kind.moves_bytes() => {
                         (Some(row.path.as_str().to_owned()), row.fingerprint.size)
                     }
@@ -676,24 +680,6 @@ impl<'a> Executor<'a> {
             });
         }
         Ok(())
-    }
-
-    /// The upload of `node` sends its header alone, the drive's file holding its bytes
-    /// ([`Executor::prepare_upload`]): its `size`, counted as bytes to send
-    /// ([`Executor::count_bytes`]), is none of the total, and it is no file uploaded to tell
-    /// ([`Executor::record`]). Once, however often it is prepared (a retry).
-    fn sends_header_alone(&mut self, node: NodeId, size: u64) {
-        if self.headers_alone.insert(node) && self.counted.contains(&node) {
-            self.progress.bytes_total.fetch_sub(size, Ordering::Relaxed);
-        }
-    }
-
-    /// The upload of `node` sends its bytes: counted again where an earlier try of it sent
-    /// its header alone ([`Executor::sends_header_alone`]) and the drive has moved on since.
-    fn sends_bytes(&mut self, node: NodeId, size: u64) {
-        if self.headers_alone.remove(&node) && self.counted.contains(&node) {
-            self.progress.bytes_total.fetch_add(size, Ordering::Relaxed);
-        }
     }
 
     /// Adds the bytes of every transfer in the plan to `progress`'s total before any starts, so
@@ -870,8 +856,11 @@ impl<'a> Executor<'a> {
             }
         }
         for (op, attempts, gone, ctx, job, result) in rest {
+            // An upload whose job was a header write (`prepare_upload`): recorded as one.
+            self.header_alone = op.uploads() && matches!(ctx, Ctx::Meta { .. });
             let outcome = self.commit(ctx, job, result).unwrap_or_else(|o| o);
             self.handle(op, attempts, outcome, gone)?;
+            self.header_alone = false;
         }
         Ok(())
     }

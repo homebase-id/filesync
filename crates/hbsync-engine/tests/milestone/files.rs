@@ -137,10 +137,7 @@ fn executable_bit_syncs() -> R {
     fs::set_permissions(a.root.join("run.sh"), fs::Permissions::from_mode(0o755))?;
     a.sync()?;
     b.sync()?;
-    assert_eq!(
-        fs::metadata(b.root.join("run.sh"))?.permissions().mode() & 0o111,
-        0o111
-    );
+    assert!(common::executable(&b.root.join("run.sh"))?);
     Ok(())
 }
 

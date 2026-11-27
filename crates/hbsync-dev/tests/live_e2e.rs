@@ -232,10 +232,8 @@ fn scenarios(run: &str, a: &mut Client, b: &mut Client) -> Res<()> {
             fs::Permissions::from_mode(0o755),
         )?;
         let report = a.sync()?;
-        assert!(
-            report.synced.is_empty(),
-            "no file uploaded for the bit: {report:?}"
-        );
+        let bytes: u64 = report.synced.iter().map(|s| s.bytes).sum();
+        assert_eq!(bytes, 0, "no bytes sent for the bit: {report:?}");
         b.sync()?;
         assert!(executable(b)?, "the bit arrived");
         assert!(b.read(&at("big.bin"))? == big, "with the bytes it had");

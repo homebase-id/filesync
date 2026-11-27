@@ -353,11 +353,9 @@ impl Executor<'_> {
             && (mirror.as_ref().and_then(|m| m.file))
                 .is_some_and(|f| (f.hash, f.size) == (known, size))
         {
-            self.sends_header_alone(node, row.fingerprint.size);
             let after = remote::After::Updated;
             return Ok(remote::meta_job(meta, target, Some(known), from, after));
         }
-        self.sends_bytes(node, row.fingerprint.size);
         let job = Job::Upload {
             meta,
             target,

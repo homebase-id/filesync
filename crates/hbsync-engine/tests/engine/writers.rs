@@ -243,8 +243,8 @@ fn the_executable_bit_stays_where_its_file_is_made_again_with_the_same_bytes() -
     assert!(report.failed.is_empty(), "{report:?}");
     assert!(report.conflicts.is_empty(), "{report:?}");
     assert_eq!(a.read_text("run.sh")?, "echo old");
-    let mode = fs::metadata(a.root.join("run.sh"))?.permissions().mode();
-    assert!(mode & 0o111 != 0, "kept where it was held");
+    let kept = common::executable(&a.root.join("run.sh"))?;
+    assert!(kept, "kept where it was held");
     assert!(on_drive(), "and sent up");
     let now = common::header_named(&server, "run.sh");
     assert_eq!(now.node(), Some(node), "the same node: nothing detached");
@@ -254,9 +254,9 @@ fn the_executable_bit_stays_where_its_file_is_made_again_with_the_same_bytes() -
 }
 
 /// A change of the executable bit alone sends no bytes (#519): the drive holds the file's, so
-/// its header alone is written, as a rename's; no bytes count as to send, and no file is told
-/// as uploaded. Set and taken off again, the file stays the same one with the same bytes, and
-/// the other device has the bit. An edit after it sends its bytes, and is told.
+/// its header alone is written, as a rename's; the bytes the run counted for it are done, and
+/// it is told as sent with none. Set and taken off again, the file stays the same one with the
+/// same bytes, and the other device has the bit. An edit after it sends its bytes.
 #[cfg(unix)]
 #[test]
 fn the_executable_bit_alone_sends_no_bytes() -> R {
@@ -276,9 +276,10 @@ fn the_executable_bit_alone_sends_no_bytes() -> R {
         assert!(report.failed.is_empty(), "{report:?}");
         assert_eq!(a.remote.faults().uploads, 0, "no bytes sent for the bit");
         let progress = a.engine.progress().get();
-        assert_eq!((progress.bytes_done, progress.bytes_total), (0, 0));
+        assert_eq!((progress.bytes_done, progress.bytes_total), (4, 4));
         assert_eq!((progress.files_done, progress.files_total), (1, 1));
-        assert!(report.synced.is_empty(), "no file uploaded: {report:?}");
+        let told: Vec<_> = report.synced.iter().map(|s| (s.kind, s.bytes)).collect();
+        assert_eq!(told, [(hbsync_types::activity::SyncedKind::Uploaded, 0)]);
         let now = common::header_named(&server, "run.sh");
         assert_eq!(common::x_on_drive(&server, "run.sh"), x);
         assert_eq!(now.file_id, was.file_id, "the same file");
@@ -293,34 +294,10 @@ fn the_executable_bit_alone_sends_no_bytes() -> R {
     a.write("run.sh", "echo more")?;
     let report = a.sync()?;
     assert_eq!(a.remote.faults().uploads, 1, "the edit's bytes");
-    assert_eq!(report.synced.len(), 1, "{report:?}");
+    let told: Vec<u64> = report.synced.iter().map(|s| s.bytes).collect();
+    assert_eq!(told, [9], "{report:?}");
     b.sync()?;
     assert_eq!(b.read_text("run.sh")?, "echo more");
-    Ok(())
-}
-
-/// The bit's write is tried again (its answer was lost): the file's size, taken out of the
-/// bytes to send when the write was prepared, is taken out once (twice, the total wrapped).
-#[cfg(unix)]
-#[test]
-fn the_executable_bit_s_write_tried_again_counts_no_bytes() -> R {
-    use std::os::unix::fs::PermissionsExt;
-    let server = server();
-    let mut a = Client::new(&server, "a")?;
-    a.write("run.sh", "echo")?;
-    a.write("other.txt", "twelve bytes")?;
-    a.sync()?;
-    fs::set_permissions(a.root.join("run.sh"), fs::Permissions::from_mode(0o755))?;
-    a.write("other.txt", "an edit of twenty b.")?;
-    a.remote.faults().lose_answer_named = Some("run.sh".into());
-    a.engine.scan_local()?;
-    a.engine.sync_once("2026-10-08")?;
-    let progress = a.engine.progress().get();
-    assert_eq!(progress.bytes_total, 20, "the edit's bytes: {progress:?}");
-    a.remote.faults().lose_answer_named = None;
-    a.sync()?;
-    assert!(common::x_on_drive(&server, "run.sh"));
-    assert!(a.engine.sync_once("2026-10-08")?.is_idle());
     Ok(())
 }
 
