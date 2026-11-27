@@ -132,7 +132,7 @@ impl Executor<'_> {
         tags: &Tags,
         drive: Option<&DriveVersion>,
     ) -> Step<(Job, Ctx)> {
-        let (mirror, current, base) = self.db.read(|s| {
+        let (mirror, mut current, base) = self.db.read(|s| {
             Ok((
                 s.get_mirror(node)?,
                 s.local_by_node(node)?,
@@ -184,8 +184,9 @@ impl Executor<'_> {
         // executable bit is all there is to take, and it is set on the file as it is, nothing
         // fetched (#526). Not where the download does more: tags the version changed (the
         // base records what a download writes of them) or that the item lacks, a bit to keep,
-        // a node without a base. Where the file doesn't take the bit so, the download runs.
-        if let (Some(row), Some(base)) = (&current, &base)
+        // a node without a base. Where the file doesn't take the bit so, the download runs,
+        // over the item as that left it.
+        if let (Some(row), Some(base)) = (&mut current, &base)
             && !keep_x
             && row.path == target
             && (row.hash, row.fingerprint.size) == (Some(expected), file.size)

@@ -342,16 +342,10 @@ impl Executor<'_> {
         // Writing tags moves the change time only (a folder's mtime moves with its children).
         // If anything else moved, the item changed meanwhile: the old row stays, and the
         // rescan looks at it.
-        let meta = match hbsync_platform::stat(&abs) {
-            Ok(m) => m,
-            Err(e) => return Ok(io_outcome(e)),
+        let meta = match self.after_metadata_write(&row, &abs) {
+            Ok(meta) => meta,
+            Err(outcome) => return Ok(outcome),
         };
-        let fp = row.fingerprint;
-        let same = meta.file_id == fp.file_id
-            && (row.kind == NodeKind::Folder || fp.same_after_rename(&meta));
-        if !same {
-            return Ok(rescan(&mut self.report, &row.path));
-        }
         // Not read back either: the row stays as the scan read it, its change time too, so the
         // scan reads whatever changed since (a tag the user added meanwhile).
         if unread {
@@ -448,43 +442,63 @@ impl Executor<'_> {
         })
     }
 
+    /// The item of `row`, at `abs`, as it is after a write of its metadata here (tags, the
+    /// executable bit), which moves its change time only: still the row's item, a file with
+    /// the row's size and time. Anything else changed meanwhile, and it is read again.
+    fn after_metadata_write(
+        &mut self,
+        row: &LocalRow,
+        abs: &std::path::Path,
+    ) -> Result<hbsync_platform::LocalMeta, Outcome> {
+        let meta = hbsync_platform::stat(abs).map_err(io_outcome)?;
+        let fp = row.fingerprint;
+        let same = meta.file_id == fp.file_id
+            && (row.kind == NodeKind::Folder || fp.same_after_rename(&meta));
+        match same {
+            true => Ok(meta),
+            false => Err(rescan(&mut self.report, &row.path)),
+        }
+    }
+
     /// Gives the file of `row`, which holds the bytes of the drive's version `acted`, that
     /// version's executable bit (`x`, as this device holds it under `name`: §1) where it is: a
     /// download with nothing to fetch ([`Executor::prepare_download`]). The file stays the
     /// one it is; its row takes the change time the bit moved, and the base settles at the
-    /// version. `None` where the file doesn't take the bit so (the write fails: another
-    /// user's file; or it doesn't hold: a volume without modes, a file no one may read): the
-    /// download puts a file of its own there, as before. A file that changed otherwise
-    /// meanwhile, or isn't the one its row has, is read again.
+    /// version. `None` where the file doesn't take the bit so: the download puts a file of
+    /// its own there, as before. Either the write fails (another user's file), nothing
+    /// changed; or it doesn't hold (a volume without modes, a file no one may read), and
+    /// `row` is the item as the write left it, for the download to go over. A file that
+    /// changed otherwise, before the write or during it, is read again.
     pub(super) fn bit_in_place(
         &mut self,
-        row: &LocalRow,
+        row: &mut LocalRow,
         name: &str,
         x: bool,
         acted: &DriveVersion,
     ) -> Step<Option<Outcome>> {
+        // Looked at once more right before the write: rows were read since the first look.
+        if !self.on_disk_unchanged(row) {
+            return Ok(Some(rescan(&mut self.report, &row.path)));
+        }
         let at = self.disk.abs(&row.path);
         let x = executable_on_disk(self.folder.os, name, x);
         if ops::set_executable(&at, x).is_err() {
             return Ok(None);
         }
-        let meta = match hbsync_platform::stat(&at) {
-            Ok(m) => m,
-            Err(e) => return Ok(Some(io_outcome(e))),
+        let meta = match self.after_metadata_write(row, &at) {
+            Ok(meta) => meta,
+            Err(outcome) => return Ok(Some(outcome)),
         };
-        // The bit's write moves the change time only, as a tag's (`local_tags`).
-        let fp = row.fingerprint;
-        if meta.file_id != fp.file_id || !fp.same_after_rename(&meta) {
-            return Ok(Some(rescan(&mut self.report, &row.path)));
-        }
-        if meta.executable != Some(x) {
-            return Ok(None);
-        }
         let refreshed = LocalRow {
             fingerprint: meta.fingerprint(),
             executable: meta.executable,
             ..row.clone()
         };
+        if meta.executable != Some(x) {
+            self.db.write(|s| s.folder().put_local(&refreshed))?;
+            *row = refreshed;
+            return Ok(None);
+        }
         let how = Settle::acted(row.node, Some(acted), TagWrite::Nothing);
         let done = self.finish(&[how], |s| s.folder().put_local(&refreshed))?;
         // None of the bytes counted for the download were fetched (`Executor::record`).
