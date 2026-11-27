@@ -981,9 +981,6 @@ fn resolve(
         };
         let old = &removed[i];
         let (mut new, meta_changed) = row_from(&path, &meta, old.hash, old.node, Some(old));
-        if meta_changed {
-            plan.dirty.push(old.node);
-        }
         if old.kind == NodeKind::File {
             let same = old.fingerprint.same_after_rename(&meta);
             // Where inode numbers get recycled, a matching id plus size and mtime is still not
@@ -1009,7 +1006,11 @@ fn resolve(
                 }
             }
         }
+        // The row's item it is: what changed of its tags or its bit is its own.
         matched[i] = true;
+        if meta_changed {
+            plan.dirty.push(old.node);
+        }
         if old.kind == NodeKind::Folder {
             moved_folders.insert(old.path.clone(), path.clone());
         }

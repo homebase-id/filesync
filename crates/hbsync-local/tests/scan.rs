@@ -671,6 +671,28 @@ fn an_executable_bit_changed_with_its_folders_move_is_a_change() -> R {
     Ok(())
 }
 
+/// The same where the moved file is known by its bytes, not its file id: in a folder that
+/// moved, a copy with the bit set took the file's place (a new file id, the same name in the
+/// same folder: no move of its own).
+#[cfg(unix)]
+#[test]
+fn an_executable_bit_changed_on_a_copy_in_a_moved_folder_is_a_change() -> R {
+    use std::os::unix::fs::PermissionsExt;
+    let mut f = Fixture::new()?;
+    f.write("dir/run.sh", b"#!/bin/sh a script of its own")?;
+    f.scan()?;
+    let run = f.node("dir/run.sh")?;
+    fs::rename(f.root().join("dir"), f.root().join("moved"))?;
+    f.write("moved/copy", b"#!/bin/sh a script of its own")?;
+    let copy = f.root().join("moved/copy");
+    fs::set_permissions(&copy, fs::Permissions::from_mode(0o755))?;
+    fs::rename(copy, f.root().join("moved/run.sh"))?;
+    let (_, dirty) = f.scan()?;
+    assert_eq!(f.node("moved/run.sh")?, run, "the same node, by its bytes");
+    assert!(dirty.contains(&run), "for its bit: {dirty:?}");
+    Ok(())
+}
+
 mod targeted {
     use super::*;
     use hbsync_local::rescan_dirs;

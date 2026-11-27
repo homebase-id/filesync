@@ -25,44 +25,56 @@ fn randomized_two_client_convergence() -> R {
 
 /// The users set and take off executable bits too, on either client, between their other
 /// work and the syncs, beside edits, moves and deletes of the same files. The clients converge
-/// without loss, and each file has the bit alike on both. (Seed 393: a bit changed on a file
-/// whose folder was moved since the last scan never went up, #529.)
+/// without loss, and each file has the bit alike on both. (Not asked: that it is the bit a
+/// user set last; a bit and a delete, or two bits, meet as sync semantics §1 and §4 say.)
 #[cfg(unix)]
 #[test]
 fn randomized_executable_bits() -> R {
-    use std::os::unix::fs::PermissionsExt;
-    let flip = |root: &Path, rng: &mut Rng| -> std::io::Result<()> {
+    each_seed(seeds(), executable_bits_of).map(drop)
+}
+
+/// Seed 393 of [`randomized_executable_bits`]: a bit changed on a file whose folder was moved
+/// since the last scan was written into its row and never went up (#529).
+#[cfg(unix)]
+#[test]
+fn regression_executable_bits_seed_393() -> R {
+    each_seed([393], executable_bits_of).map(drop)
+}
+
+/// One seed of [`randomized_executable_bits`].
+#[cfg(unix)]
+fn executable_bits_of(seed: u64) -> Res<()> {
+    let flip = |root: &Path, rng: &mut Rng| -> Res<()> {
         let (_, files) = entries(root);
         if files.is_empty() {
             return Ok(());
         }
         let at = root.join(&files[rng.below(files.len())]);
-        let mode = fs::metadata(&at)?.permissions().mode();
-        fs::set_permissions(at, fs::Permissions::from_mode(mode ^ 0o111))
+        Ok(hbsync_platform::ops::set_executable(
+            &at,
+            !common::executable(&at)?,
+        )?)
     };
-    each_seed(seeds(), |seed| {
-        let server = server();
-        let [mut a, mut b] = pair(&server)?;
-        let mut rng = Rng(seed);
-        let mut ledger = Ledger::default();
-        for _ in 0..40 {
-            match rng.below(6) {
-                0 => act(&a.root, &mut rng, &mut ledger)?,
-                1 => act(&b.root, &mut rng, &mut ledger)?,
-                2 => flip(&a.root, &mut rng)?,
-                3 => flip(&b.root, &mut rng)?,
-                4 => sync(&mut a, &mut ledger)?,
-                _ => sync(&mut b, &mut ledger)?,
-            }
+    let server = server();
+    let [mut a, mut b] = pair(&server)?;
+    let mut rng = Rng(seed);
+    let mut ledger = Ledger::default();
+    for _ in 0..40 {
+        match rng.below(6) {
+            0 => act(&a.root, &mut rng, &mut ledger)?,
+            1 => act(&b.root, &mut rng, &mut ledger)?,
+            2 => flip(&a.root, &mut rng)?,
+            3 => flip(&b.root, &mut rng)?,
+            4 => sync(&mut a, &mut ledger)?,
+            _ => sync(&mut b, &mut ledger)?,
         }
-        converged(&mut a, &mut b, &ledger, &server)?;
-        let (_, files) = entries(&a.root);
-        for file in files {
-            let on = |c: &Client| common::executable(&c.root.join(&file));
-            assert_eq!(on(&a)?, on(&b)?, "the bit of {file:?} differs");
-        }
-        Ok(())
-    })?;
+    }
+    converged(&mut a, &mut b, &ledger, &server)?;
+    let (_, files) = entries(&a.root);
+    for file in files {
+        let on = |c: &Client| common::executable(&c.root.join(&file));
+        assert_eq!(on(&a)?, on(&b)?, "the bit of {file:?} differs");
+    }
     Ok(())
 }
 
