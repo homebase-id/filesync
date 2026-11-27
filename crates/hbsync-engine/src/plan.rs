@@ -196,7 +196,8 @@ pub struct Input {
     /// in this plan, so it is left as it is (§6.5): context as it is, a repair moved it with
     /// what it was there (a tag added here lost).
     pub dirty_elsewhere: HashSet<NodeId>,
-    /// The page's topmost dirty folders, synced before, that may go, with something still to
+    /// The page's topmost dirty folders, synced before, that may go (of folders above each
+    /// other across sides, one), with something still to
     /// plan below them, on any side, in another page: they wait for it, with everything of
     /// the page below them, left as they are, and are planned with their whole dirty subtree
     /// as a page of their own next (§6.5). Planned apart, what is below read alive as context

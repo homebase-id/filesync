@@ -2860,7 +2860,7 @@ fn a_folder_let_go_here_keeps_its_base_while_what_waits_has_its_below_it() {
 /// neither for the topmost of its folders that may go (each was below the other), so neither
 /// waited for the file's page (`pages::dirty_elsewhere`), and the delete here of `a` took the
 /// file along, unchecked against any base: gone here with an edit of it, had there been one.
-/// Folders above each other each wait now, and are planned with the file.
+/// One of folders above each other waits for them now, and they are planned with the file.
 #[test]
 fn regression_folders_above_each_other_across_sides_wait_for_the_page_below_them() {
     use Action::{CreateFile, CreateFolder, DeleteStopped, IntoFile};
@@ -2914,7 +2914,18 @@ fn regression_folders_above_each_other_across_sides_wait_for_the_page_below_them
         act(0, IntoFile { pick: 8, file: 14 }),
         act(0, DeleteStopped { pick: 5, done: 3 }),
     ];
-    if let Err(e) = run_with(2, None, |sim| sim.with_small_pages(1), &events) {
-        panic!("{e}");
-    }
+    let mut sim = Sim::new(2).with_small_pages(1);
+    sim.run(&events);
+    // The shape: the file here in `d/a`; on the drive `a` removed, `d` at no place.
+    let a = sim.item(0, "d/a").expect("d/a here");
+    assert!(sim.item(0, "d/a/a").is_some(), "{:?}", sim.local_paths(0));
+    assert!(sim.is_removed(a));
+    let drive = sim.server_paths();
+    assert!(!drive.iter().any(|p| p.starts_with('d')), "{drive:?}");
+    super::settle(&mut sim);
+    let here = sim.local_paths(0);
+    assert!(
+        here.contains(&"Recovered files/d/a/a".to_string()),
+        "{here:?}"
+    );
 }

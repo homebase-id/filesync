@@ -24,9 +24,10 @@ pub trait Pending {
 
 /// What `input`'s page leaves to another page (sync semantics §6.5): its view's nodes outside
 /// the page still to plan, left as they are ([`Input::dirty_elsewhere`]); its topmost folders
-/// that may go with something below them still to plan ([`Input::going`]); and the folders
-/// above its nodes that may go and another page plans ([`Input::going_above`]). A query a
-/// 500 nodes outside the page, and one a topmost such folder.
+/// that may go with something below them still to plan ([`Input::going`]: of folders above
+/// each other across sides, one); and the folders above its nodes that may go and another
+/// page plans ([`Input::going_above`]). A query a 500 nodes outside the page, and one a
+/// topmost such folder.
 pub fn dirty_elsewhere<P: Pending>(
     input: &mut Input,
     masking: Masking<'_>,
@@ -66,10 +67,16 @@ pub fn dirty_elsewhere<P: Pending>(
         .collect();
     let mut going = HashSet::new();
     for (&folder, up) in &in_page {
-        // The topmost: one below another of them is covered by that one. Not by one it is
-        // above itself, on another side (`d/a` here, `d` in what is in `a` on the drive): of
-        // folders above each other none is the topmost, and each is asked (#520).
-        let covered = (up.iter()).any(|a| in_page.get(a).is_some_and(|its| !its.contains(&folder)));
+        // The topmost: one below another of them is covered by that one, whose subtree
+        // holds its own. Of folders above each other, across sides (`d/a` here, `d` in what
+        // is in `a` on the drive), none is the topmost: the one of the lowest id stands for
+        // them, their subtrees being one (#520: each was taken for covered, none asked).
+        let covers = |a: &NodeId| {
+            in_page
+                .get(a)
+                .is_some_and(|its| !its.contains(&folder) || *a < folder)
+        };
+        let covered = up.iter().any(covers);
         if !covered && pending.below(folder, &input.dirty)? {
             going.insert(folder);
         }
@@ -416,19 +423,18 @@ mod tests {
         }
     }
 
-    /// The folders of the page `d`, `d/a` (synced so, as here) that wait for another page,
-    /// with `drive` what the drive has of them.
-    fn going(drive: &[(NodeId, NodeState)]) -> HashSet<NodeId> {
-        let (d, a) = (id(1), id(2));
+    /// The folders of a page that wait for another page: the page's are `here`, each with the
+    /// folder it is in (synced so, as here), and `drive` is what the drive has of them, so.
+    fn going(here: &[(NodeId, NodeId)], drive: &[(NodeId, NodeId)]) -> Vec<NodeId> {
         let mut input = Input::default();
-        for tree in [&mut input.base, &mut input.local] {
-            tree.insert(d, NodeState::folder(NodeId::ROOT, "d"));
-            tree.insert(a, NodeState::folder(d, "a"));
+        for &(node, parent) in here {
+            input.base.insert(node, NodeState::folder(parent, "f"));
+            input.local.insert(node, NodeState::folder(parent, "f"));
         }
-        for (node, state) in drive {
-            input.remote.insert(*node, state.clone());
+        for &(node, parent) in drive {
+            input.remote.insert(node, NodeState::folder(parent, "f"));
         }
-        input.dirty = [d, a].into();
+        input.dirty = here.iter().map(|(node, _)| *node).collect();
         let (filter, scope) = (hbsync_local::Filter::default(), Scope::main());
         let masking = Masking {
             filter: &filter,
@@ -436,21 +442,31 @@ mod tests {
             read_only: false,
         };
         let Ok(()) = dirty_elsewhere(&mut input, masking, &mut Below);
-        input.going
+        let mut going: Vec<NodeId> = input.going.into_iter().collect();
+        going.sort();
+        going
     }
 
     /// Of a page's folders that may go, the topmost waits for what another page plans below
-    /// it, and covers those in it; of folders above each other (`d/a` here; on the drive `a`
-    /// removed, `d` left in it) each waits (#520).
+    /// it, and covers those in it. Of folders above each other (`d/a` here; on the drive `a`
+    /// removed, `d` left in it) one waits for them, the one of the lowest id (#520: none did);
+    /// a folder they are in covers them, and they cover a folder in them.
     #[test]
-    fn folders_above_each_other_wait_for_what_another_page_plans() {
-        let (d, a) = (id(1), id(2));
-        // Both gone from the drive: `d` covers `a`.
-        assert_eq!(going(&[]), [d].into());
-        assert_eq!(
-            going(&[(d, NodeState::folder(a, "d"))]),
-            [d, a].into(),
-            "each above the other"
-        );
+    fn of_folders_above_each_other_one_waits_for_what_another_page_plans() {
+        let (top, d, a, in_a) = (id(1), id(2), id(3), id(4));
+        let root = NodeId::ROOT;
+        // Gone from the drive, both: `d` covers `a`.
+        assert_eq!(going(&[(d, root), (a, d)], &[]), [d]);
+        // `d` in `a` on the drive: above each other.
+        let d_in_a = [(d, a)];
+        assert_eq!(going(&[(d, root), (a, d)], &d_in_a), [d]);
+        // Whichever has the lowest id: here `a/d`, with `a` in `d` on the drive.
+        assert_eq!(going(&[(a, root), (d, a)], &[(a, d)]), [d]);
+        // In a folder gone from the drive: that one covers both.
+        let in_top = [(top, root), (d, top), (a, d)];
+        assert_eq!(going(&in_top, &d_in_a), [top]);
+        // A folder in them, gone from the drive: covered.
+        let with_one_in = [(d, root), (a, d), (in_a, a)];
+        assert_eq!(going(&with_one_in, &d_in_a), [d]);
     }
 }
