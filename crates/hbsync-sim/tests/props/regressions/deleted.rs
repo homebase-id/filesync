@@ -2865,11 +2865,9 @@ fn a_folder_let_go_here_keeps_its_base_while_what_waits_has_its_below_it() {
 fn regression_folders_above_each_other_across_sides_wait_for_the_page_below_them() {
     use Action::{CreateFile, CreateFolder, DeleteStopped, IntoFile};
     let act = |client, action| Event::Act { client, action };
-    let (plan, step, crash) = (
-        |client| Event::Plan { client },
-        |client| Event::Step { client },
-        |client| Event::Crash { client },
-    );
+    let plan = |client| Event::Plan { client };
+    let step = |client| Event::Step { client };
+    let crash = |client| Event::Crash { client };
     let events = [
         crash(0),
         act(0, CreateFile { parent: 0, name: 9 }),
