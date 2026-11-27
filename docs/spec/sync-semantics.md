@@ -38,6 +38,14 @@ the bytes the file has here: the same hash, by the same algorithm, and size. (No
 restored over its version in Recently deleted, which sends them again.) A run counts the
 file's bytes as done once the header lands, and tells the change as sent, with no bytes.
 
+A bit changed on the drive alone is taken the same way: where the file here, at its place,
+holds the bytes of the drive's version, with its time, the bit is set on it as it is and
+nothing is fetched (#526; a download fetched them again: 200 MB, measured live, 0.45 s against
+0.05 s). The file stays the one it is. Where the download has more to do (tags the version
+changed or the item lacks, another place, another time, a bit to keep: below), where there is
+no base, or where the file doesn't take the bit so (another user's file, a volume without
+modes), it runs as any download.
+
 **The bit merges apart from the bytes, where it changed here alone.** A file whose bit
 changed here, its bytes the ones synced, is no conflict with what the drive did to it (§4), as
 a tag here and bytes there are none: the drive's bytes come down, and the file keeps the bit

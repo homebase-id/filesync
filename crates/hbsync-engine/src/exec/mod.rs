@@ -93,9 +93,11 @@ pub(crate) struct Executor<'a> {
     progress: Arc<Counters>,
     /// The transfers already in `progress`'s total.
     counted: HashSet<NodeId>,
-    /// The upload being recorded sent its header alone, the drive's file holding its bytes
-    /// ([`Executor::prepare_upload`]): set for that one record ([`Executor::commit_ran`]).
-    header_alone: bool,
+    /// The transfer being recorded moved none of its bytes, the other side holding them: an
+    /// upload that sent its header alone ([`Executor::prepare_upload`]), a download that set
+    /// the executable bit in place ([`Executor::bit_in_place`]). For the operation handled
+    /// next, which takes it ([`Executor::handle`]).
+    no_bytes: bool,
     /// The folders something goes into, looked at this run: whether each is on disk the one
     /// its row has ([`Executor::target_path`]).
     parents: HashMap<NodeId, bool>,
@@ -235,7 +237,7 @@ impl<'a> Executor<'a> {
             stop: None,
             progress: Arc::default(),
             counted: HashSet::new(),
-            header_alone: false,
+            no_bytes: false,
             parents: HashMap::new(),
             refusals: Refusals::default(),
             on_their_way: OnTheirWay::default(),
@@ -539,6 +541,8 @@ impl<'a> Executor<'a> {
         outcome: Outcome,
         gone: Option<String>,
     ) -> Result<(), StateError> {
+        // What it says of its record, if it has one: taken here, so it tells no other's.
+        let no_bytes = std::mem::take(&mut self.no_bytes);
         let (outcome, mut record) = self.refusals_after(&op, outcome)?;
         self.placement_ended(&op, &outcome)?;
         self.schedule.ended(&op, &outcome);
@@ -546,12 +550,12 @@ impl<'a> Executor<'a> {
         self.on_their_way.ended(&op, &outcome);
         match outcome {
             Outcome::Done => {
-                self.record(&op, gone)?;
+                self.record(&op, gone, no_bytes)?;
                 self.report.done += 1;
                 self.settle_done(&op)?;
             }
             Outcome::Settled => {
-                self.record(&op, gone)?;
+                self.record(&op, gone, no_bytes)?;
                 self.report.done += 1;
             }
             Outcome::Backoff(why) => self.retried(op, attempts, true, why)?,
@@ -643,7 +647,7 @@ impl<'a> Executor<'a> {
 
     /// Adds what `op` did to the report, for people: transfers, moves and deletes. `gone`:
     /// the path of an item it removed, taken before it ran (its rows may be gone now).
-    fn record(&mut self, op: &Op, gone: Option<String>) -> Result<(), StateError> {
+    fn record(&mut self, op: &Op, gone: Option<String>, no_bytes: bool) -> Result<(), StateError> {
         let Some(kind) = activity::kind_of(op) else {
             return Ok(());
         };
@@ -653,9 +657,9 @@ impl<'a> Executor<'a> {
             Some(path) => (Some(path), 0),
             None => self.db.read(|s| {
                 Ok(match s.local_by_node(node)? {
-                    // An upload that sent its header alone sent none of the bytes counted
-                    // for it (`count_bytes`): they are done, and none are told.
-                    Some(row) if self.header_alone => {
+                    // None of the bytes counted for it moved (`count_bytes`): they are done,
+                    // and none are told.
+                    Some(row) if no_bytes => {
                         let counted = row.fingerprint.size;
                         self.progress
                             .bytes_done
@@ -857,10 +861,9 @@ impl<'a> Executor<'a> {
         }
         for (op, attempts, gone, ctx, job, result) in rest {
             // An upload whose job was a header write (`prepare_upload`): recorded as one.
-            self.header_alone = op.uploads() && matches!(ctx, Ctx::Meta { .. });
+            self.no_bytes = op.uploads() && matches!(ctx, Ctx::Meta { .. });
             let outcome = self.commit(ctx, job, result).unwrap_or_else(|o| o);
             self.handle(op, attempts, outcome, gone)?;
-            self.header_alone = false;
         }
         Ok(())
     }
