@@ -132,13 +132,14 @@ impl Executor<'_> {
         tags: &Tags,
         drive: Option<&DriveVersion>,
     ) -> Step<(Job, Ctx)> {
-        let (mirror, current, base_at) = self.db.read(|s| {
+        let (mirror, mut current, base) = self.db.read(|s| {
             Ok((
                 s.get_mirror(node)?,
                 s.local_by_node(node)?,
-                s.get_base(node)?.map(|b| b.remote.version),
+                s.get_base(node)?,
             ))
         })?;
+        let base_at = base.as_ref().map(|b| b.remote.version);
         let Some(mirror) = mirror else {
             return Err(Outcome::stale("gone remotely"));
         };
@@ -179,6 +180,26 @@ impl Executor<'_> {
                 DriveVersion::of(&mirror, base_at).ok_or_else(|| Outcome::stale("not a file"))?
             }
         };
+        // The item at its place holds the drive's bytes already, of the drive's time: the
+        // executable bit is all there is to take, and it is set on the file as it is, nothing
+        // fetched (#526). Not where the download does more: tags the version changed (the
+        // base records what a download writes of them) or that the item lacks, a bit to keep,
+        // a node without a base. Where the file doesn't take the bit so, the download runs,
+        // over the item as that left it.
+        if let (Some(row), Some(base)) = (&mut current, &base)
+            && !keep_x
+            && row.path == target
+            && (row.hash, row.fingerprint.size) == (Some(expected), file.size)
+            && Some(row.fingerprint.mtime_ns.div_euclid(1_000_000)) == file.mtime_ms
+            && base.state.tags == acted.state.tags
+            && match &row.tags {
+                Some(on_item) => *on_item == tags.held_by(self.folder.os),
+                None => !self.disk.tags_kept(),
+            }
+            && let Some(done) = self.bit_in_place(row, name, file.executable, &acted)?
+        {
+            return Err(done);
+        }
         // It claims the tags it is to write (the empty set too), as they read back once
         // written: where the volume keeps none, not known.
         let kept = self.disk.tags_kept();

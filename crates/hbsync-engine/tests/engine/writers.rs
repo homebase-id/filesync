@@ -301,6 +301,75 @@ fn the_executable_bit_alone_sends_no_bytes() -> R {
     Ok(())
 }
 
+/// A change of the executable bit alone on the drive is taken here without the file's bytes
+/// read again (#526): this device holds them, so the bit is set on the file as it is (the
+/// same file, not a new one put in its place). The bytes the run counted for it are done, and
+/// it is told as taken with none. Nothing goes back up. A change of the bytes with the bit
+/// comes down as before.
+#[cfg(unix)]
+#[test]
+fn the_executable_bit_alone_reads_no_bytes() -> R {
+    use std::os::unix::fs::PermissionsExt;
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    let mut b = Client::new(&server, "b")?;
+    a.write("run.sh", "echo")?;
+    a.sync()?;
+    b.sync()?;
+    let file_of = |c: &Client| hbsync_platform::stat(&c.root.join("run.sh")).map(|m| m.file_id);
+    for (x, mode) in [(true, 0o755), (false, 0o644)] {
+        fs::set_permissions(a.root.join("run.sh"), fs::Permissions::from_mode(mode))?;
+        a.sync()?;
+        let on_drive = common::header_named(&server, "run.sh").version;
+        let was = file_of(&b)?;
+        b.remote.faults().reads = 0;
+        b.engine.scan_local()?;
+        let report = b.engine.sync_once("2026-10-08")?;
+        assert!(report.failed.is_empty(), "{report:?}");
+        assert_eq!(b.remote.faults().reads, 0, "no bytes read for the bit");
+        assert_eq!(common::executable(&b.root.join("run.sh"))?, x);
+        assert_eq!(b.read_text("run.sh")?, "echo");
+        assert_eq!(
+            file_of(&b)?,
+            was,
+            "the file as it was, not another in its place"
+        );
+        let progress = b.engine.progress().get();
+        assert_eq!((progress.bytes_done, progress.bytes_total), (4, 4));
+        let told: Vec<_> = report.synced.iter().map(|s| (s.kind, s.bytes)).collect();
+        assert_eq!(told, [(hbsync_types::activity::SyncedKind::Downloaded, 0)]);
+        assert!(b.engine.sync_once("2026-10-08")?.is_idle(), "settled");
+        b.sync()?;
+        let now = common::header_named(&server, "run.sh").version;
+        assert_eq!(now, on_drive, "nothing sent back");
+    }
+    a.write("run.sh", "echo more")?;
+    fs::set_permissions(a.root.join("run.sh"), fs::Permissions::from_mode(0o755))?;
+    a.sync()?;
+    b.remote.faults().reads = 0;
+    b.sync()?;
+    assert_eq!(b.remote.faults().reads, 1, "the edit's bytes");
+    assert_eq!(b.read_text("run.sh")?, "echo more");
+    assert!(common::executable(&b.root.join("run.sh"))?);
+
+    // The bit with the file's time changed (a `touch`): a download, which gives it the time.
+    let then = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+    let file = fs::File::options()
+        .write(true)
+        .open(a.root.join("run.sh"))?;
+    file.set_modified(then)?;
+    drop(file);
+    fs::set_permissions(a.root.join("run.sh"), fs::Permissions::from_mode(0o644))?;
+    a.sync()?;
+    b.remote.faults().reads = 0;
+    b.sync()?;
+    assert_eq!(b.remote.faults().reads, 1, "fetched, for its time");
+    assert_eq!(fs::metadata(b.root.join("run.sh"))?.modified()?, then);
+    assert!(!common::executable(&b.root.join("run.sh"))?);
+    assert!(b.engine.sync_once("2026-10-08")?.is_idle());
+    Ok(())
+}
+
 /// A conflict copy keeps the node's base for the run's remote writes (§5): this device's removal
 /// of a tag, made with its edit, reaches the drive's version that won the edits (the remote
 /// write merges its tags against the base). The conflict's download comes in the same run.
