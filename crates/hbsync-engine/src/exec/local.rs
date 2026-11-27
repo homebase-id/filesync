@@ -448,6 +448,32 @@ impl Executor<'_> {
         })
     }
 
+    /// Gives the file of `row`, which holds the bytes of the drive's version `acted`, that
+    /// version's executable bit (`x`, as this device holds it under `name`: §1) where it is: a
+    /// download with nothing to fetch ([`Executor::prepare_download`]). The file stays the
+    /// one it is; its row takes the change time the bit moved, and the base settles at the
+    /// version. A file that changed otherwise meanwhile is read again.
+    pub(super) fn bit_in_place(
+        &mut self,
+        row: &LocalRow,
+        name: &str,
+        x: bool,
+        acted: &DriveVersion,
+    ) -> Step {
+        let at = self.disk.abs(&row.path);
+        let x = executable_on_disk(self.folder.os, name, x);
+        if let Err(e) = ops::set_executable(&at, x) {
+            return Ok(io_outcome(e));
+        }
+        let Some(refreshed) = self.renamed(row, &row.path) else {
+            return Ok(rescan(&mut self.report, &row.path));
+        };
+        // None of the bytes counted for the download were fetched (`Executor::record`).
+        self.no_bytes = true;
+        let how = Settle::acted(row.node, Some(acted), TagWrite::Nothing);
+        self.finish(&[how], |s| s.folder().put_local(&refreshed))
+    }
+
     /// See [`renamed_row`].
     pub(super) fn renamed(&self, old: &LocalRow, path: &RelPath) -> Option<LocalRow> {
         renamed_row(self.disk.root(), old, path)

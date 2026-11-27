@@ -93,9 +93,10 @@ pub(crate) struct Executor<'a> {
     progress: Arc<Counters>,
     /// The transfers already in `progress`'s total.
     counted: HashSet<NodeId>,
-    /// The upload being recorded sent its header alone, the drive's file holding its bytes
-    /// ([`Executor::prepare_upload`]): set for that one record ([`Executor::commit_ran`]).
-    header_alone: bool,
+    /// The transfer being recorded moved none of its bytes, the other side holding them: an
+    /// upload that sent its header alone ([`Executor::prepare_upload`]), a download that set
+    /// the executable bit in place ([`Executor::bit_in_place`]). Set for that one record.
+    no_bytes: bool,
     /// The folders something goes into, looked at this run: whether each is on disk the one
     /// its row has ([`Executor::target_path`]).
     parents: HashMap<NodeId, bool>,
@@ -235,7 +236,7 @@ impl<'a> Executor<'a> {
             stop: None,
             progress: Arc::default(),
             counted: HashSet::new(),
-            header_alone: false,
+            no_bytes: false,
             parents: HashMap::new(),
             refusals: Refusals::default(),
             on_their_way: OnTheirWay::default(),
@@ -416,7 +417,12 @@ impl<'a> Executor<'a> {
                         },
                         target,
                     ),
-                    Err(outcome) => self.handle(op, attempts, outcome, gone)?,
+                    // (A download with nothing to fetch says so for its record:
+                    // `bit_in_place`.)
+                    Err(outcome) => {
+                        self.handle(op, attempts, outcome, gone)?;
+                        self.no_bytes = false;
+                    }
                 }
                 continue;
             }
@@ -653,9 +659,9 @@ impl<'a> Executor<'a> {
             Some(path) => (Some(path), 0),
             None => self.db.read(|s| {
                 Ok(match s.local_by_node(node)? {
-                    // An upload that sent its header alone sent none of the bytes counted
-                    // for it (`count_bytes`): they are done, and none are told.
-                    Some(row) if self.header_alone => {
+                    // None of the bytes counted for it moved (`count_bytes`): they are done,
+                    // and none are told.
+                    Some(row) if self.no_bytes => {
                         let counted = row.fingerprint.size;
                         self.progress
                             .bytes_done
@@ -857,10 +863,10 @@ impl<'a> Executor<'a> {
         }
         for (op, attempts, gone, ctx, job, result) in rest {
             // An upload whose job was a header write (`prepare_upload`): recorded as one.
-            self.header_alone = op.uploads() && matches!(ctx, Ctx::Meta { .. });
+            self.no_bytes = op.uploads() && matches!(ctx, Ctx::Meta { .. });
             let outcome = self.commit(ctx, job, result).unwrap_or_else(|o| o);
             self.handle(op, attempts, outcome, gone)?;
-            self.header_alone = false;
+            self.no_bytes = false;
         }
         Ok(())
     }

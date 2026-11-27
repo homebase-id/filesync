@@ -179,6 +179,20 @@ impl Executor<'_> {
                 DriveVersion::of(&mirror, base_at).ok_or_else(|| Outcome::stale("not a file"))?
             }
         };
+        // The item at its place holds the drive's bytes already: the executable bit is all
+        // there is to take, and it is set on the file as it is, nothing fetched (#526). Not
+        // where the download does more (tags to write, a bit to keep), nor without a base.
+        if let Some(row) = &current
+            && replace
+            && !keep_x
+            && base_at.is_some()
+            && row.path == target
+            && (row.hash, row.fingerprint.size) == (Some(expected), file.size)
+            && row.tags.as_ref() == Some(&tags.held_by(self.folder.os))
+        {
+            let done = self.bit_in_place(row, name, file.executable, &acted);
+            return Err(done.unwrap_or_else(|o| o));
+        }
         // It claims the tags it is to write (the empty set too), as they read back once
         // written: where the volume keeps none, not known.
         let kept = self.disk.tags_kept();
