@@ -219,6 +219,26 @@ fn scenarios(run: &str, a: &mut Client, b: &mut Client) -> Res<()> {
         "the large file arrived intact"
     );
 
+    // An executable bit changed alone: the header is written over the payload the drive
+    // holds, which stays (the file reads the same on b).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let executable = |c: &Client| -> Res<bool> {
+            Ok(hbsync_platform::stat(&c.root.join(at("big.bin")))?.executable == Some(true))
+        };
+        fs::set_permissions(
+            a.root.join(at("big.bin")),
+            fs::Permissions::from_mode(0o755),
+        )?;
+        let report = a.sync()?;
+        let bytes: u64 = report.synced.iter().map(|s| s.bytes).sum();
+        assert_eq!(bytes, 0, "no bytes sent for the bit: {report:?}");
+        b.sync()?;
+        assert!(executable(b)?, "the bit arrived");
+        assert!(b.read(&at("big.bin"))? == big, "with the bytes it had");
+    }
+
     // Edit on one side, rename and move on the other.
     a.write(&at("doc.txt"), "v2")?;
     fs::rename(b.root.join(at("sub")), b.root.join(at("sub2")))?;

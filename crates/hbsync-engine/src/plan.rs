@@ -408,7 +408,9 @@ impl Op {
         matches!(self, Op::LocalDownload { .. }) || self.uploads()
     }
 
-    /// Whether it sends the local item's bytes.
+    /// Whether it sends the local item's content: its bytes, or its header alone where the
+    /// drive's file holds them (an executable bit changed alone: the executor's
+    /// `prepare_upload`).
     pub fn uploads(&self) -> bool {
         matches!(
             self,

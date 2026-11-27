@@ -166,7 +166,8 @@ pub enum Job {
         seen: Fingerprint,
     },
     /// Writes `meta` without bytes: a create, or with `target` an update of that node at that
-    /// version (a folder restored, a rename or move, tags, a removal).
+    /// version (a folder restored, a rename or move, tags, a removal, an executable bit
+    /// changed alone).
     Meta {
         meta: NodeMeta,
         target: Option<Target>,

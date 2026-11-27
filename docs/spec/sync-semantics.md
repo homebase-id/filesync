@@ -31,6 +31,13 @@ set. A move that changes whether the bit is held gives the file what it holds no
 renamed into a launcher loses its bit, a launcher renamed into another name takes the drive's.
 Launchers that an earlier version put in place executable stay so.
 
+A bit changed here alone goes up as a write of the file's header, as a rename does: the drive
+holds the bytes, and keeps them (#519; they went up again, all of them: 200 MB, measured
+live, 4.3 s against 0.13 s). So for any update of a file whose version on the drive holds
+the bytes the file has here: the same hash, by the same algorithm, and size. (Not yet a file
+restored over its version in Recently deleted, which sends them again.) A run counts the
+file's bytes as done once the header lands, and tells the change as sent, with no bytes.
+
 **The bit merges apart from the bytes, where it changed here alone.** A file whose bit
 changed here, its bytes the ones synced, is no conflict with what the drive did to it (§4), as
 a tag here and bytes there are none: the drive's bytes come down, and the file keeps the bit

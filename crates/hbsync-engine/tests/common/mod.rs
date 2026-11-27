@@ -154,6 +154,19 @@ pub(crate) fn gone_unheard(
     Ok(at.file_id)
 }
 
+/// Whether the drive has the file named `name` as executable (`x`).
+pub(crate) fn x_on_drive(server: &Arc<Mutex<FakeServer>>, name: &str) -> bool {
+    match header_named(server, name).body {
+        hbsync_remote::RemoteBody::Live { content, .. } => content.x,
+        hbsync_remote::RemoteBody::Deleted => false,
+    }
+}
+
+/// Whether the file at `path` is executable here (not where the OS has no such bit).
+pub(crate) fn executable(path: &std::path::Path) -> Res<bool> {
+    Ok(hbsync_platform::stat(path)?.executable == Some(true))
+}
+
 /// The header of the file named `name` on the server, live or removed.
 pub(crate) fn header_named(
     server: &Arc<Mutex<FakeServer>>,

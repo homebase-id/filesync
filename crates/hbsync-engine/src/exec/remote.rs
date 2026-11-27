@@ -8,7 +8,8 @@ use crate::mirror;
 pub(super) enum After {
     /// A folder created, or restored from Recently deleted.
     Created,
-    /// Renamed, moved or tagged.
+    /// Renamed, moved or tagged; or a file's header written over the bytes the drive holds
+    /// (its executable bit changed alone).
     Updated,
     /// Moved to Recently deleted: its mirror row (`file_id`) goes, its removed row comes.
     Removed { file_id: hbsync_types::RemoteFileId },
@@ -211,7 +212,7 @@ pub(super) fn answer(
 
 /// The job and the commit context of a metadata write; `from`: the folder the node leaves
 /// (its parent on the drive now), if any.
-fn meta_job(
+pub(super) fn meta_job(
     meta: NodeMeta,
     target: Option<Target>,
     hash: Option<hbsync_types::ContentHash>,

@@ -174,7 +174,6 @@ fn a_tag_stays_where_its_folder_is_made_again_without_it() -> R {
 #[cfg(unix)]
 #[test]
 fn the_executable_bit_stays_where_its_file_is_made_again_without_it() -> R {
-    use hbsync_remote::RemoteBody;
     use std::os::unix::fs::PermissionsExt;
     let server = server();
     let mut a = Client::new(&server, "a")?;
@@ -183,13 +182,8 @@ fn the_executable_bit_stays_where_its_file_is_made_again_without_it() -> R {
     fs::set_permissions(a.root.join("run.sh"), fs::Permissions::from_mode(0o755))?;
     a.sync()?;
     b.sync()?;
-    let executable = |c: &Client| -> common::Res<bool> {
-        Ok(fs::metadata(c.root.join("run.sh"))?.permissions().mode() & 0o111 != 0)
-    };
-    let on_drive = || match common::header_named(&server, "run.sh").body {
-        RemoteBody::Live { content, .. } => content.x,
-        RemoteBody::Deleted => false,
-    };
+    let executable = |c: &Client| common::executable(&c.root.join("run.sh"));
+    let on_drive = || common::x_on_drive(&server, "run.sh");
     assert!(executable(&b)? && on_drive());
 
     // Made again, without the bit.
@@ -227,17 +221,13 @@ fn the_executable_bit_stays_where_its_file_is_made_again_without_it() -> R {
 #[cfg(unix)]
 #[test]
 fn the_executable_bit_stays_where_its_file_is_made_again_with_the_same_bytes() -> R {
-    use hbsync_remote::RemoteBody;
     use std::os::unix::fs::PermissionsExt;
     let server = server();
     let mut a = Client::new(&server, "a")?;
     a.write("run.sh", "echo old")?;
     fs::set_permissions(a.root.join("run.sh"), fs::Permissions::from_mode(0o755))?;
     a.sync()?;
-    let on_drive = || match common::header_named(&server, "run.sh").body {
-        RemoteBody::Live { content, .. } => content.x,
-        RemoteBody::Deleted => false,
-    };
+    let on_drive = || common::x_on_drive(&server, "run.sh");
     assert!(on_drive());
     let node = {
         let was = common::header_named(&server, "run.sh");
@@ -253,13 +243,61 @@ fn the_executable_bit_stays_where_its_file_is_made_again_with_the_same_bytes() -
     assert!(report.failed.is_empty(), "{report:?}");
     assert!(report.conflicts.is_empty(), "{report:?}");
     assert_eq!(a.read_text("run.sh")?, "echo old");
-    let mode = fs::metadata(a.root.join("run.sh"))?.permissions().mode();
-    assert!(mode & 0o111 != 0, "kept where it was held");
+    let kept = common::executable(&a.root.join("run.sh"))?;
+    assert!(kept, "kept where it was held");
     assert!(on_drive(), "and sent up");
     let now = common::header_named(&server, "run.sh");
     assert_eq!(now.node(), Some(node), "the same node: nothing detached");
     assert_eq!(server.lock().map_err(|_| "poisoned")?.live().count(), 1);
     assert!(a.engine.sync_once("2026-10-08")?.is_idle());
+    Ok(())
+}
+
+/// A change of the executable bit alone sends no bytes (#519): the drive holds the file's, so
+/// its header alone is written, as a rename's; the bytes the run counted for it are done, and
+/// it is told as sent with none. Set and taken off again, the file stays the same one with the
+/// same bytes, and the other device has the bit. An edit after it sends its bytes.
+#[cfg(unix)]
+#[test]
+fn the_executable_bit_alone_sends_no_bytes() -> R {
+    use std::os::unix::fs::PermissionsExt;
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    let mut b = Client::new(&server, "b")?;
+    a.write("run.sh", "echo")?;
+    a.sync()?;
+    b.sync()?;
+    for (x, mode) in [(true, 0o755), (false, 0o644)] {
+        let was = common::header_named(&server, "run.sh");
+        a.remote.faults().uploads = 0;
+        fs::set_permissions(a.root.join("run.sh"), fs::Permissions::from_mode(mode))?;
+        a.engine.scan_local()?;
+        let report = a.engine.sync_once("2026-10-08")?;
+        assert!(report.failed.is_empty(), "{report:?}");
+        assert_eq!(a.remote.faults().uploads, 0, "no bytes sent for the bit");
+        let progress = a.engine.progress().get();
+        assert_eq!((progress.bytes_done, progress.bytes_total), (4, 4));
+        assert_eq!((progress.files_done, progress.files_total), (1, 1));
+        let told: Vec<_> = report.synced.iter().map(|s| (s.kind, s.bytes)).collect();
+        assert_eq!(told, [(hbsync_types::activity::SyncedKind::Uploaded, 0)]);
+        let now = common::header_named(&server, "run.sh");
+        assert_eq!(common::x_on_drive(&server, "run.sh"), x);
+        assert_eq!(now.file_id, was.file_id, "the same file");
+        assert_ne!(now.version, was.version, "a new version of its header");
+        assert!(a.engine.sync_once("2026-10-08")?.is_idle(), "settled");
+
+        b.sync()?;
+        assert_eq!(common::executable(&b.root.join("run.sh"))?, x);
+        assert_eq!(b.read_text("run.sh")?, "echo");
+        assert!(b.engine.sync_once("2026-10-08")?.is_idle());
+    }
+    a.write("run.sh", "echo more")?;
+    let report = a.sync()?;
+    assert_eq!(a.remote.faults().uploads, 1, "the edit's bytes");
+    let told: Vec<u64> = report.synced.iter().map(|s| s.bytes).collect();
+    assert_eq!(told, [9], "{report:?}");
+    b.sync()?;
+    assert_eq!(b.read_text("run.sh")?, "echo more");
     Ok(())
 }
 

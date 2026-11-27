@@ -137,10 +137,7 @@ fn executable_bit_syncs() -> R {
     fs::set_permissions(a.root.join("run.sh"), fs::Permissions::from_mode(0o755))?;
     a.sync()?;
     b.sync()?;
-    assert_eq!(
-        fs::metadata(b.root.join("run.sh"))?.permissions().mode() & 0o111,
-        0o111
-    );
+    assert!(common::executable(&b.root.join("run.sh"))?);
     Ok(())
 }
 
@@ -204,9 +201,7 @@ fn a_launcher_never_arrives_executable_on_linux() -> R {
             })
             .collect())
     };
-    let executable = |c: &Client, name: &str| -> std::io::Result<bool> {
-        Ok(fs::metadata(c.root.join(name))?.permissions().mode() & 0o111 != 0)
-    };
+    let executable = |c: &Client, name: &str| common::executable(&c.root.join(name));
     let mut a = Client::with_config(&server, "a", |_| {})?;
     let mut b = Client::with_config(&server, "b", |_| {})?;
     for name in ["run.sh", "mine.desktop"] {
