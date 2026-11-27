@@ -338,15 +338,29 @@ impl Executor<'_> {
             Some(had) => content.set_tags_over(&tags, had),
             None => content.set_tags(&tags),
         }
-        let from = existing.and(mirror.map(|m| m.parent));
+        let from = existing.and(mirror.as_ref().map(|m| m.parent));
+        let meta = NodeMeta {
+            node,
+            parent,
+            kind,
+            content,
+            removed: false,
+        };
+        // The drive's file holds these bytes already (the executable bit changed here): the
+        // header alone goes, as a rename's, and the payload stays (#519: all of it was sent
+        // again for the bit).
+        let held = mirror
+            .as_ref()
+            .and_then(|m| m.file)
+            .map(|f| (f.hash, f.size));
+        if let (Some(_), Some(known)) = (existing, hash.known())
+            && held == Some((known, size))
+        {
+            let after = remote::After::Updated;
+            return Ok(remote::meta_job(meta, target, Some(known), from, after));
+        }
         let job = Job::Upload {
-            meta: NodeMeta {
-                node,
-                parent,
-                kind,
-                content,
-                removed: false,
-            },
+            meta,
             target,
             from,
             path,

@@ -211,7 +211,7 @@ pub(super) fn answer(
 
 /// The job and the commit context of a metadata write; `from`: the folder the node leaves
 /// (its parent on the drive now), if any.
-fn meta_job(
+pub(super) fn meta_job(
     meta: NodeMeta,
     target: Option<Target>,
     hash: Option<hbsync_types::ContentHash>,
