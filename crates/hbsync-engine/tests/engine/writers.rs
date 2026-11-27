@@ -301,6 +301,32 @@ fn the_executable_bit_alone_sends_no_bytes() -> R {
     Ok(())
 }
 
+/// A bit changed on a file whose folder was renamed before the next sync goes up with the
+/// folder's move, and the other device has both (#529: the move synced, the bit never did,
+/// and both devices read as settled).
+#[cfg(unix)]
+#[test]
+fn an_executable_bit_changed_with_its_folders_move_syncs() -> R {
+    use std::os::unix::fs::PermissionsExt;
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    let mut b = Client::new(&server, "b")?;
+    a.write("tools/run.sh", "echo")?;
+    a.sync()?;
+    b.sync()?;
+    fs::rename(a.root.join("tools"), a.root.join("bin"))?;
+    fs::set_permissions(a.root.join("bin/run.sh"), fs::Permissions::from_mode(0o755))?;
+    a.sync()?;
+    assert!(common::x_on_drive(&server, "run.sh"), "the bit went up");
+    b.sync()?;
+    assert_eq!(b.tree_text(""), ["bin/", "bin/run.sh = echo"]);
+    assert!(common::executable(&b.root.join("bin/run.sh"))?);
+    for client in [&mut a, &mut b] {
+        assert!(client.engine.sync_once("2026-10-08")?.is_idle());
+    }
+    Ok(())
+}
+
 /// A conflict copy keeps the node's base for the run's remote writes (§5): this device's removal
 /// of a tag, made with its edit, reaches the drive's version that won the edits (the remote
 /// write merges its tags against the base). The conflict's download comes in the same run.

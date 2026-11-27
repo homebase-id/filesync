@@ -937,10 +937,7 @@ fn resolve(
             };
             content_changed = new.hash.is_none() || new.hash != row.hash;
         }
-        let x_changed = row.kind == NodeKind::File
-            && meta.executable.is_some()
-            && meta.executable != row.executable;
-        if content_changed || x_changed || tags_changed {
+        if content_changed || x_changed(&row, &meta) || tags_changed {
             report.modified += 1;
             plan.dirty.push(row.node);
         }
@@ -981,7 +978,9 @@ fn resolve(
         };
         let old = &removed[i];
         let (mut new, tags_changed) = row_from(&path, &meta, old.hash, old.node, Some(old));
-        if tags_changed {
+        // Its executable bit too: a file that moved with its folder is no change of its own
+        // otherwise, and its row's new change time would hide the bit from every later scan.
+        if tags_changed || x_changed(old, &meta) {
             plan.dirty.push(old.node);
         }
         if old.kind == NodeKind::File {
@@ -1098,7 +1097,7 @@ fn resolve(
             let old = &removed[i];
             moved.push((old.clone(), path.clone()));
             let (new, tags_changed) = row_from(&path, &meta, hash, old.node, Some(old));
-            if tags_changed {
+            if tags_changed || x_changed(old, &meta) {
                 plan.dirty.push(old.node);
             }
             plan.put_rows.push(new);
@@ -1170,6 +1169,12 @@ fn parent_node(
 /// Whether tags read as `new` differ from `old`. No tags where none were known (no tags on this
 /// system, or the read failed) aren't a change. Tags that can't be read now are the ones known
 /// before, so that removing every tag later is still seen.
+/// Whether the file of `row` has another executable bit on disk (`meta`) than its row: a
+/// change to sync, at its place or moved (where the OS has such a bit).
+fn x_changed(row: &LocalRow, meta: &LocalMeta) -> bool {
+    row.kind == NodeKind::File && meta.executable.is_some() && meta.executable != row.executable
+}
+
 fn tags_changed(old: &Option<Tags>, new: &Option<Tags>) -> bool {
     match (old, new) {
         (None, new) => new.as_ref().is_some_and(|t| !t.is_empty()),

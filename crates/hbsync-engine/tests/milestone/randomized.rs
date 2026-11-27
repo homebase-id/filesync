@@ -23,6 +23,49 @@ fn randomized_two_client_convergence() -> R {
     Ok(())
 }
 
+/// The users set and take off executable bits too, on either client, between their other
+/// work and the syncs, beside edits, moves and deletes of the same files. The clients converge
+/// without loss, and each file has the bit alike on both. (Seed 393: a bit changed on a file
+/// whose folder was moved since the last scan never went up, #529.)
+#[cfg(unix)]
+#[test]
+fn randomized_executable_bits() -> R {
+    use std::os::unix::fs::PermissionsExt;
+    let flip = |root: &Path, rng: &mut Rng| -> std::io::Result<()> {
+        let (_, files) = entries(root);
+        if files.is_empty() {
+            return Ok(());
+        }
+        let at = root.join(&files[rng.below(files.len())]);
+        let mode = fs::metadata(&at)?.permissions().mode();
+        fs::set_permissions(at, fs::Permissions::from_mode(mode ^ 0o111))
+    };
+    each_seed(seeds(), |seed| {
+        let server = server();
+        let [mut a, mut b] = pair(&server)?;
+        let mut rng = Rng(seed);
+        let mut ledger = Ledger::default();
+        for _ in 0..40 {
+            match rng.below(6) {
+                0 => act(&a.root, &mut rng, &mut ledger)?,
+                1 => act(&b.root, &mut rng, &mut ledger)?,
+                2 => flip(&a.root, &mut rng)?,
+                3 => flip(&b.root, &mut rng)?,
+                4 => sync(&mut a, &mut ledger)?,
+                _ => sync(&mut b, &mut ledger)?,
+            }
+        }
+        converged(&mut a, &mut b, &ledger, &server)?;
+        let (_, files) = entries(&a.root);
+        for file in files {
+            let on = |c: &Client| common::executable(&c.root.join(&file));
+            assert_eq!(on(&a)?, on(&b)?, "the bit of {file:?} differs");
+        }
+        Ok(())
+    })?;
+    Ok(())
+}
+
 /// The identity says now and then, for one sync of a client, that the files it asks about
 /// aren't there (its own 404 to writes and header reads, a hiccup; sync semantics §8b), once per
 /// client, while the users work and time goes on between syncs: a file the identity said gone
